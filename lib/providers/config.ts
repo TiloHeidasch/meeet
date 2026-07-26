@@ -72,16 +72,6 @@ export function readProviderConfig(
     );
   }
 
-  if (requestedMode === "mvg-direct-transit") {
-    rejectDirectProviderConfiguration(env);
-    const deployment = env.MEEET_PROVIDER_DEPLOYMENT?.trim();
-    if (deployment && deployment !== "unknown") {
-      throw new ProviderConfigurationError(
-        "MEEET_PROVIDER_DEPLOYMENT must be omitted or unknown in mvg-direct-transit mode.",
-      );
-    }
-  }
-
   // Direct MVG routing has a fixed server-side origin. Provider endpoint,
   // token, and source metadata variables are rejected in this mode rather
   // than allowing an alternate integration to be silently ignored.
@@ -109,9 +99,20 @@ export function readProviderConfig(
   const mode: ProviderMode =
     requestedMode === "mvg-direct-transit"
       ? "mvg-direct-transit"
-      : requestedMode === "fixture" || (!requestedMode && !hasConfiguredEndpoint)
+      : requestedMode === "fixture"
       ? "fixture"
+      : !requestedMode && !hasConfiguredEndpoint
+      ? "mvg-direct-transit"
       : "configured";
+  if (mode === "mvg-direct-transit") {
+    rejectDirectProviderConfiguration(env);
+    const deployment = env.MEEET_PROVIDER_DEPLOYMENT?.trim();
+    if (deployment && deployment !== "unknown") {
+      throw new ProviderConfigurationError(
+        "MEEET_PROVIDER_DEPLOYMENT must be omitted or unknown in mvg-direct-transit mode.",
+      );
+    }
+  }
   const deployment = readDeployment(env.MEEET_PROVIDER_DEPLOYMENT);
   if (requestedMode === "fixture" && hasConfiguredEndpoint) {
     throw new ProviderConfigurationError(

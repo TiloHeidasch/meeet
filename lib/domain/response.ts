@@ -418,11 +418,16 @@ function validateProviderDescriptor(value: unknown, role: "geocoding" | "routing
   if (value.deployment !== "fixture" && value.dataKind === "demo-static") issues.push(issue(path, "contradictory_provenance", "Configured providers cannot report fixture/static data."));
   if (typeof value.liveData !== "boolean") issues.push(issue(path.concat("liveData"), "invalid_type", "liveData must be boolean."));
   if (value.name === DIRECT_MVG_PROVIDER) {
-    if (value.dataKind !== "scheduled") {
-      issues.push(issue(path.concat("dataKind"), "invalid_value", "Direct MVG routing must be scheduled."));
+    if (value.deployment !== "unknown") {
+      issues.push(issue(path.concat("deployment"), "invalid_value", "Direct MVG routing must use unknown deployment."));
     }
-    if (value.liveData !== false) {
-      issues.push(issue(path.concat("liveData"), "invalid_value", "Direct MVG routing must be scheduled-only."));
+    if (
+      !(
+        (value.dataKind === "scheduled" && value.liveData === false) ||
+        (value.dataKind === "live" && value.liveData === true)
+      )
+    ) {
+      issues.push(issue(path, "invalid_value", "Direct MVG routing dataKind/liveData must be scheduled/false or live/true."));
     }
   }
   validateString(value.asOf, path.concat("asOf"), issues, 1);
@@ -452,8 +457,13 @@ function validateProviderProvenance(value: unknown, role: "geocoding" | "routing
     if (value.deployment !== "unknown") {
       issues.push(issue(path.concat("deployment"), "invalid_value", "Direct MVG routing must use unknown deployment provenance."));
     }
-    if (value.dataKind !== "scheduled") {
-      issues.push(issue(path.concat("dataKind"), "invalid_value", "Direct MVG provenance must be scheduled."));
+    if (
+      !(
+        (value.dataKind === "scheduled" && value.liveData === false) ||
+        (value.dataKind === "live" && value.liveData === true)
+      )
+    ) {
+      issues.push(issue(path, "invalid_value", "Direct MVG provenance dataKind/liveData must be scheduled/false or live/true."));
     }
     if (value.sourceUrl !== DIRECT_MVG_SOURCE_URL) {
       issues.push(issue(path.concat("sourceUrl"), "invalid_value", "Direct MVG provenance must use the fixed BGW PT v3 source URL."));
@@ -461,21 +471,20 @@ function validateProviderProvenance(value: unknown, role: "geocoding" | "routing
     if (value.license !== null) {
       issues.push(issue(path.concat("license"), "invalid_value", "Direct MVG provenance must not claim an unverified licence."));
     }
-    if (value.liveData !== false) {
-      issues.push(issue(path.concat("liveData"), "invalid_value", "Direct MVG routing must be labelled scheduled-only."));
-    }
     if (value.feeds !== null) {
       issues.push(issue(path.concat("feeds"), "invalid_value", "Direct MVG routing does not claim MVG or MVV feed provenance."));
     }
     if (
       !String(value.attribution).toLowerCase().includes("unofficial") ||
       !String(value.notes).toLowerCase().includes("no sla") ||
+      !String(value.attribution).toLowerCase().includes("realtime is used when supplied") ||
       !String(value.attribution).toLowerCase().includes("planned timestamps used") ||
-      !String(value.attribution).toLowerCase().includes("realtime fields ignored") ||
+      !String(value.notes).toLowerCase().includes("realtime is used when supplied") ||
       !String(value.notes).toLowerCase().includes("planned timestamps used") ||
-      !String(value.notes).toLowerCase().includes("realtime fields ignored")
+      !String(value.attribution).toLowerCase().includes("as the fallback") ||
+      !String(value.notes).toLowerCase().includes("as the fallback")
     ) {
-      issues.push(issue(path, "incomplete_provenance", "Direct MVG provenance must disclose its unofficial, no-SLA, scheduled-only status."));
+      issues.push(issue(path, "incomplete_provenance", "Direct MVG provenance must disclose its unofficial, no-SLA, realtime-when-supplied, planned-time-fallback status."));
     }
     validateIsoInstant(value.retrievedAt, path.concat("retrievedAt"), issues);
   } else if (role === "routing" && value.dataKind === "scheduled") validateFeeds(value.feeds, path.concat("feeds"), issues);

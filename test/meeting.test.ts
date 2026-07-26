@@ -37,6 +37,9 @@ import {
 } from "../lib/providers/http.ts";
 import { validateMeetingCalculationResponse } from "../lib/domain/response.ts";
 
+// API tests use deterministic providers; the production no-mode default is direct MVG.
+process.env.MEEET_PROVIDER_MODE = "fixture";
+
 const MARIENPLATZ: LocationCoordinate = {
   latitude: 48.1374,
   longitude: 11.5755,
@@ -266,10 +269,13 @@ test("routing is requested once as a bounded matrix with shared departure and mo
   assert.ok(result.status === "ok" || result.status === "no-corridor");
 });
 
-test("provider factory keeps fixtures as the no-endpoint default and reports missing configured providers", async () => {
+test("provider factory defaults to direct MVG and keeps explicit fixtures deterministic", async () => {
   const fallback = createMeetingProviders({});
   assert.strictEqual(fallback.geocoding, fixtureProviders.geocoding);
-  assert.strictEqual(fallback.routing, fixtureProviders.routing);
+  assert.equal(fallback.routing.descriptor.name, "mvg-direct-routing");
+  assert.equal(readProviderConfig({}).mode, "mvg-direct-transit");
+  const fixture = createMeetingProviders({ MEEET_PROVIDER_MODE: "fixture" });
+  assert.strictEqual(fixture.routing, fixtureProviders.routing);
   const configured = createMeetingProviders({ MEEET_PROVIDER_MODE: "configured" });
   const response = await handleMeetingPost(
     jsonRequest({

@@ -105,10 +105,17 @@ export interface RoutingMatrixCell {
   source: string;
 }
 
+export interface RoutingMatrixTimingMetadata {
+  dataKind: "scheduled" | "live";
+  liveData: boolean;
+}
+
 export interface RoutingMatrixResponse {
   contractVersion: "meeet-routing-gateway/v1";
   departureAt: string;
   travelTimes: readonly RoutingMatrixCell[];
+  /** Timing provenance for the itineraries selected for this request. */
+  timing?: RoutingMatrixTimingMetadata;
 }
 
 export interface RoutingProviderCapabilities {

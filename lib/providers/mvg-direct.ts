@@ -7,6 +7,7 @@ import type {
   RoutingMatrixCell,
   RoutingMatrixRequest,
   RoutingMatrixResponse,
+  RoutingMatrixTimingMetadata,
   RoutingProviderCapabilities,
   RoutingParticipant,
 } from "../domain/types.ts";
@@ -39,6 +40,7 @@ export const MVG_DIRECT_MAX_ROUTE_PARTS = 100;
 export const MVG_DIRECT_MAX_RADIUS_METERS = 1_500;
 export const MVG_DIRECT_WALKING_METERS_PER_MINUTE = 75;
 export const MVG_DIRECT_MAX_CONCURRENCY = 4;
+export const MVG_DIRECT_MAX_ARRIVAL_DELAY_MINUTES = 24 * 60;
 export const MVG_DIRECT_TRANSPORT_TYPES =
   "SCHIFF,UBAHN,TRAM,SBAHN,BUS,REGIONAL_BUS,BAHN";
 const MVG_DIRECT_TRANSIT_TYPES = new Set(
@@ -72,12 +74,20 @@ type ConfigLike = Partial<
 };
 
 interface MvgRoute {
-  finalPlannedDeparture: number;
+  finalEffectiveArrival: number;
   hasTransit: boolean;
+  usedRealtime: boolean;
+}
+
+interface MvgRouteResult {
+  arrivalTimestamp: number;
+  usedRealtime: boolean;
 }
 
 /**
- * Direct, scheduled-only access to the unofficial MVG BGW PT endpoints.
+ * Direct access to the unofficial MVG BGW PT endpoints. Realtime is used when
+ * the final route part supplies a valid bounded arrival delay; planned time is
+ * the fallback.
  * This class deliberately owns no configurable URL: the endpoint constants
  * above are the only network destinations it can use.
  */
@@ -112,11 +122,11 @@ export class MvgDirectRoutingProvider implements RoutingProvider {
       sourceUrl: MVG_DIRECT_SOURCE_URL,
       license: null,
       attribution:
-        "MVG BGW PT v3 scheduled routing; unofficial endpoint, no SLA; planned timestamps used; upstream realtime fields ignored.",
+        "MVG BGW PT v3 routing; realtime is used when supplied on the final route part, invalid realtime fields ignored, and planned timestamps used as the fallback; unofficial endpoint, no SLA.",
       version: MVG_DIRECT_VERSION,
       retrievedAt: new Date().toISOString(),
       notes:
-        "Unofficial MVG BGW PT v3 endpoint with no SLA; planned timestamps used and upstream realtime fields ignored. Coordinates are snapped to the nearest returned station within 1500 m using 75 m/min walking access and egress. Transit-only and capped at a complete 2x2 grid (19 destinations; 76 matrix entries).",
+        "Unofficial MVG BGW PT v3 endpoint with no SLA; realtime is used when supplied on the final route part, invalid realtime fields ignored, and planned timestamps used as the fallback. Coordinates are snapped to the nearest returned station within 1500 m using 75 m/min walking access and egress. Transit-only and capped at a complete 2x2 grid (19 destinations; 76 matrix entries).",
       feeds: null,
     };
     this.descriptor = {
@@ -168,27 +178,30 @@ export class MvgDirectRoutingProvider implements RoutingProvider {
       );
 
       const departureTimestamp = Date.parse(request.departureAt);
-      const routeCache = new Map<string, Promise<number | null>>();
+      const routeCache = new Map<string, Promise<MvgRouteResult | null>>();
       const routeCacheWithDestination = (
         origin: SnappedStation,
         destination: SnappedStation,
         destinationCoordinate: { latitude: number; longitude: number },
-      ): Promise<number | null> => {
+      ): Promise<{ minutes: number; usedRealtime: boolean } | null> => {
         const stationReadyAt = new Date(
           departureTimestamp + origin.walkingMinutes * 60_000,
         ).toISOString();
         const key = `${origin.id}\u0000${destination.id}\u0000${stationReadyAt}`;
         if (origin.id === destination.id) {
           return Promise.resolve(
-            roundMinutes(
-              origin.walkingMinutes +
-                walkingMinutes(destinationCoordinate, destination),
-            ),
+            {
+              minutes: roundMinutes(
+                origin.walkingMinutes +
+                  walkingMinutes(destinationCoordinate, destination),
+              ),
+              usedRealtime: false,
+            },
           );
         }
         const existing = routeCache.get(key);
         const itinerary = existing ?? MVG_DIRECT_LIMITER.run(
-          () => this.findEarliestPlannedArrival(
+          () => this.findEarliestEffectiveArrival(
             origin.id,
             destination.id,
             stationReadyAt,
@@ -197,29 +210,32 @@ export class MvgDirectRoutingProvider implements RoutingProvider {
           operationController.signal,
         );
         if (!existing) routeCache.set(key, itinerary);
-        return itinerary.then((arrivalTimestamp) =>
-          arrivalTimestamp === null
+        return itinerary.then((routeResult) =>
+          routeResult === null
             ? null
-            : calculateDirectMinutes(
-                departureTimestamp,
-                arrivalTimestamp,
-                destinationCoordinate,
-                destination,
-              ),
+            : {
+                minutes: calculateDirectMinutes(
+                  departureTimestamp,
+                  routeResult.arrivalTimestamp,
+                  destinationCoordinate,
+                  destination,
+                ),
+                usedRealtime: routeResult.usedRealtime,
+              },
         );
       };
 
       const pendingCells: Array<{
         participant: RoutingParticipant;
         destinationId: string;
-        minutes: Promise<number | null>;
+        result: Promise<{ minutes: number; usedRealtime: boolean } | null>;
       }> = [];
       for (let participantIndex = 0; participantIndex < request.participants.length; participantIndex += 1) {
         const participant = request.participants[participantIndex];
         const origin = originStations[participantIndex];
         for (let destinationIndex = 0; destinationIndex < request.destinations.length; destinationIndex += 1) {
           const destination = destinationStations[destinationIndex];
-          const minutes = origin && destination
+          const result = origin && destination
             ? routeCacheWithDestination(
                 origin,
                 destination,
@@ -229,22 +245,29 @@ export class MvgDirectRoutingProvider implements RoutingProvider {
           pendingCells.push({
             participant,
             destinationId: request.destinations[destinationIndex].id,
-            minutes,
+            result,
           });
         }
       }
       const resolvedCells = await Promise.all(
         pendingCells.map(async (pending) => ({
           ...pending,
-          minutes: await pending.minutes,
+          result: await pending.result,
         })),
       );
+      const liveData = resolvedCells.some(
+        (cell) => cell.result?.usedRealtime === true,
+      );
+      const timing: RoutingMatrixTimingMetadata = {
+        dataKind: liveData ? "live" : "scheduled",
+        liveData,
+      };
       const travelTimes: RoutingMatrixCell[] = resolvedCells.map((cell) => ({
         participantId: cell.participant.participantId,
         destinationId: cell.destinationId,
         mode: cell.participant.mode,
-        status: cell.minutes === null ? "unreachable" : "ok",
-        minutes: cell.minutes,
+        status: cell.result === null ? "unreachable" : "ok",
+        minutes: cell.result?.minutes ?? null,
         source: this.descriptor.name,
       }));
 
@@ -252,6 +275,7 @@ export class MvgDirectRoutingProvider implements RoutingProvider {
         contractVersion: "meeet-routing-gateway/v1",
         departureAt: request.departureAt,
         travelTimes,
+        timing,
       };
     } catch (error) {
       matrixController.abort();
@@ -290,12 +314,12 @@ export class MvgDirectRoutingProvider implements RoutingProvider {
     return nearest ?? null;
   }
 
-  private async findEarliestPlannedArrival(
+  private async findEarliestEffectiveArrival(
     originStationId: string,
     destinationStationId: string,
     stationReadyAt: string,
     signal: AbortSignal,
-  ): Promise<number | null> {
+  ): Promise<MvgRouteResult | null> {
     const url = new URL(MVG_DIRECT_ROUTES_URL);
     url.searchParams.set("originStationGlobalId", originStationId);
     url.searchParams.set("destinationStationGlobalId", destinationStationId);
@@ -309,17 +333,25 @@ export class MvgDirectRoutingProvider implements RoutingProvider {
     const transitRoutes = routes.filter((route) => route.hasTransit);
     if (transitRoutes.length === 0) return UNREACHABLE;
     const stationReadyTimestamp = Date.parse(stationReadyAt);
-    let earliestArrival = Number.POSITIVE_INFINITY;
+    let earliestRoute: MvgRoute | undefined;
     for (const route of transitRoutes) {
-      if (route.finalPlannedDeparture < stationReadyTimestamp) {
+      if (route.finalEffectiveArrival < stationReadyTimestamp) {
         throw new Error("MVG route response contains an arrival before station readiness.");
       }
-      earliestArrival = Math.min(earliestArrival, route.finalPlannedDeparture);
+      if (
+        !earliestRoute ||
+        route.finalEffectiveArrival < earliestRoute.finalEffectiveArrival
+      ) {
+        earliestRoute = route;
+      }
     }
-    if (!Number.isFinite(earliestArrival)) {
-      throw new Error("MVG route response contains no planned destination timestamp.");
+    if (!earliestRoute || !Number.isFinite(earliestRoute.finalEffectiveArrival)) {
+      throw new Error("MVG route response contains no destination timestamp.");
     }
-    return earliestArrival;
+    return {
+      arrivalTimestamp: earliestRoute.finalEffectiveArrival,
+      usedRealtime: earliestRoute.usedRealtime,
+    };
   }
 
   private async getJson(url: string, signal: AbortSignal): Promise<unknown> {
@@ -591,10 +623,25 @@ function parseRoute(
   if (!isRecord(lastPart.to) || typeof lastPart.to.plannedDeparture !== "string") {
     throw new Error("MVG route final destination lacks plannedDeparture.");
   }
+  const plannedArrival = parsePlannedDeparture(lastPart.to.plannedDeparture);
+  const arrivalDelay =
+    lastPart.realTime === true
+      ? parseBoundedArrivalDelay(lastPart.to.arrivalDelayInMinutes)
+      : null;
   return {
-    finalPlannedDeparture: parsePlannedDeparture(lastPart.to.plannedDeparture),
+    finalEffectiveArrival:
+      plannedArrival + (arrivalDelay === null ? 0 : arrivalDelay * 60_000),
     hasTransit,
+    usedRealtime: arrivalDelay !== null,
   };
+}
+
+function parseBoundedArrivalDelay(value: unknown): number | null {
+  return typeof value === "number" &&
+      Number.isFinite(value) &&
+      Math.abs(value) <= MVG_DIRECT_MAX_ARRIVAL_DELAY_MINUTES
+    ? value
+    : null;
 }
 
 function parseStationReference(value: Record<string, unknown>): string | null {

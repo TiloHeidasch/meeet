@@ -129,7 +129,7 @@ test("direct provider enforces destination and matrix caps", async () => {
   assert.equal(calls, 0);
 });
 
-test("direct routing uses fixed encoded URLs, nearest station snapping, planned arrivals, and walking", async () => {
+test("direct routing uses fixed encoded URLs, nearest station snapping, planned fallback, and walking", async () => {
   const requests: URL[] = [];
   const fetchImplementation: FetchImplementation = async (input) => {
     const url = new URL(String(input));
@@ -171,9 +171,59 @@ test("direct routing uses fixed encoded URLs, nearest station snapping, planned 
   assert.equal(response.travelTimes[0].status, "ok");
   assert.ok((response.travelTimes[0].minutes ?? 0) >= 20);
   assert.ok((response.travelTimes[0].minutes ?? 0) < 21);
+  assert.deepEqual(response.timing, { dataKind: "scheduled", liveData: false });
   assert.equal(requests.length, 3);
   assert.equal(requests[0].origin, "https://www.mvg.de");
   assert.ok(requests.every((request) => request.pathname.startsWith("/api/bgw-pt/v3/")));
+});
+
+test("a valid final-part realtime arrival delay changes duration and marks the matrix live", async () => {
+  const provider = new MvgDirectRoutingProvider(async (input) => {
+    const url = new URL(String(input));
+    if (url.pathname.endsWith("/nearby")) {
+      const latitude = Number(url.searchParams.get("latitude"));
+      const longitude = Number(url.searchParams.get("longitude"));
+      return Response.json({ stations: [{ globalId: `station-${longitude}`, latitude, longitude }] });
+    }
+    return Response.json([
+      mvgRoute(url, "2026-07-25T08:20:00.000+00:00", "BUS", {
+        realTime: true,
+        arrivalDelayInMinutes: 10,
+      }),
+    ]);
+  });
+  const response = await provider.getTravelTimeMatrix({
+    departureAt: DEPARTURE,
+    participants: [{ participantId: "one", origin: A, mode: "transit" }],
+    destinations: [{ id: "d", coordinate: { ...A, longitude: A.longitude + 0.001 }, sampleKind: "center" }],
+  });
+  assert.equal(response.travelTimes[0].minutes, 30);
+  assert.deepEqual(response.timing, { dataKind: "live", liveData: true });
+});
+
+test("a realtime alternative that is not selected keeps request metadata scheduled", async () => {
+  const provider = new MvgDirectRoutingProvider(async (input) => {
+    const url = new URL(String(input));
+    if (url.pathname.endsWith("/nearby")) {
+      const latitude = Number(url.searchParams.get("latitude"));
+      const longitude = Number(url.searchParams.get("longitude"));
+      return Response.json({ stations: [{ globalId: `station-${longitude}`, latitude, longitude }] });
+    }
+    return Response.json([
+      mvgRoute(url, "2026-07-25T08:20:00.000+00:00"),
+      mvgRoute(url, "2026-07-25T08:10:00.000+00:00", "BUS", {
+        realTime: true,
+        arrivalDelayInMinutes: 20,
+      }),
+    ]);
+  });
+  const response = await provider.getTravelTimeMatrix({
+    departureAt: DEPARTURE,
+    participants: [{ participantId: "one", origin: A, mode: "transit" }],
+    destinations: [{ id: "d", coordinate: { ...A, longitude: A.longitude + 0.001 }, sampleKind: "center" }],
+  });
+  assert.equal(response.travelTimes[0].minutes, 20);
+  assert.deepEqual(response.timing, { dataKind: "scheduled", liveData: false });
 });
 
 test("empty nearby and route responses are unreachable, while same stations skip routes", async () => {
@@ -482,7 +532,10 @@ test("direct mode selects a complete 2x2 corridor and exposes accepted direct pr
   const routing: RoutingProvider = {
     descriptor: direct.descriptor,
     capabilities: direct.capabilities,
-    getTravelTimeMatrix: (request) => fixtureProviders.routing.getTravelTimeMatrix(request),
+    getTravelTimeMatrix: async (request) => ({
+      ...(await fixtureProviders.routing.getTravelTimeMatrix(request)),
+      timing: { dataKind: "scheduled" as const, liveData: false },
+    }),
   };
   const providers: MeetingProviders = { ...fixtureProviders, routing };
   const result = await calculateMeeting(
@@ -497,7 +550,11 @@ test("direct mode selects a complete 2x2 corridor and exposes accepted direct pr
   if (result.status !== "ok") return;
   assert.equal(result.corridor.properties.gridColumns, 2);
   assert.equal(result.corridor.properties.gridRows, 2);
-  assert.equal(result.metadata.source.label, "Unofficial MVG scheduled routing + fixture coordinate resolution/static POIs");
+  assert.equal(result.metadata.source.label, "Unofficial MVG routing (realtime when supplied; planned time fallback) + fixture coordinate resolution/static POIs");
+  assert.equal(result.metadata.source.dataKind, "scheduled");
+  assert.equal(result.metadata.source.liveData, false);
+  assert.equal(result.metadata.providers.routing.dataKind, "scheduled");
+  assert.equal(result.metadata.provenance.routing.dataKind, "scheduled");
   assert.equal(result.metadata.provenance.routing.feeds, null);
   assert.equal(validateMeetingCalculationResponse(result).success, true);
   const mutated = JSON.parse(JSON.stringify(result)) as {
@@ -527,6 +584,46 @@ test("direct mode selects a complete 2x2 corridor and exposes accepted direct pr
   assert.equal(createBoundedMunichGrid(DIRECT_MVG_GRID_PROFILE).destinations.length, 19);
 });
 
+test("meeting metadata reflects live matrix timing without mutating the provider descriptor", async () => {
+  const direct = new MvgDirectRoutingProvider(async () => Response.json({ stations: [] }));
+  const routing: RoutingProvider = {
+    descriptor: direct.descriptor,
+    capabilities: direct.capabilities,
+    getTravelTimeMatrix: async (request) => ({
+      ...(await fixtureProviders.routing.getTravelTimeMatrix(request)),
+      timing: { dataKind: "live" as const, liveData: true },
+    }),
+  };
+  const result = await calculateMeeting(
+    {
+      departureAt: DEPARTURE,
+      tolerancePercent: 10,
+      participants: [participant("one", "transit"), participant("two", "transit")],
+    },
+    { ...fixtureProviders, routing },
+  );
+  assert.equal(result.metadata.source.dataKind, "live");
+  assert.equal(result.metadata.source.liveData, true);
+  assert.equal(result.metadata.providers.routing.dataKind, "live");
+  assert.equal(result.metadata.providers.routing.liveData, true);
+  assert.equal(result.metadata.provenance.routing.dataKind, "live");
+  assert.equal(result.metadata.provenance.routing.liveData, true);
+  assert.equal(validateMeetingCalculationResponse(result).success, true);
+
+  const mismatched = JSON.parse(JSON.stringify(result)) as {
+    metadata: {
+      providers: { routing: { dataKind: string; liveData: boolean } };
+      provenance: { routing: { dataKind: string; liveData: boolean } };
+    };
+  };
+  mismatched.metadata.providers.routing.liveData = false;
+  mismatched.metadata.provenance.routing.liveData = false;
+  assert.equal(validateMeetingCalculationResponse(mismatched).success, false);
+
+  assert.equal(direct.descriptor.dataKind, "scheduled");
+  assert.equal(direct.descriptor.liveData, false);
+});
+
 function participant(id: string, mode: "transit" | "bike" | "car") {
   return { id, location: { ...A, label: "Marienplatz" }, mode };
 }
@@ -540,7 +637,12 @@ function jsonRequest(body: unknown): Request {
 }
 
 /** Sanitized BGW PT v3 captured-shape fixture: routes are bare arrays of parts. */
-function mvgRoute(url: URL, plannedDeparture: string, transportType = "BUS") {
+function mvgRoute(
+  url: URL,
+  plannedDeparture: string,
+  transportType = "BUS",
+  realtime?: { realTime: boolean; arrivalDelayInMinutes?: number },
+) {
   return {
     parts: [
       {
@@ -548,8 +650,12 @@ function mvgRoute(url: URL, plannedDeparture: string, transportType = "BUS") {
         to: {
           stationGlobalId: url.searchParams.get("destinationStationGlobalId"),
           plannedDeparture,
+          ...(realtime?.arrivalDelayInMinutes === undefined
+            ? {}
+            : { arrivalDelayInMinutes: realtime.arrivalDelayInMinutes }),
         },
         line: { transportType },
+        ...(realtime?.realTime === undefined ? {} : { realTime: realtime.realTime }),
       },
     ],
   };

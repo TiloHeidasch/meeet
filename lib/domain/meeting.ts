@@ -27,6 +27,8 @@ import type {
   ProviderDescriptor,
   RoutingMatrixCell,
   RoutingMatrixRequest,
+  RoutingMatrixResponse,
+  RoutingMatrixTimingMetadata,
   RoutingProviderCapabilities,
   RoutingParticipant,
   SampleGridCorridorProperties,
@@ -118,7 +120,11 @@ export async function calculateMeeting(
     participants,
     input.tolerancePercent,
   );
-  const metadata = createMetadata(providers);
+  const routingTiming = matrix.timing ??
+    (providers.routing.descriptor.provenance.provider === "mvg-direct-routing"
+      ? { dataKind: "scheduled" as const, liveData: false }
+      : undefined);
+  const metadata = createMetadata(providers, routingTiming);
   const requestSnapshot = createRequestSnapshot(input, participants);
 
   if (verifiedCells.length === 0) {
@@ -409,11 +415,7 @@ function getMatrixCell(
 }
 
 function validateAndIndexMatrix(
-  response: {
-    contractVersion: "meeet-routing-gateway/v1";
-    departureAt: string;
-    travelTimes: readonly RoutingMatrixCell[];
-  },
+  response: RoutingMatrixResponse,
   request: RoutingMatrixRequest,
 ): ReadonlyMap<string, RoutingMatrixCell> {
   if (
@@ -474,13 +476,21 @@ function createRequestSnapshot(
   };
 }
 
-function createMetadata(providers: MeetingProviders): MeetingCalculationMetadata {
+function createMetadata(
+  providers: MeetingProviders,
+  routingTiming?: RoutingMatrixTimingMetadata,
+): MeetingCalculationMetadata {
+  const routing = applyRoutingTiming(providers.routing.descriptor, routingTiming);
   const descriptors = [
     providers.geocoding.descriptor,
-    providers.routing.descriptor,
+    routing,
     providers.poi.descriptor,
   ];
-  const dataKind = getOverallDataKind(descriptors);
+  const dataKind = routingTiming
+    ? routingTiming.liveData
+      ? "live"
+      : "scheduled"
+    : getOverallDataKind(descriptors);
   const deployment = getOverallDeployment(descriptors);
   const mapConfiguration = providers.mapConfiguration ?? {
     source: "client-configured" as const,
@@ -507,10 +517,10 @@ function createMetadata(providers: MeetingProviders): MeetingCalculationMetadata
     source: {
       deployment,
       dataKind,
-      liveData: descriptors.some((descriptor) => descriptor.liveData),
+      liveData: routingTiming?.liveData ?? descriptors.some((descriptor) => descriptor.liveData),
       label:
-        providers.routing.descriptor.provenance.provider === "mvg-direct-routing"
-          ? "Unofficial MVG scheduled routing + fixture coordinate resolution/static POIs"
+        routing.provenance.provider === "mvg-direct-routing"
+          ? "Unofficial MVG routing (realtime when supplied; planned time fallback) + fixture coordinate resolution/static POIs"
           : dataKind === "demo-static"
           ? "Local static demo providers"
           : "Configured provider adapters",
@@ -518,16 +528,34 @@ function createMetadata(providers: MeetingProviders): MeetingCalculationMetadata
     approximation: SAMPLE_GRID_APPROXIMATION_NOTICE,
     providers: {
       geocoding: providers.geocoding.descriptor,
-      routing: providers.routing.descriptor,
+      routing,
       poi: providers.poi.descriptor,
     },
     boundary,
     provenance: {
       boundary,
-      routing: providers.routing.descriptor.provenance,
+      routing: routing.provenance,
       geocoding: providers.geocoding.descriptor.provenance,
       poi: providers.poi.descriptor.provenance,
       map: mapConfiguration,
+    },
+  };
+}
+
+function applyRoutingTiming(
+  descriptor: ProviderDescriptor,
+  timing?: RoutingMatrixTimingMetadata,
+): ProviderDescriptor {
+  if (!timing) return descriptor;
+  const dataKind = timing.liveData ? "live" : "scheduled";
+  return {
+    ...descriptor,
+    dataKind,
+    liveData: timing.liveData,
+    provenance: {
+      ...descriptor.provenance,
+      dataKind,
+      liveData: timing.liveData,
     },
   };
 }
