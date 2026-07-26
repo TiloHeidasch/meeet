@@ -1,0 +1,21 @@
+{
+  "schemaVersion": 1,
+  "boundaryType": "application-municipal-district-collection",
+  "legalBoundary": false,
+  "sourceUrl": "https://geoportal.muenchen.de/geoserver/gsm_wfs/ows?service=WFS&version=1.0.0&request=GetFeature&typeName=gsm_wfs%3Avablock_stadtbezirk&outputFormat=application%2Fjson&srsName=EPSG%3A4326",
+  "metadataUrl": "https://geoportal.muenchen.de/geoserver/gsm_wfs/ows?service=WFS&version=1.0.0&request=GetCapabilities",
+  "retrievedAt": "2026-07-26T07:59:12.816Z",
+  "sourceMetadataDate": null,
+  "metadataRetrievedAt": "2026-07-26T07:59:13.093Z",
+  "rawContentHash": "53a161d53254979ba302d205757d18d72e6907d59d920f223066d28dc1c8b01b",
+  "normalizedContentHash": "472a20d0a34a3abbc06292985c2640fdbddd05131595356ef8a2aa271d372f97",
+  "metadataContentHash": "95b5f2b510794b4329a767dc1ed4b02c1ae2681dcb501cc48b0dd0fa7317db0d",
+  "rawFeatureCount": 27,
+  "districtCount": 25,
+  "license": {
+    "name": "DL-DE-BY-2.0",
+    "url": "https://www.govdata.de/dl-de/by-2-0"
+  },
+  "attribution": "Landeshauptstadt München / GeodatenService München — Stadtbezirke",
+  "note": "The 25-district collection is used for application membership and clipping only. It is not a legal or cadastral boundary."
+}

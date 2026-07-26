@@ -1,36 +1,79 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# meeet
 
-## Getting Started
+Munich-only meeting-place MVP. The browser calls same-origin route handlers;
+provider URLs and credentials remain server-side.
 
-First, run the development server:
+## Local development
+
+Requires Node `>=22.0.0` (the supported Next 16 / pinned MapLibre 6 runtime).
 
 ```bash
+npm install
+cp .env.example .env.local
 npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+With no `MEEET_*` provider endpoint configured, calculations use deterministic
+local fixtures. This is not live MVG/MVV or realtime transit data.
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+## Map configuration
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+MapLibre requires a configured self-hosted or managed style URL:
 
-## Learn More
+```bash
+NEXT_PUBLIC_MAP_STYLE_URL=https://maps.example.test/styles/meeet/style.json
+NEXT_PUBLIC_MAP_ATTRIBUTION="Map data © deployment provider"
+```
 
-To learn more about Next.js, take a look at the following resources:
+There is no public OSM tile, Nominatim, or other public-service fallback. The
+style URL and attribution are the only map-service values exposed to the
+browser. The existing Vercel Speed Insights client telemetry is also public by
+design; do not put provider credentials in any `NEXT_PUBLIC_*` variable.
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
+## Official boundary data
 
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
+The runtime boundary is the cached WGS84 Munich GeoPortal
+`gsm_wfs:vablock_stadtbezirk` district collection. It is application
+membership/clipping geometry, not a legal or cadastral boundary. Attribution,
+licence, retrieval metadata, and hashes are in
+`data/official/munich-boundary-manifest.json`.
 
-## Deploy on Vercel
+Refresh and validate it server-side only:
 
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
+```bash
+npm run boundary:refresh
+```
 
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+## Provider deployment
+
+See [`docs/provider-adapters.md`](docs/provider-adapters.md) for the complete
+gateway, geocoding, POI, MVG/MVV provenance, OSRM, OTP, attribution, and
+allowlisting contracts. A configured routing gateway must provide recorded
+MVG and licensed MVV scheduled-feed source URLs, licences, attributions,
+versions, and retrieval dates. The gateway owns bounded OTP point-to-point
+calls and configured OSRM tables; this application does not pretend OTP has a
+generic matrix endpoint.
+
+Configure endpoints only as fixed server environment values. Do not forward
+arbitrary client URLs. Exact participant coordinates are sensitive: retain
+them only for the request lifetime, do not log request bodies/origins, and
+apply deployment access-log redaction/retention controls.
+
+## Validation
+
+```bash
+npm test
+npm run test:e2e
+npx tsc --noEmit
+npm run lint
+npm run build
+git diff --check
+```
+
+Browser tests use a local fixture server with no map style or external provider
+requests. Install the pinned Chromium binary once before running them:
+
+```bash
+npx playwright install chromium
+npm run test:e2e
+```

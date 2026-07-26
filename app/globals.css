@@ -1,8 +1,16 @@
 @import "tailwindcss";
 
 :root {
-  --background: #ffffff;
-  --foreground: #171717;
+  --background: #f4f1eb;
+  --foreground: #202522;
+  --ink: #202522;
+  --muted: #586159;
+  --line: #d9d8cf;
+  --paper: #fffdf8;
+  --mint: #c9e3d4;
+  --mint-deep: #1e7258;
+  --coral: #ef785e;
+  --yellow: #f5d873;
 }
 
 @theme inline {
@@ -12,15 +20,45 @@
   --font-mono: var(--font-geist-mono);
 }
 
-@media (prefers-color-scheme: dark) {
-  :root {
-    --background: #0a0a0a;
-    --foreground: #ededed;
-  }
-}
-
+* { box-sizing: border-box; }
+html { background: var(--background); }
 body {
   background: var(--background);
   color: var(--foreground);
-  font-family: Arial, Helvetica, sans-serif;
+  font-family: var(--font-geist-sans), ui-sans-serif, system-ui, sans-serif;
+}
+.text-\[\#6b716b\] { color: #586159 !important; }
+.text-\[\#d8644e\] { color: #a64e39 !important; }
+button, input, select { font: inherit; }
+button { cursor: pointer; }
+button:focus-visible, input:focus-visible, select:focus-visible {
+  outline: 3px solid #215f93;
+  outline-offset: 3px;
+}
+
+.map-surface {
+  background-color: #dce9df;
+  background-image:
+    linear-gradient(122deg, transparent 0 47%, rgba(255,253,248,.78) 48% 49%, transparent 50%),
+    linear-gradient(28deg, transparent 0 62%, rgba(255,253,248,.7) 63% 64%, transparent 65%),
+    radial-gradient(circle at 48% 45%, rgba(193, 222, 202, .9), transparent 31%),
+    linear-gradient(145deg, rgba(116, 164, 132, .18), transparent 45%);
+}
+.map-surface::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  opacity: .35;
+  background-image: radial-gradient(rgba(31, 71, 55, .23) .65px, transparent .65px);
+  background-size: 7px 7px;
+  mix-blend-mode: multiply;
+}
+.map-road { stroke: rgba(255,253,248,.8); stroke-linecap: round; }
+.map-river { stroke: #b4d7df; stroke-linecap: round; fill: none; }
+.corridor-path { fill: rgba(239,120,94,.2); stroke: #d8644e; stroke-width: 2; stroke-dasharray: 5 5; }
+.marker-shadow { filter: drop-shadow(0 3px 3px rgba(31,48,37,.22)); }
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { scroll-behavior: auto !important; animation-duration: .01ms !important; transition-duration: .01ms !important; }
 }
