@@ -29,6 +29,7 @@ export default defineConfig({
       MEEET_POI_ENDPOINT: "",
       MEEET_ROUTING_GATEWAY_URL: "",
       NEXT_PUBLIC_MAP_ATTRIBUTION: "",
+      // An empty override exercises the built-in OpenFreeMap Liberty default.
       NEXT_PUBLIC_MAP_STYLE_URL: "",
     },
     reuseExistingServer: !process.env.CI,

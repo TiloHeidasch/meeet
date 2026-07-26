@@ -1,12 +1,24 @@
 import { expect, test, type Page } from "@playwright/test";
 
-const MAP_UNAVAILABLE = "Map unavailable";
+const DEFAULT_MAP_STYLE_URL = "https://tiles.openfreemap.org/styles/liberty";
 const SAMPLE_GRID = /Sample-grid approximation only/;
+
+test.beforeEach(async ({ page }) => {
+  await page.route(DEFAULT_MAP_STYLE_URL, (route) =>
+    route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({ version: 8, sources: {}, layers: [] }),
+    }),
+  );
+});
 
 async function openPlanner(page: Page) {
   await page.goto("/");
   await expect(page.getByRole("heading", { name: "A fair place to meet." })).toBeVisible();
-  await expect(page.getByRole("status").filter({ hasText: MAP_UNAVAILABLE })).toBeVisible();
+  const map = page.getByRole("region", { name: "Munich meeting area map" });
+  await expect(map).toBeVisible();
+  await expect(map.getByRole("button", { name: "Zoom in" })).toBeVisible();
 }
 
 async function submitMeeting(page: Page) {
@@ -35,7 +47,7 @@ test("default participants reach the local fixture result with provenance", asyn
   await expect(page.getByText(SAMPLE_GRID)).toBeVisible();
 });
 
-test("missing map style leaves setup and result controls usable", async ({ page }) => {
+test("missing map style override uses the default map and leaves controls usable", async ({ page }) => {
   await openPlanner(page);
 
   await expect(page.getByLabel("Munich starting point").first()).toBeEnabled();
@@ -44,7 +56,9 @@ test("missing map style leaves setup and result controls usable", async ({ page 
 
   await submitMeeting(page);
   await expect(page.getByText("Meeting area ready", { exact: true })).toBeVisible();
-  await expect(page.getByRole("status").filter({ hasText: MAP_UNAVAILABLE })).toBeVisible();
+  const map = page.getByRole("region", { name: "Munich meeting area map" });
+  await expect(map).toBeVisible();
+  await expect(map.getByRole("button", { name: "Zoom in" })).toBeVisible();
   await expect(page.getByRole("button", { name: /Add participant/ })).toBeEnabled();
   await expect(page.getByRole("button", { name: "Find meeting area" })).toBeEnabled();
 });

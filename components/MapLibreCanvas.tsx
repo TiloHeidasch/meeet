@@ -11,7 +11,8 @@ type Props = { corridor?: MeetingCorridor; participants: readonly MapParticipant
 type MapState = "loading" | "ready" | "unavailable";
 type PointFeature = { type: "Feature"; id: string; properties: Record<string, string | number>; geometry: { type: "Point"; coordinates: [number, number] } };
 type PointCollection = { type: "FeatureCollection"; features: PointFeature[] };
-const MUNICH_CENTER: [number, number] = [11.5755, 48.1374];
+const MUNICH_CENTER: [number, number] = [11.576, 48.137];
+const DEFAULT_MAP_STYLE_URL = "https://tiles.openfreemap.org/styles/liberty";
 
 function participantData(items: readonly MapParticipant[]): PointCollection { return { type: "FeatureCollection", features: items.map((p) => ({ type: "Feature", id: p.id, properties: { id: p.id, number: p.number, label: p.label, mode: p.mode, color: p.color }, geometry: { type: "Point", coordinates: [p.longitude, p.latitude] } })) }; }
 function poiData(items: readonly MapPoi[]): PointCollection { return { type: "FeatureCollection", features: items.map((p) => ({ type: "Feature", id: p.id, properties: { id: p.id, number: p.number, name: p.name, category: p.category }, geometry: { type: "Point", coordinates: p.coordinates } })) }; }
@@ -19,11 +20,11 @@ function poiData(items: readonly MapPoi[]): PointCollection { return { type: "Fe
 export default function MapLibreCanvas({ corridor, participants, pois, selectedPoiId, onPoiSelect }: Props) {
   const containerRef = useRef<HTMLDivElement>(null); const mapRef = useRef<Map | null>(null); const loadedRef = useRef(false);
   const inputsRef = useRef({ corridor, participants, pois, onPoiSelect }); const [state, setState] = useState<MapState>("loading");
-  const styleUrl = process.env.NEXT_PUBLIC_MAP_STYLE_URL; const customAttribution = process.env.NEXT_PUBLIC_MAP_ATTRIBUTION;
+  const styleUrl = process.env.NEXT_PUBLIC_MAP_STYLE_URL || DEFAULT_MAP_STYLE_URL; const customAttribution = process.env.NEXT_PUBLIC_MAP_ATTRIBUTION;
   useEffect(() => { inputsRef.current = { corridor, participants, pois, onPoiSelect }; }, [corridor, participants, pois, onPoiSelect]);
 
   useEffect(() => {
-    if (!styleUrl || !containerRef.current) { setState("unavailable"); return; }
+    if (!containerRef.current) { setState("unavailable"); return; }
     let map!: Map;
     let constructed = false;
     let initializationTimer: ReturnType<typeof setTimeout> | undefined;
@@ -70,5 +71,5 @@ export default function MapLibreCanvas({ corridor, participants, pois, selectedP
   }, [styleUrl, customAttribution]);
 
   useEffect(() => { const map = mapRef.current; if (!map || !loadedRef.current) return; const corridorSource = map.getSource("meeet-corridor") as GeoJSONSource | undefined; const participantsSource = map.getSource("meeet-participants") as GeoJSONSource | undefined; const poisSource = map.getSource("meeet-pois") as GeoJSONSource | undefined; corridorSource?.setData(corridor ?? { type: "FeatureCollection", features: [] }); participantsSource?.setData(participantData(participants)); poisSource?.setData(poiData(pois)); if (map.getLayer("meeet-poi-selected")) map.setFilter("meeet-poi-selected", ["==", ["get", "id"], selectedPoiId ?? ""]); }, [corridor, participants, pois, selectedPoiId, state]);
-  return <section className="relative h-full min-h-[430px] overflow-hidden rounded-[1.75rem] border border-[#cbd7cd] bg-[#dce9df] shadow-[0_18px_50px_rgba(52,74,59,.13)]" aria-labelledby="map-title"><h2 id="map-title" className="sr-only">Munich meeting area map</h2><div ref={containerRef} className="absolute inset-0" aria-label="Interactive Munich map showing the equal-time corridor, participants, and food and drink venues" />{state === "loading" && <div className="absolute inset-0 grid place-items-center bg-[#dce9df] text-sm text-[#526057]" role="status">Loading configured map…</div>}{state === "unavailable" && <div className="absolute inset-0 grid place-items-center bg-[#dce9df] p-6 text-center"><div className="max-w-sm rounded-2xl border border-[#cbd7cd] bg-[#fffdf8]/95 p-5 shadow-lg" role="status"><p className="font-semibold text-[#202522]">Map unavailable</p><p className="mt-2 text-sm leading-5 text-[#526057]">The configured map style could not be loaded. The setup and accessible venue list remain available.</p></div></div>}</section>;
+  return <section className="relative h-full min-h-[430px] overflow-hidden rounded-[1.75rem] border border-[#cbd7cd] bg-[#dce9df] shadow-[0_18px_50px_rgba(52,74,59,.13)]" aria-labelledby="map-title"><h2 id="map-title" className="sr-only">Munich meeting area map</h2><div ref={containerRef} className="absolute inset-0" aria-label="Interactive Munich map showing the equal-time corridor, participants, and food and drink venues" />{state === "loading" && <div className="absolute inset-0 grid place-items-center bg-[#dce9df] text-sm text-[#526057]" role="status">Loading Munich map…</div>}{state === "unavailable" && <div className="absolute inset-0 grid place-items-center bg-[#dce9df] p-6 text-center"><div className="max-w-sm rounded-2xl border border-[#cbd7cd] bg-[#fffdf8]/95 p-5 shadow-lg" role="status"><p className="font-semibold text-[#202522]">Map unavailable</p><p className="mt-2 text-sm leading-5 text-[#526057]">The configured map style could not be loaded. The setup and accessible venue list remain available.</p></div></div>}</section>;
 }

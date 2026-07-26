@@ -58,15 +58,19 @@ request-log precautions do not change that.
 
 ## Map configuration
 
-MapLibre requires a configured self-hosted or managed style URL:
+The map uses the OpenFreeMap Liberty style by default:
+
+`https://tiles.openfreemap.org/styles/liberty`
+
+Set `NEXT_PUBLIC_MAP_STYLE_URL` only when a self-hosted or managed style should
+override that default:
 
 ```bash
 NEXT_PUBLIC_MAP_STYLE_URL=https://maps.example.test/styles/meeet/style.json
 NEXT_PUBLIC_MAP_ATTRIBUTION="Map data © deployment provider"
 ```
 
-There is no public OSM tile, Nominatim, or other public-service fallback. The
-style URL and attribution are the only map-service values exposed to the
+The style URL and attribution are the only map-service values exposed to the
 browser. The existing Vercel Speed Insights client telemetry is also public by
 design; do not put provider credentials in any `NEXT_PUBLIC_*` variable.
 
@@ -110,8 +114,10 @@ npm run build
 git diff --check
 ```
 
-Browser tests use a local fixture server with no map style or external provider
-requests. Install the pinned Chromium binary once before running them:
+Browser tests use a local fixture server and a deterministic stub of the
+default style document; they do not depend on remote map-tile loading or
+external provider requests. Install the pinned Chromium binary once before
+running them:
 
 ```bash
 npx playwright install chromium
