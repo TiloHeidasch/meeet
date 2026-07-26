@@ -114,10 +114,10 @@ npm run build
 git diff --check
 ```
 
-Browser tests use a local fixture server and a deterministic stub of the
-default style document; they do not depend on remote map-tile loading or
-external provider requests. Install the pinned Chromium binary once before
-running them:
+Deterministic browser tests use a local fixture server and a stub of the
+default style document. The isolated live OpenFreeMap regression checks the
+real style dependency graph and therefore requires network access. Install
+the pinned Chromium binary once before running them:
 
 ```bash
 npx playwright install chromium

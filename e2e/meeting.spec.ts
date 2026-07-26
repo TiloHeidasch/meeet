@@ -1,17 +1,8 @@
 import { expect, test, type Page } from "@playwright/test";
 
 const DEFAULT_MAP_STYLE_URL = "https://tiles.openfreemap.org/styles/liberty";
+const OPENFREEMAP_ORIGIN = "https://tiles.openfreemap.org";
 const SAMPLE_GRID = /Sample-grid approximation only/;
-
-test.beforeEach(async ({ page }) => {
-  await page.route(DEFAULT_MAP_STYLE_URL, (route) =>
-    route.fulfill({
-      status: 200,
-      contentType: "application/json",
-      body: JSON.stringify({ version: 8, sources: {}, layers: [] }),
-    }),
-  );
-});
 
 async function openPlanner(page: Page) {
   await page.goto("/");
@@ -30,6 +21,17 @@ async function submitMeeting(page: Page) {
   await page.getByRole("button", { name: "Find meeting area" }).click();
   return response;
 }
+
+test.describe("deterministic UI", () => {
+test.beforeEach(async ({ page }) => {
+  await page.route(DEFAULT_MAP_STYLE_URL, (route) =>
+    route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({ version: 8, sources: {}, layers: [] }),
+    }),
+  );
+});
 
 test("default participants reach the local fixture result with provenance", async ({ page }) => {
   await openPlanner(page);
@@ -164,4 +166,37 @@ test("direct mode hands off transit-only defaults without calling MVG", async ({
     "transit",
     "transit",
   ]);
+});
+});
+
+test("live OpenFreeMap style dependencies load without making the map unavailable", async ({ page }) => {
+  const responses = new Map<string, number[]>();
+  page.on("response", (response) => {
+    const url = new URL(response.url());
+    if (url.origin !== OPENFREEMAP_ORIGIN) return;
+    const path = url.pathname.toLowerCase();
+    const kind = path === "/styles/liberty"
+      ? "style"
+      : /(?:^|\/)planet(?:\.json)?$/.test(path)
+        ? "tilejson"
+        : /\/sprites\/[^/]+(?:@\dx)?\.json$/.test(path)
+          ? "sprite-json"
+          : /\/sprites\/[^/]+(?:@\dx)?\.png$/.test(path)
+            ? "sprite-png"
+            : undefined;
+    if (kind) responses.set(kind, [...(responses.get(kind) ?? []), response.status()]);
+  });
+
+  await openPlanner(page);
+  const map = page.getByRole("region", { name: "Munich meeting area map" });
+  await expect(map.getByText("Loading Munich map…", { exact: true })).toHaveCount(0);
+  await expect(map.locator("canvas.maplibregl-canvas")).toBeVisible();
+  await expect(page.getByText("Map unavailable", { exact: true })).toHaveCount(0);
+
+  for (const kind of ["style", "tilejson", "sprite-json", "sprite-png"]) {
+    await expect
+      .poll(() => responses.get(kind)?.length ?? 0, { message: `${kind} response was not observed` })
+      .toBeGreaterThan(0);
+    expect(responses.get(kind)?.every((status) => status === 200), `${kind} response status`).toBe(true);
+  }
 });
