@@ -14,6 +14,8 @@ export const MAX_CORRIDOR_POLYGONS = 256;
 export const MAX_CORRIDOR_POSITIONS = 20_000;
 export const MAX_POIS = 100;
 export const MAX_STRING_LENGTH = 512;
+const DIRECT_MVG_PROVIDER = "mvg-direct-routing";
+const DIRECT_MVG_SOURCE_URL = "https://www.mvg.de/api/bgw-pt/v3";
 
 export interface ResponseValidationIssue {
   path: Array<string | number>;
@@ -415,6 +417,14 @@ function validateProviderDescriptor(value: unknown, role: "geocoding" | "routing
   if (!["demo-static", "scheduled", "live", "unknown"].includes(String(value.dataKind))) issues.push(issue(path.concat("dataKind"), "invalid_value", "Unknown provider data kind."));
   if (value.deployment !== "fixture" && value.dataKind === "demo-static") issues.push(issue(path, "contradictory_provenance", "Configured providers cannot report fixture/static data."));
   if (typeof value.liveData !== "boolean") issues.push(issue(path.concat("liveData"), "invalid_type", "liveData must be boolean."));
+  if (value.name === DIRECT_MVG_PROVIDER) {
+    if (value.dataKind !== "scheduled") {
+      issues.push(issue(path.concat("dataKind"), "invalid_value", "Direct MVG routing must be scheduled."));
+    }
+    if (value.liveData !== false) {
+      issues.push(issue(path.concat("liveData"), "invalid_value", "Direct MVG routing must be scheduled-only."));
+    }
+  }
   validateString(value.asOf, path.concat("asOf"), issues, 1);
   validateString(value.notes, path.concat("notes"), issues, 1);
   validateProviderProvenance(value.provenance, role, path.concat("provenance"), issues);
@@ -438,7 +448,37 @@ function validateProviderProvenance(value: unknown, role: "geocoding" | "routing
   validateString(value.version, path.concat("version"), issues, 1);
   validateString(value.retrievedAt, path.concat("retrievedAt"), issues, 1);
   validateString(value.notes, path.concat("notes"), issues, 1);
-  if (role === "routing" && value.dataKind === "scheduled") validateFeeds(value.feeds, path.concat("feeds"), issues);
+  if (role === "routing" && value.provider === DIRECT_MVG_PROVIDER) {
+    if (value.deployment !== "unknown") {
+      issues.push(issue(path.concat("deployment"), "invalid_value", "Direct MVG routing must use unknown deployment provenance."));
+    }
+    if (value.dataKind !== "scheduled") {
+      issues.push(issue(path.concat("dataKind"), "invalid_value", "Direct MVG provenance must be scheduled."));
+    }
+    if (value.sourceUrl !== DIRECT_MVG_SOURCE_URL) {
+      issues.push(issue(path.concat("sourceUrl"), "invalid_value", "Direct MVG provenance must use the fixed BGW PT v3 source URL."));
+    }
+    if (value.license !== null) {
+      issues.push(issue(path.concat("license"), "invalid_value", "Direct MVG provenance must not claim an unverified licence."));
+    }
+    if (value.liveData !== false) {
+      issues.push(issue(path.concat("liveData"), "invalid_value", "Direct MVG routing must be labelled scheduled-only."));
+    }
+    if (value.feeds !== null) {
+      issues.push(issue(path.concat("feeds"), "invalid_value", "Direct MVG routing does not claim MVG or MVV feed provenance."));
+    }
+    if (
+      !String(value.attribution).toLowerCase().includes("unofficial") ||
+      !String(value.notes).toLowerCase().includes("no sla") ||
+      !String(value.attribution).toLowerCase().includes("planned timestamps used") ||
+      !String(value.attribution).toLowerCase().includes("realtime fields ignored") ||
+      !String(value.notes).toLowerCase().includes("planned timestamps used") ||
+      !String(value.notes).toLowerCase().includes("realtime fields ignored")
+    ) {
+      issues.push(issue(path, "incomplete_provenance", "Direct MVG provenance must disclose its unofficial, no-SLA, scheduled-only status."));
+    }
+    validateIsoInstant(value.retrievedAt, path.concat("retrievedAt"), issues);
+  } else if (role === "routing" && value.dataKind === "scheduled") validateFeeds(value.feeds, path.concat("feeds"), issues);
   else if (value.feeds !== null) validateFeeds(value.feeds, path.concat("feeds"), issues);
   else if (value.feeds !== null) issues.push(issue(path.concat("feeds"), "invalid_value", "feeds must be null or a valid feed object."));
 }

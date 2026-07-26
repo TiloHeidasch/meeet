@@ -12,7 +12,7 @@ export const MAX_PROVIDER_TIMEOUT_MS = 10_000;
 export const DEFAULT_PROVIDER_MAX_RESPONSE_BYTES = 512 * 1024;
 export const MAX_PROVIDER_MAX_RESPONSE_BYTES = 2 * 1024 * 1024;
 
-export type ProviderMode = "fixture" | "configured";
+export type ProviderMode = "fixture" | "configured" | "mvg-direct-transit";
 
 export type ProviderEnvironment = Readonly<Record<string, string | undefined>>;
 
@@ -60,32 +60,56 @@ export function readProviderConfig(
   const allowHttpProviderEndpoints =
     env.MEEET_ALLOW_HTTP_PROVIDER_ENDPOINTS === "true" &&
     env.NODE_ENV === "development";
-  const endpoints = {
-    routingGatewayUrl: readOptionalUrl(
-      env.MEEET_ROUTING_GATEWAY_URL,
-      "MEEET_ROUTING_GATEWAY_URL",
-      allowHttpProviderEndpoints,
-    ),
-    geocodingUrl: readOptionalUrl(
-      env.MEEET_GEOCODING_ENDPOINT,
-      "MEEET_GEOCODING_ENDPOINT",
-      allowHttpProviderEndpoints,
-    ),
-    poiUrl: readOptionalUrl(
-      env.MEEET_POI_ENDPOINT,
-      "MEEET_POI_ENDPOINT",
-      allowHttpProviderEndpoints,
-    ),
-  };
   const requestedMode = env.MEEET_PROVIDER_MODE?.trim();
-  if (requestedMode && requestedMode !== "fixture" && requestedMode !== "configured") {
+  if (
+    requestedMode &&
+    requestedMode !== "fixture" &&
+    requestedMode !== "configured" &&
+    requestedMode !== "mvg-direct-transit"
+  ) {
     throw new ProviderConfigurationError(
-      "MEEET_PROVIDER_MODE must be fixture or configured.",
+      "MEEET_PROVIDER_MODE must be fixture, configured, or mvg-direct-transit.",
     );
   }
+
+  if (requestedMode === "mvg-direct-transit") {
+    rejectDirectProviderConfiguration(env);
+    const deployment = env.MEEET_PROVIDER_DEPLOYMENT?.trim();
+    if (deployment && deployment !== "unknown") {
+      throw new ProviderConfigurationError(
+        "MEEET_PROVIDER_DEPLOYMENT must be omitted or unknown in mvg-direct-transit mode.",
+      );
+    }
+  }
+
+  // Direct MVG routing has a fixed server-side origin. Provider endpoint,
+  // token, and source metadata variables are rejected in this mode rather
+  // than allowing an alternate integration to be silently ignored.
+  const endpoints =
+    requestedMode === "mvg-direct-transit"
+      ? { routingGatewayUrl: null, geocodingUrl: null, poiUrl: null }
+      : {
+          routingGatewayUrl: readOptionalUrl(
+            env.MEEET_ROUTING_GATEWAY_URL,
+            "MEEET_ROUTING_GATEWAY_URL",
+            allowHttpProviderEndpoints,
+          ),
+          geocodingUrl: readOptionalUrl(
+            env.MEEET_GEOCODING_ENDPOINT,
+            "MEEET_GEOCODING_ENDPOINT",
+            allowHttpProviderEndpoints,
+          ),
+          poiUrl: readOptionalUrl(
+            env.MEEET_POI_ENDPOINT,
+            "MEEET_POI_ENDPOINT",
+            allowHttpProviderEndpoints,
+          ),
+        };
   const hasConfiguredEndpoint = Object.values(endpoints).some(Boolean);
   const mode: ProviderMode =
-    requestedMode === "fixture" || (!requestedMode && !hasConfiguredEndpoint)
+    requestedMode === "mvg-direct-transit"
+      ? "mvg-direct-transit"
+      : requestedMode === "fixture" || (!requestedMode && !hasConfiguredEndpoint)
       ? "fixture"
       : "configured";
   const deployment = readDeployment(env.MEEET_PROVIDER_DEPLOYMENT);
@@ -115,9 +139,11 @@ export function readProviderConfig(
   return {
     mode,
     ...endpoints,
-    routingGatewayToken: readOptionalSecret(env.MEEET_ROUTING_GATEWAY_TOKEN),
-    geocodingToken: readOptionalSecret(env.MEEET_GEOCODING_TOKEN),
-    poiToken: readOptionalSecret(env.MEEET_POI_TOKEN),
+    routingGatewayToken:
+      mode === "mvg-direct-transit" ? null : readOptionalSecret(env.MEEET_ROUTING_GATEWAY_TOKEN),
+    geocodingToken:
+      mode === "mvg-direct-transit" ? null : readOptionalSecret(env.MEEET_GEOCODING_TOKEN),
+    poiToken: mode === "mvg-direct-transit" ? null : readOptionalSecret(env.MEEET_POI_TOKEN),
     deployment,
     timeoutMs: readBoundedInteger(
       env.MEEET_PROVIDER_TIMEOUT_MS,
@@ -144,6 +170,21 @@ export function readProviderConfig(
     geocodingSource,
     poiSource,
   };
+}
+
+function rejectDirectProviderConfiguration(env: ProviderEnvironment): void {
+  const configuredKeys = Object.keys(env).filter(
+    (key) =>
+      (key.startsWith("MEEET_ROUTING_") ||
+        key.startsWith("MEEET_GEOCODING_") ||
+        key.startsWith("MEEET_POI_")) &&
+      Boolean(env[key]?.trim()),
+  );
+  if (configuredKeys.length > 0) {
+    throw new ProviderConfigurationError(
+      `mvg-direct-transit cannot be combined with configured provider settings: ${configuredKeys.join(", ")}.`,
+    );
+  }
 }
 
 function readOptionalUrl(

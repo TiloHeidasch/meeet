@@ -13,8 +13,48 @@ cp .env.example .env.local
 npm run dev
 ```
 
-With no `MEEET_*` provider endpoint configured, calculations use deterministic
-local fixtures. This is not live MVG/MVV or realtime transit data.
+With `MEEET_PROVIDER_MODE=fixture` (the example default) and no provider
+endpoint configured, calculations use deterministic local fixtures. This path
+does not use MVG/MVV timetable data or realtime transit data.
+
+### Direct MVG transit mode
+
+To enable the implemented direct mode, set the following server-only values:
+
+```bash
+MEEET_PROVIDER_MODE=mvg-direct-transit
+MEEET_PROVIDER_DEPLOYMENT=unknown # or omit it
+MEEET_PROVIDER_TIMEOUT_MS=4000
+MEEET_PROVIDER_MAX_RESPONSE_BYTES=524288
+```
+
+This mode calls only the fixed, server-side unofficial endpoint
+`https://www.mvg.de/api/bgw-pt/v3` (the nearby-stations and routes paths), with
+no token. Any non-empty `MEEET_ROUTING_*`, `MEEET_GEOCODING_*`, or
+`MEEET_POI_*` variable conflicts with this mode and is rejected; deployment
+metadata must be omitted or `unknown`. The timeout and response-size settings
+still apply. The direct provider shares a four-request upstream concurrency cap
+within one Node process/instance; this is not a deployment-wide distributed
+limit, so multi-instance deployments can issue more concurrent requests and
+need external rate limiting if required. It enforces a 12-second calculation
+deadline, and an aborted browser/API request cancels queued and in-flight direct
+MVG work. Each upstream response is capped at 128 KiB (a larger configured
+response limit does not raise that cap). It does not retry automatically.
+
+Routing is scheduled, transit-only, and uses the complete 2x2 grid: 19
+destinations and at most 76 matrix entries for four participants. Origins and
+destinations are snapped to a returned station within 1,500 m, with access and
+egress estimated at 75 m/min. Planned timestamps are used and upstream
+realtime fields are ignored. Geocoding is fixture coordinate pass-through and
+POIs are static fixtures; there is no routing fallback. This mode does not
+provide bike or car routing and makes no MVV or official-MVG-API claim.
+
+Treat the upstream as moderate-use only: it is unofficial, potentially
+unstable, and has no SLA. Exact participant and grid-destination coordinates
+are sent to MVG for station lookup. The application cannot establish MVG
+operator logging or retention guarantees, so treat upstream logging and
+retention as uncertain; the existing server-side coordinate-lifetime and
+request-log precautions do not change that.
 
 ## Map configuration
 

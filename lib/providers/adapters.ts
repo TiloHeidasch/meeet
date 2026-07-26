@@ -23,6 +23,7 @@ import type {
   PoiProvider,
   RoutingProvider,
 } from "../domain/providers.ts";
+import { FULL_ROUTING_PROVIDER_CAPABILITIES } from "../domain/providers.ts";
 import type { ConfiguredSourceMetadata, ProviderConfig } from "./config.ts";
 import {
   createHttpJsonClient,
@@ -34,6 +35,7 @@ const MAX_POI_RESULTS = 100;
 
 export class GatewayRoutingProvider implements RoutingProvider {
   readonly descriptor: ProviderDescriptor;
+  readonly capabilities = FULL_ROUTING_PROVIDER_CAPABILITIES;
   private readonly client: HttpJsonClient;
 
   constructor(

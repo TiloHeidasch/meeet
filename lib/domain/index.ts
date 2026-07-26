@@ -10,3 +10,4 @@ export type {
   PoiProvider,
   RoutingProvider,
 } from "./providers.ts";
+export { FULL_ROUTING_PROVIDER_CAPABILITIES } from "./providers.ts";

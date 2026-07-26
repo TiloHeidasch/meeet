@@ -6,10 +6,7 @@ import {
   OFFICIAL_MUNICH_BOUNDARY_MANIFEST,
 } from "./boundary.ts";
 import {
-  createBoundedMunichGrid,
-  GRID_COLUMNS,
-  GRID_ROWS,
-  MAX_ROUTING_MATRIX_ENTRIES,
+  createGridForRoutingCapabilities,
 } from "./grid.ts";
 import type { MeetingProviders } from "./providers.ts";
 import { MEETING_TIME_ZONE } from "./types.ts";
@@ -30,6 +27,7 @@ import type {
   ProviderDescriptor,
   RoutingMatrixCell,
   RoutingMatrixRequest,
+  RoutingProviderCapabilities,
   RoutingParticipant,
   SampleGridCorridorProperties,
   TolerancePercent,
@@ -61,6 +59,27 @@ export class ProviderNotConfiguredError extends Error {
   }
 }
 
+export class InvalidRoutingRequestError extends Error {
+  readonly issues: readonly {
+    path: Array<string | number>;
+    code: string;
+    message: string;
+  }[];
+
+  constructor(
+    message: string,
+    issues: readonly {
+      path: Array<string | number>;
+      code: string;
+      message: string;
+    }[],
+  ) {
+    super(message);
+    this.name = "InvalidRoutingRequestError";
+    this.issues = issues;
+  }
+}
+
 export class ResolvedLocationOutsideMunichError extends Error {
   constructor() {
     super("The resolved location is outside the official Munich application boundary.");
@@ -76,21 +95,18 @@ interface VerifiedGridCell {
 export async function calculateMeeting(
   input: MeetingCalculationInput,
   providers: MeetingProviders,
+  signal?: AbortSignal,
 ): Promise<MeetingCalculationResponse> {
+  const capabilities = providers.routing.capabilities;
+  const grid = selectRoutingGrid(capabilities);
+  validateRoutingRequest(input, capabilities, grid.destinations.length);
   const participants = await resolveParticipants(input.participants, providers);
-  const grid = createBoundedMunichGrid();
   const matrixRequest: RoutingMatrixRequest = {
     participants: participants.map(toRoutingParticipant),
     destinations: grid.destinations,
     departureAt: input.departureAt,
+    signal,
   };
-
-  if (
-    matrixRequest.participants.length * matrixRequest.destinations.length >
-    MAX_ROUTING_MATRIX_ENTRIES
-  ) {
-    throw new ProviderUnavailableError("routing");
-  }
 
   const matrix = await invokeProvider("routing", () =>
     providers.routing.getTravelTimeMatrix(matrixRequest),
@@ -128,6 +144,7 @@ export async function calculateMeeting(
   const corridor = createCorridor(
     verifiedCells.map(({ cell }) => cell),
     input.tolerancePercent,
+    grid,
   );
   const pois = await invokeProvider("poi", () =>
     providers.poi.findFoodAndDrink(corridor.geometry),
@@ -256,6 +273,7 @@ function findVerifiedCells(
 function createCorridor(
   cells: readonly GridCell[],
   tolerancePercent: TolerancePercent,
+  grid: { columns: number; rows: number },
 ): MeetingCorridor {
   const properties: SampleGridCorridorProperties = {
     kind: "sample-grid-corridor",
@@ -263,8 +281,8 @@ function createCorridor(
     verification: "center-and-clipped-vertices",
     tolerancePercent,
     cellCount: cells.length,
-    gridColumns: GRID_COLUMNS,
-    gridRows: GRID_ROWS,
+    gridColumns: grid.columns,
+    gridRows: grid.rows,
     boundaryName: "OFFICIAL_MUNICH_STADTBEZIRKE_APPLICATION_COLLECTION",
     geometryGuarantee: SAMPLE_GRID_APPROXIMATION_NOTICE,
   };
@@ -274,6 +292,70 @@ function createCorridor(
   };
 
   return { type: "Feature", properties, geometry };
+}
+
+function selectRoutingGrid(
+  capabilities: RoutingProviderCapabilities,
+) {
+  try {
+    return createGridForRoutingCapabilities(capabilities);
+  } catch {
+    throw new InvalidRoutingRequestError(
+      "The selected routing provider cannot serve a complete bounded Munich grid.",
+      [
+        {
+          path: ["participants"],
+          code: "routing_grid_exceeds_provider_cap",
+          message: "The selected provider cannot serve a complete grid for this request.",
+        },
+      ],
+    );
+  }
+}
+
+function validateRoutingRequest(
+  input: MeetingCalculationInput,
+  capabilities: RoutingProviderCapabilities,
+  destinationCount: number,
+): void {
+  const issues: Array<{ path: Array<string | number>; code: string; message: string }> = [];
+  if (input.participants.length > capabilities.maxParticipants) {
+    issues.push({
+      path: ["participants"],
+      code: "routing_provider_participant_cap",
+      message: `The selected routing provider supports at most ${capabilities.maxParticipants} participants.`,
+    });
+  }
+  input.participants.forEach((participant, index) => {
+    if (!capabilities.supportedModes.includes(participant.mode)) {
+      issues.push({
+        path: ["participants", index, "mode"],
+        code: "routing_mode_unsupported",
+        message: `The selected routing provider does not support ${participant.mode} travel.`,
+      });
+    }
+  });
+  if (destinationCount > capabilities.maxDestinations) {
+    issues.push({
+      path: ["participants"],
+      code: "routing_provider_destination_cap",
+      message: `The selected routing provider supports at most ${capabilities.maxDestinations} destinations.`,
+    });
+  }
+  const entries = input.participants.length * destinationCount;
+  if (entries > capabilities.maxMatrixEntries) {
+    issues.push({
+      path: ["participants"],
+      code: "routing_provider_matrix_cap",
+      message: `The selected routing provider supports at most ${capabilities.maxMatrixEntries} matrix entries.`,
+    });
+  }
+  if (issues.length > 0) {
+    throw new InvalidRoutingRequestError(
+      "The request exceeds the selected routing provider capabilities.",
+      issues,
+    );
+  }
 }
 
 function chooseRepresentativeCell(
@@ -427,7 +509,9 @@ function createMetadata(providers: MeetingProviders): MeetingCalculationMetadata
       dataKind,
       liveData: descriptors.some((descriptor) => descriptor.liveData),
       label:
-        dataKind === "demo-static"
+        providers.routing.descriptor.provenance.provider === "mvg-direct-routing"
+          ? "Unofficial MVG scheduled routing + fixture coordinate resolution/static POIs"
+          : dataKind === "demo-static"
           ? "Local static demo providers"
           : "Configured provider adapters",
     },

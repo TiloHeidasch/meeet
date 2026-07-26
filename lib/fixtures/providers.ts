@@ -16,6 +16,7 @@ import type {
   PoiProvider,
   RoutingProvider,
 } from "../domain/providers.ts";
+import { FULL_ROUTING_PROVIDER_CAPABILITIES } from "../domain/providers.ts";
 import { FIXTURE_POIS } from "./poi-data.ts";
 
 export const FIXTURE_PROVIDER_VERSION = "munich-phase-1-demo-fixture-v2";
@@ -70,6 +71,7 @@ export class FixtureGeocodingProvider implements GeocodingProvider {
 
 export class FixtureRoutingProvider implements RoutingProvider {
   readonly descriptor = createDescriptor("local-demo-fixture-routing", "routing");
+  readonly capabilities = FULL_ROUTING_PROVIDER_CAPABILITIES;
 
   async getTravelTimeMatrix(
     request: RoutingMatrixRequest,

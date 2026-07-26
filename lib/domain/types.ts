@@ -93,6 +93,7 @@ export interface RoutingMatrixRequest {
   participants: readonly RoutingParticipant[];
   destinations: readonly RoutingMatrixDestination[];
   departureAt: string;
+  signal?: AbortSignal;
 }
 
 export interface RoutingMatrixCell {
@@ -108,6 +109,13 @@ export interface RoutingMatrixResponse {
   contractVersion: "meeet-routing-gateway/v1";
   departureAt: string;
   travelTimes: readonly RoutingMatrixCell[];
+}
+
+export interface RoutingProviderCapabilities {
+  supportedModes: readonly TravelMode[];
+  maxParticipants: number;
+  maxDestinations: number;
+  maxMatrixEntries: number;
 }
 
 export interface ComparableTravelTimeRange {

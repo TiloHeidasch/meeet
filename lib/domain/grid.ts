@@ -6,27 +6,50 @@ import { fromGeoJsonPosition, isPointInGeoJsonGeometry, toGeoJsonPosition } from
 import type {
   BoundedMunichGrid,
   GridCell,
+  RoutingProviderCapabilities,
   LocationCoordinate,
   RoutingMatrixDestination,
 } from "./types.ts";
 
-/** Bounded deliberately to keep a four-person matrix below the provider cap. */
+/** The normal grid is deliberately bounded to keep a four-person matrix small. */
 export const GRID_COLUMNS = 10;
 export const GRID_ROWS = 8;
+export const DIRECT_MVG_GRID_COLUMNS = 2;
+export const DIRECT_MVG_GRID_ROWS = 2;
+export const DEFAULT_GRID_PROFILE = {
+  columns: GRID_COLUMNS,
+  rows: GRID_ROWS,
+} as const;
+export const DIRECT_MVG_GRID_PROFILE = {
+  columns: DIRECT_MVG_GRID_COLUMNS,
+  rows: DIRECT_MVG_GRID_ROWS,
+} as const;
+export type GridProfile = Readonly<{ columns: number; rows: number }>;
 export const MAX_GRID_CELLS = GRID_COLUMNS * GRID_ROWS;
 export const MAX_ROUTING_MATRIX_DESTINATIONS = 400;
 export const MAX_ROUTING_MATRIX_ENTRIES = 1600;
 export const MAX_CELL_SAMPLE_VERTICES = 4;
 
-export function createBoundedMunichGrid(): BoundedMunichGrid {
+export function createBoundedMunichGrid(
+  profile: GridProfile = DEFAULT_GRID_PROFILE,
+): BoundedMunichGrid {
+  if (
+    !Number.isInteger(profile.columns) ||
+    !Number.isInteger(profile.rows) ||
+    profile.columns < 1 ||
+    profile.rows < 1 ||
+    profile.columns * profile.rows > MAX_GRID_CELLS
+  ) {
+    throw new RangeError("The Munich grid profile is outside the bounded range.");
+  }
   const latitudeStep =
     (OFFICIAL_MUNICH_BOUNDARY_BOUNDS.maxLatitude -
       OFFICIAL_MUNICH_BOUNDARY_BOUNDS.minLatitude) /
-    GRID_ROWS;
+    profile.rows;
   const longitudeStep =
     (OFFICIAL_MUNICH_BOUNDARY_BOUNDS.maxLongitude -
       OFFICIAL_MUNICH_BOUNDARY_BOUNDS.minLongitude) /
-    GRID_COLUMNS;
+    profile.columns;
   const destinations: RoutingMatrixDestination[] = [];
   const destinationKeys = new Map<string, string>();
   const cells: GridCell[] = [];
@@ -46,8 +69,8 @@ export function createBoundedMunichGrid(): BoundedMunichGrid {
     return id;
   };
 
-  for (let row = 0; row < GRID_ROWS; row += 1) {
-    for (let column = 0; column < GRID_COLUMNS; column += 1) {
+  for (let row = 0; row < profile.rows; row += 1) {
+    for (let column = 0; column < profile.columns; column += 1) {
       const minLatitude =
         OFFICIAL_MUNICH_BOUNDARY_BOUNDS.minLatitude + row * latitudeStep;
       const maxLatitude = minLatitude + latitudeStep;
@@ -103,11 +126,32 @@ export function createBoundedMunichGrid(): BoundedMunichGrid {
   }
 
   return {
-    columns: GRID_COLUMNS,
-    rows: GRID_ROWS,
+    columns: profile.columns,
+    rows: profile.rows,
     cells,
     destinations,
   };
+}
+
+/**
+ * Selects a complete profile before any provider work starts. Profiles are
+ * built in full; a provider cap never causes the default grid to be sliced.
+ */
+export function createGridForRoutingCapabilities(
+  capabilities: RoutingProviderCapabilities,
+): BoundedMunichGrid {
+  const profiles = [DEFAULT_GRID_PROFILE, DIRECT_MVG_GRID_PROFILE];
+  for (const profile of profiles) {
+    const grid = createBoundedMunichGrid(profile);
+    if (
+      grid.destinations.length <= capabilities.maxDestinations &&
+      capabilities.maxParticipants * grid.destinations.length <=
+        capabilities.maxMatrixEntries
+    ) {
+      return grid;
+    }
+  }
+  throw new RangeError("No complete Munich grid profile fits the routing provider cap.");
 }
 
 function selectSampleVertices(

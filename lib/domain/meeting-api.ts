@@ -3,6 +3,7 @@ import {
   ProviderNotConfiguredError,
   ProviderUnavailableError,
   ResolvedLocationOutsideMunichError,
+  InvalidRoutingRequestError,
 } from "./meeting.ts";
 import type { MeetingProviders } from "./providers.ts";
 import {
@@ -75,9 +76,17 @@ export async function handleMeetingPost(
   }
 
   try {
-    const result = await calculateMeeting(parsed.data, providers);
+    const result = await calculateMeeting(parsed.data, providers, request.signal);
     return Response.json(assertMeetingCalculationResponse(result), { status: 200 });
   } catch (error) {
+    if (error instanceof InvalidRoutingRequestError) {
+      return jsonError(
+        400,
+        "INVALID_REQUEST",
+        error.message,
+        error.issues,
+      );
+    }
     if (error instanceof ResolvedLocationOutsideMunichError) {
       return jsonError(
         400,

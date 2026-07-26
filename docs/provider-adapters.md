@@ -11,8 +11,8 @@ never `NEXT_PUBLIC_*` values.
 
 | Variable | Meaning |
 | --- | --- |
-| `MEEET_PROVIDER_MODE` | `fixture` or `configured`; defaults to `fixture` when no provider endpoint is present |
-| `MEEET_PROVIDER_DEPLOYMENT` | `fixture`, `self-hosted`, `managed`, or `unknown` metadata |
+| `MEEET_PROVIDER_MODE` | `fixture`, `configured`, or `mvg-direct-transit`; defaults to `fixture` when no provider endpoint is present |
+| `MEEET_PROVIDER_DEPLOYMENT` | `fixture`, `self-hosted`, `managed`, or `unknown` metadata; direct mode requires this to be omitted or `unknown` |
 | `MEEET_PROVIDER_TIMEOUT_MS` | HTTP timeout, bounded to 250–10,000 ms |
 | `MEEET_PROVIDER_MAX_RESPONSE_BYTES` | Response limit, bounded to 16 KiB–2 MiB |
 | `MEEET_ALLOW_HTTP_PROVIDER_ENDPOINTS` | Trusted local HTTP exception only; must remain false in production |
@@ -27,13 +27,74 @@ name/URL, attribution, version, and ISO retrieval-date variables. Placeholder
 or missing provenance fails configuration; it is never emitted as fixture
 metadata.
 
-With no endpoint configured, the deterministic local providers remain active.
-If any endpoint is configured, missing provider endpoints intentionally return
-`PROVIDER_NOT_CONFIGURED`; there is no public-service fallback. Invalid
-configuration returns `PROVIDER_CONFIGURATION_INVALID`. Configured network,
-timeout, response-size, or shape failures return `PROVIDER_UNAVAILABLE`.
+With no endpoint configured and no explicit direct mode, the deterministic local
+providers remain active. If any endpoint is configured, missing provider
+endpoints intentionally return `PROVIDER_NOT_CONFIGURED`; there is no
+public-service fallback. Invalid configuration returns
+`PROVIDER_CONFIGURATION_INVALID`. Configured network, timeout, response-size,
+or shape failures return `PROVIDER_UNAVAILABLE`.
 Configured URLs are fixed server-side allowlist entries; clients cannot submit
 provider URLs. HTTPS is required by default and redirects are rejected.
+
+In `mvg-direct-transit`, the mode-specific configuration checks reject any
+deployment value other than omitted or `unknown`, and reject any non-empty
+`MEEET_ROUTING_*`, `MEEET_GEOCODING_*`, or `MEEET_POI_*` variable. This includes
+gateway URLs, tokens, and role-specific source metadata. Direct mode has no
+configurable provider URL, requires no token, and does not require configured
+feed/source provenance. The provider timeout and maximum-response settings
+remain active; their direct-mode behavior is described below.
+
+## Direct MVG transit mode
+
+`MEEET_PROVIDER_MODE=mvg-direct-transit` selects a server-side routing provider
+whose only network origin is the fixed unofficial MVG BGW PT v3 base endpoint:
+
+```
+https://www.mvg.de/api/bgw-pt/v3
+```
+
+The provider uses `/stations/nearby` and `/routes` below that base URL, sends no
+token, rejects redirects, and has no configurable URL or routing fallback. This
+is an unofficial integration with an unstable upstream and no SLA; use it for
+moderate traffic only. It makes no claim to an official MVG API or to MVV data
+or an official MVV API.
+
+The direct routing contract is deliberately bounded:
+
+- Transit mode only. Bike and car routing are not provided by this mode.
+- A complete 2x2 Munich grid is selected, with 19 unique destinations. With
+  four participants, this is 76 matrix entries; the grid is not truncated to
+  fit a smaller partial result.
+- Each participant origin and grid destination is snapped to the nearest
+  returned station within 1,500 m. Access and egress use 75 m/min.
+- Planned timestamps are used. Upstream realtime fields are ignored; this
+  mode does not claim realtime predictions.
+- The shared server-side upstream limiter allows four direct MVG requests in
+  flight within one Node process/instance. This is not a deployment-wide
+  distributed limit: multi-instance deployments can issue more concurrent
+  requests and require external rate limiting if needed. One matrix
+  calculation has a 12-second deadline, and an aborted browser/API request
+  cancels queued and in-flight direct MVG work.
+- `MEEET_PROVIDER_TIMEOUT_MS` still controls each direct HTTP call and remains
+  bounded to 250–10,000 ms. `MEEET_PROVIDER_MAX_RESPONSE_BYTES` still applies,
+  but each direct upstream response is capped at `min(setting, 128 KiB)`; the
+  general setting remains bounded to 16 KiB–2 MiB. The example default of 512
+  KiB therefore has an effective direct cap of 128 KiB.
+- Direct requests have no automatic retries. Upstream timeout, network, HTTP,
+  response-size, or shape failures do not fall back to fixture routing.
+
+Direct mode composes the direct routing provider with fixture geocoding and
+fixture POIs: submitted coordinates pass through the fixture geocoder without
+an external geocoding call, and the POI result is drawn from static fixture
+entries filtered to the resulting corridor.
+
+Exact WGS84 participant origins and grid-destination coordinates are sent to
+MVG's nearby-stations endpoint for station lookup. Subsequent route calls use
+the selected station IDs and planned routing timestamps. Treat coordinates as
+disclosed to MVG. The application does not establish the MVG operator's
+logging or retention policy; that policy is uncertain, and application-side
+request-log redaction and calculation-lifetime retention cannot guarantee what
+the upstream retains.
 
 ## Routing gateway
 

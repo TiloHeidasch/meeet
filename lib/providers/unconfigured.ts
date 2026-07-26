@@ -9,6 +9,7 @@ import type {
   PoiProvider,
   RoutingProvider,
 } from "../domain/providers.ts";
+import { FULL_ROUTING_PROVIDER_CAPABILITIES } from "../domain/providers.ts";
 import type {
   ProviderDescriptor,
   ProviderProvenance,
@@ -52,6 +53,7 @@ class UnconfiguredGeocodingProvider implements GeocodingProvider {
 
 class UnconfiguredRoutingProvider implements RoutingProvider {
   readonly descriptor = { ...descriptor, name: "unconfigured-routing-provider" };
+  readonly capabilities = FULL_ROUTING_PROVIDER_CAPABILITIES;
 
   async getTravelTimeMatrix(): Promise<never> {
     throw new ProviderNotConfiguredError("routing");

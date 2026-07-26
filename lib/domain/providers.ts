@@ -9,7 +9,16 @@ import type {
   RoutingMatrixRequest,
   RoutingMatrixResponse,
   MapConfigurationProvenance,
+  RoutingProviderCapabilities,
 } from "./types.ts";
+import { TRAVEL_MODES } from "./types.ts";
+
+export const FULL_ROUTING_PROVIDER_CAPABILITIES: RoutingProviderCapabilities = {
+  supportedModes: TRAVEL_MODES,
+  maxParticipants: 4,
+  maxDestinations: 400,
+  maxMatrixEntries: 1600,
+};
 
 /** Server-only boundary for replacing fixture geocoding in Phase 2. */
 export interface GeocodingProvider {
@@ -23,6 +32,7 @@ export interface GeocodingProvider {
  */
 export interface RoutingProvider {
   readonly descriptor: ProviderDescriptor;
+  readonly capabilities: RoutingProviderCapabilities;
   getTravelTimeMatrix(request: RoutingMatrixRequest): Promise<RoutingMatrixResponse>;
 }
 

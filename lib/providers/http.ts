@@ -10,7 +10,13 @@ export interface HttpJsonClientOptions {
 }
 
 export class HttpProviderError extends Error {
-  readonly kind: "timeout" | "http" | "response-too-large" | "invalid-json" | "network";
+  readonly kind:
+    | "timeout"
+    | "aborted"
+    | "http"
+    | "response-too-large"
+    | "invalid-json"
+    | "network";
 
   constructor(
     kind: HttpProviderError["kind"],
@@ -30,42 +36,78 @@ export class HttpJsonClient {
     private readonly fetchImplementation: FetchImplementation = fetch,
   ) {}
 
-  async postJson<T>(payload: unknown): Promise<T> {
+  async postJson<T>(payload: unknown, signal?: AbortSignal): Promise<T> {
+    return this.requestJson<T>(this.options.endpointUrl, "POST", payload, signal);
+  }
+
+  async getJson<T>(url = this.options.endpointUrl, signal?: AbortSignal): Promise<T> {
+    return this.requestJson<T>(url, "GET", undefined, signal);
+  }
+
+  private async requestJson<T>(
+    url: string,
+    method: "GET" | "POST",
+    payload?: unknown,
+    externalSignal?: AbortSignal,
+  ): Promise<T> {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), this.options.timeoutMs);
+    const abortFromExternal = () => controller.abort();
+    if (externalSignal?.aborted) {
+      clearTimeout(timeout);
+      throw new HttpProviderError("aborted", "Provider request was aborted.");
+    }
+    externalSignal?.addEventListener("abort", abortFromExternal, { once: true });
     try {
-      const headers = new Headers({ "content-type": "application/json", accept: "application/json" });
+      const headers = new Headers({ accept: "application/json" });
+      if (method === "POST") {
+        headers.set("content-type", "application/json");
+      }
       if (this.options.token) {
         headers.set("authorization", `Bearer ${this.options.token}`);
       }
       let response: Response;
       try {
-        response = await this.fetchImplementation(this.options.endpointUrl, {
-          method: "POST",
+        response = await this.fetchImplementation(url, {
+          method,
           headers,
-          body: JSON.stringify(payload),
+          ...(method === "POST" ? { body: JSON.stringify(payload) } : {}),
           signal: controller.signal,
           redirect: "error",
         });
       } catch (error) {
+        if (externalSignal?.aborted) {
+          throw new HttpProviderError("aborted", "Provider request was aborted.");
+        }
         if (controller.signal.aborted) {
-          throw new HttpProviderError("timeout", "Configured provider request timed out.");
+          throw new HttpProviderError("timeout", "Provider request timed out.");
         }
         throw new HttpProviderError(
           "network",
-          error instanceof Error ? "Configured provider request failed." : "Configured provider request failed.",
+          error instanceof Error ? "Provider request failed." : "Provider request failed.",
         );
       }
       if (!response.ok) {
         throw new HttpProviderError("http", `Configured provider returned HTTP ${response.status}.`);
       }
-      if (response.url && response.url !== this.options.endpointUrl) {
+      if (response.url && response.url !== url) {
         throw new HttpProviderError(
           "http",
           "Configured provider response URL did not match the fixed endpoint.",
         );
       }
-      const text = await readBoundedText(response, this.options.maxResponseBytes);
+      let text: string;
+      try {
+        text = await readBoundedText(response, this.options.maxResponseBytes);
+      } catch (error) {
+        if (externalSignal?.aborted) {
+          throw new HttpProviderError("aborted", "Provider request was aborted.");
+        }
+        if (controller.signal.aborted) {
+          throw new HttpProviderError("timeout", "Provider request timed out.");
+        }
+        throw error;
+      }
       try {
         return JSON.parse(text) as T;
       } catch {
@@ -73,6 +115,7 @@ export class HttpJsonClient {
       }
     } finally {
       clearTimeout(timeout);
+      externalSignal?.removeEventListener("abort", abortFromExternal);
     }
   }
 }

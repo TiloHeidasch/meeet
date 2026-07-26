@@ -117,3 +117,37 @@ test("provider error response is announced while meeting controls remain availab
   await expect(page.getByRole("button", { name: /Add participant/ })).toBeEnabled();
   await expect(page.getByRole("button", { name: "Find meeting area" })).toBeEnabled();
 });
+
+test("direct mode hands off transit-only defaults without calling MVG", async ({ page }) => {
+  test.skip(
+    process.env.MEEET_PROVIDER_MODE !== "mvg-direct-transit",
+    "requires the browser server to be started in direct mode",
+  );
+
+  let submitted: { participants?: Array<{ mode?: string }> } | undefined;
+  await page.route("**/api/meeting/calculate", async (route) => {
+    submitted = route.request().postDataJSON() as typeof submitted;
+    await route.fulfill({
+      status: 503,
+      contentType: "application/json",
+      body: JSON.stringify({ error: { message: "Intercepted for a network-free UI check." } }),
+    });
+  });
+
+  await page.goto("/");
+  await expect(page.getByText("MVG direct · public transport only", { exact: true })).toBeVisible();
+  await expect(page.locator('[aria-live="polite"]')).toHaveText(
+    "Scheduled MVG public transport · static demo venues · realtime ignored.",
+  );
+  await expect(page.getByRole("radio", { name: "Public transport" })).toHaveCount(2);
+  await expect(page.getByRole("radio", { name: "Bike" })).toHaveCount(0);
+  await expect(page.getByRole("radio", { name: "Car" })).toHaveCount(0);
+  await page.getByRole("button", { name: "Find meeting area" }).click();
+  await expect(page.locator('[aria-live="polite"]')).toHaveText(
+    "Intercepted for a network-free UI check.",
+  );
+  expect(submitted?.participants?.map((participant) => participant.mode)).toEqual([
+    "transit",
+    "transit",
+  ]);
+});

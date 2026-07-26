@@ -3,6 +3,7 @@ import "server-only";
 import type { MeetingProviders } from "../domain/providers.ts";
 import { fixtureProviders } from "../fixtures/providers.ts";
 import { GatewayRoutingProvider, HttpGeocodingProvider, HttpPoiProvider } from "./adapters.ts";
+import { MvgDirectRoutingProvider } from "./mvg-direct.ts";
 import {
   readProviderConfig,
   type ProviderConfig,
@@ -16,6 +17,16 @@ export function createMeetingProviders(
   const config = readProviderConfig(env);
   if (config.mode === "fixture") {
     return withMapConfiguration(fixtureProviders, config);
+  }
+  if (config.mode === "mvg-direct-transit") {
+    return withMapConfiguration(
+      {
+        geocoding: fixtureProviders.geocoding,
+        routing: new MvgDirectRoutingProvider(config),
+        poi: fixtureProviders.poi,
+      },
+      config,
+    );
   }
   return withMapConfiguration(createConfiguredProviders(config), config);
 }

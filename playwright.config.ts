@@ -21,7 +21,10 @@ export default defineConfig({
   webServer: {
     command: `npm run dev -- --hostname 127.0.0.1 --port ${port}`,
     env: {
-      MEEET_PROVIDER_MODE: "fixture",
+      MEEET_PROVIDER_MODE:
+        process.env.MEEET_PROVIDER_MODE === "mvg-direct-transit"
+          ? "mvg-direct-transit"
+          : "fixture",
       MEEET_GEOCODING_ENDPOINT: "",
       MEEET_POI_ENDPOINT: "",
       MEEET_ROUTING_GATEWAY_URL: "",
