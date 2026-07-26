@@ -5,7 +5,7 @@ provider URLs and credentials remain server-side.
 
 ## Local development
 
-Requires Node `>=22.0.0` (the supported Next 16 / pinned MapLibre 6 runtime).
+Requires Node `24.x` (the supported Next 16 / pinned MapLibre 6 runtime).
 
 ```bash
 npm install

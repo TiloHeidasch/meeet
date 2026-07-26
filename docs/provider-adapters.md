@@ -1,6 +1,6 @@
 # Phase 2 provider deployment contract
 
-Runtime baseline: Node `>=22.0.0`, matching the pinned MapLibre 6 dependency
+Runtime baseline: Node `24.x`, matching the pinned MapLibre 6 dependency
 graph and the Next 16 application runtime.
 
 The browser calls only `/api/meeting/calculate`. Provider endpoints and
