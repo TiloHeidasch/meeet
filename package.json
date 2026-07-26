@@ -15,7 +15,6 @@
     "boundary:refresh": "tsx scripts/refresh-munich-boundary.ts"
   },
   "dependencies": {
-    "@vercel/speed-insights": "^2.0.0",
     "maplibre-gl": "6.0.0",
     "next": "16.2.12",
     "polygon-clipping": "0.15.7",
