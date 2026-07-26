@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import { AttributionControl, Map, NavigationControl, type GeoJSONSource } from "maplibre-gl";
+import { AttributionControl, Map, NavigationControl, setWorkerUrl, type GeoJSONSource } from "maplibre-gl";
 import "maplibre-gl/dist/maplibre-gl.css";
 import type { MeetingCorridor } from "@/lib/domain/types";
 
@@ -13,7 +13,10 @@ type PointFeature = { type: "Feature"; id: string; properties: Record<string, st
 type PointCollection = { type: "FeatureCollection"; features: PointFeature[] };
 const MUNICH_CENTER: [number, number] = [11.576, 48.137];
 const DEFAULT_MAP_STYLE_URL = "https://tiles.openfreemap.org/styles/liberty";
+const MAP_WORKER_URL = "/vendor/maplibre-gl/maplibre-gl-worker.mjs";
 type MapLibreErrorDetails = { message?: unknown; status?: unknown; url?: unknown };
+
+setWorkerUrl(MAP_WORKER_URL);
 
 function participantData(items: readonly MapParticipant[]): PointCollection { return { type: "FeatureCollection", features: items.map((p) => ({ type: "Feature", id: p.id, properties: { id: p.id, number: p.number, label: p.label, mode: p.mode, color: p.color }, geometry: { type: "Point", coordinates: [p.longitude, p.latitude] } })) }; }
 function poiData(items: readonly MapPoi[]): PointCollection { return { type: "FeatureCollection", features: items.map((p) => ({ type: "Feature", id: p.id, properties: { id: p.id, number: p.number, name: p.name, category: p.category }, geometry: { type: "Point", coordinates: p.coordinates } })) }; }
@@ -53,15 +56,35 @@ export default function MapLibreCanvas({ corridor, participants, pois, selectedP
 
   useEffect(() => {
     if (!containerRef.current) { setState("unavailable"); return; }
+    const mapContainer = containerRef.current;
     let map!: Map;
     let constructed = false;
     let active = true;
     let failed = false;
     let initialized = false;
     let initializationTimer: ReturnType<typeof setTimeout> | undefined;
+    let resizeFrame: number | undefined;
+    let resizeObserver: ResizeObserver | undefined;
     const clearInitializationTimer = () => {
       if (initializationTimer) clearTimeout(initializationTimer);
       initializationTimer = undefined;
+    };
+    const stopResizeObservation = () => {
+      resizeObserver?.disconnect();
+      resizeObserver = undefined;
+      if (resizeFrame !== undefined) {
+        if (typeof window !== "undefined") window.cancelAnimationFrame(resizeFrame);
+        resizeFrame = undefined;
+      }
+    };
+    const resizeMap = () => {
+      resizeFrame = undefined;
+      if (!active || failed || !constructed || mapRef.current !== map) return;
+      try { map.resize(); } catch { fail(); }
+    };
+    const scheduleResize = () => {
+      if (!active || failed || !constructed || resizeFrame !== undefined || typeof window === "undefined") return;
+      resizeFrame = window.requestAnimationFrame(resizeMap);
     };
     const fail = () => {
       if (!active || failed) return;
@@ -69,8 +92,10 @@ export default function MapLibreCanvas({ corridor, participants, pois, selectedP
       loadedRef.current = false;
       active = false;
       clearInitializationTimer();
+      stopResizeObservation();
       if (constructed) {
         map.off("style.load", onStyleLoad);
+        map.off("load", onMapLoad);
         map.off("error", onMapError);
         map.remove();
         constructed = false;
@@ -84,7 +109,6 @@ export default function MapLibreCanvas({ corridor, participants, pois, selectedP
     };
     const onStyleLoad = () => {
       if (!active || failed || initialized) return;
-      clearInitializationTimer();
       try {
         const current = inputsRef.current;
         map.addSource("meeet-corridor", { type: "geojson", data: current.corridor ?? { type: "FeatureCollection", features: [] } });
@@ -100,27 +124,42 @@ export default function MapLibreCanvas({ corridor, participants, pois, selectedP
         map.on("click", "meeet-poi-points", (event) => { if (!active) return; const id = event.features?.[0]?.properties?.id; if (typeof id === "string") inputsRef.current.onPoiSelect(id); });
         map.on("mouseenter", "meeet-poi-points", () => { if (active) map.getCanvas().style.cursor = "pointer"; }); map.on("mouseleave", "meeet-poi-points", () => { if (active) map.getCanvas().style.cursor = ""; });
         initialized = true;
-        loadedRef.current = true;
-        setState("ready");
       } catch { fail(); }
     };
+    const onMapLoad = () => {
+      if (!active || failed || !initialized) return;
+      clearInitializationTimer();
+      loadedRef.current = true;
+      setState("ready");
+      scheduleResize();
+    };
     try {
-      map = new Map({ container: containerRef.current, style: styleUrl, center: MUNICH_CENTER, zoom: 11, attributionControl: false });
+      map = new Map({ container: mapContainer, style: styleUrl, center: MUNICH_CENTER, zoom: 11, attributionControl: false });
       constructed = true;
       mapRef.current = map;
       map.addControl(new AttributionControl({ compact: true, customAttribution }), "bottom-right");
       map.addControl(new NavigationControl({ showCompass: false }), "top-right");
       initializationTimer = setTimeout(fail, 12000);
       map.once("style.load", onStyleLoad);
+      map.on("load", onMapLoad);
       map.on("error", onMapError);
+      if (typeof ResizeObserver !== "undefined") {
+        try {
+          resizeObserver = new ResizeObserver(scheduleResize);
+          resizeObserver.observe(mapContainer);
+        } catch { resizeObserver = undefined; }
+      }
+      scheduleResize();
     } catch { queueMicrotask(fail); }
     return () => {
       active = false;
       failed = true;
       loadedRef.current = false;
       clearInitializationTimer();
+      stopResizeObservation();
       if (constructed) {
         map.off("style.load", onStyleLoad);
+        map.off("load", onMapLoad);
         map.off("error", onMapError);
         map.remove();
         constructed = false;
@@ -130,5 +169,5 @@ export default function MapLibreCanvas({ corridor, participants, pois, selectedP
   }, [styleUrl, customAttribution]);
 
   useEffect(() => { const map = mapRef.current; if (!map || !loadedRef.current) return; const corridorSource = map.getSource("meeet-corridor") as GeoJSONSource | undefined; const participantsSource = map.getSource("meeet-participants") as GeoJSONSource | undefined; const poisSource = map.getSource("meeet-pois") as GeoJSONSource | undefined; corridorSource?.setData(corridor ?? { type: "FeatureCollection", features: [] }); participantsSource?.setData(participantData(participants)); poisSource?.setData(poiData(pois)); if (map.getLayer("meeet-poi-selected")) map.setFilter("meeet-poi-selected", ["==", ["get", "id"], selectedPoiId ?? ""]); }, [corridor, participants, pois, selectedPoiId, state]);
-  return <section className="relative h-full min-h-[430px] overflow-hidden rounded-[1.75rem] border border-[#cbd7cd] bg-[#dce9df] shadow-[0_18px_50px_rgba(52,74,59,.13)]" aria-labelledby="map-title"><h2 id="map-title" className="sr-only">Munich meeting area map</h2><div ref={containerRef} className="absolute inset-0" aria-label="Interactive Munich map showing the equal-time corridor, participants, and food and drink venues" />{state === "loading" && <div className="absolute inset-0 grid place-items-center bg-[#dce9df] text-sm text-[#526057]" role="status">Loading Munich map…</div>}{state === "unavailable" && <div className="absolute inset-0 grid place-items-center bg-[#dce9df] p-6 text-center"><div className="max-w-sm rounded-2xl border border-[#cbd7cd] bg-[#fffdf8]/95 p-5 shadow-lg" role="status"><p className="font-semibold text-[#202522]">Map unavailable</p><p className="mt-2 text-sm leading-5 text-[#526057]">The configured map style could not be loaded. The setup and accessible venue list remain available.</p></div></div>}</section>;
+  return <section className="relative h-full min-h-[430px] overflow-hidden rounded-[1.75rem] border border-[#cbd7cd] bg-[#dce9df] shadow-[0_18px_50px_rgba(52,74,59,.13)]" aria-labelledby="map-title" data-map-state={state}><h2 id="map-title" className="sr-only">Munich meeting area map</h2><div ref={containerRef} className="!absolute inset-0" aria-label="Interactive Munich map showing the equal-time corridor, participants, and food and drink venues" />{state === "loading" && <div className="absolute inset-0 grid place-items-center bg-[#dce9df] text-sm text-[#526057]" role="status">Loading Munich map…</div>}{state === "unavailable" && <div className="absolute inset-0 grid place-items-center bg-[#dce9df] p-6 text-center"><div className="max-w-sm rounded-2xl border border-[#cbd7cd] bg-[#fffdf8]/95 p-5 shadow-lg" role="status"><p className="font-semibold text-[#202522]">Map unavailable</p><p className="mt-2 text-sm leading-5 text-[#526057]">The configured map style could not be loaded. The setup and accessible venue list remain available.</p></div></div>}</section>;
 }

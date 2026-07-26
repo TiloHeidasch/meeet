@@ -3,6 +3,7 @@ import { expect, test, type Page } from "@playwright/test";
 const DEFAULT_MAP_STYLE_URL = "https://tiles.openfreemap.org/styles/liberty";
 const OPENFREEMAP_ORIGIN = "https://tiles.openfreemap.org";
 const SAMPLE_GRID = /Sample-grid approximation only/;
+type ResponseRecord = { status: number; url: string };
 
 async function openPlanner(page: Page) {
   await page.goto("/");
@@ -170,33 +171,94 @@ test("direct mode hands off transit-only defaults without calling MVG", async ({
 });
 
 test("live OpenFreeMap style dependencies load without making the map unavailable", async ({ page }) => {
-  const responses = new Map<string, number[]>();
+  const responses = new Map<string, ResponseRecord[]>();
   page.on("response", (response) => {
     const url = new URL(response.url());
-    if (url.origin !== OPENFREEMAP_ORIGIN) return;
     const path = url.pathname.toLowerCase();
-    const kind = path === "/styles/liberty"
-      ? "style"
-      : /(?:^|\/)planet(?:\.json)?$/.test(path)
-        ? "tilejson"
-        : /\/sprites\/[^/]+(?:@\dx)?\.json$/.test(path)
-          ? "sprite-json"
-          : /\/sprites\/[^/]+(?:@\dx)?\.png$/.test(path)
-            ? "sprite-png"
-            : undefined;
-    if (kind) responses.set(kind, [...(responses.get(kind) ?? []), response.status()]);
+    const kind = path === "/vendor/maplibre-gl/maplibre-gl-worker.mjs"
+      ? "worker"
+      : path === "/vendor/maplibre-gl/maplibre-gl-shared.mjs"
+        ? "worker-shared"
+        : url.origin !== OPENFREEMAP_ORIGIN
+          ? undefined
+          : path === "/styles/liberty"
+            ? "style"
+            : /(?:^|\/)planet(?:\.json)?$/.test(path)
+              ? "tilejson"
+              : /\/sprites\/[^/]+(?:@\dx)?\.json$/.test(path)
+                ? "sprite-json"
+                : /\/sprites\/[^/]+(?:@\dx)?\.png$/.test(path)
+                  ? "sprite-png"
+                  : /\/planet\/.+\.pbf$/.test(path)
+                    ? "vector-tile"
+                    : undefined;
+    if (kind) responses.set(kind, [...(responses.get(kind) ?? []), { status: response.status(), url: response.url() }]);
   });
 
   await openPlanner(page);
   const map = page.getByRole("region", { name: "Munich meeting area map" });
-  await expect(map.getByText("Loading Munich map…", { exact: true })).toHaveCount(0);
-  await expect(map.locator("canvas.maplibregl-canvas")).toBeVisible();
+  await expect(map).toHaveAttribute("data-map-state", "ready");
+  const canvas = map.locator("canvas.maplibregl-canvas");
+  await expect(canvas).toBeVisible();
   await expect(page.getByText("Map unavailable", { exact: true })).toHaveCount(0);
 
-  for (const kind of ["style", "tilejson", "sprite-json", "sprite-png"]) {
-    await expect
-      .poll(() => responses.get(kind)?.length ?? 0, { message: `${kind} response was not observed` })
-      .toBeGreaterThan(0);
-    expect(responses.get(kind)?.every((status) => status === 200), `${kind} response status`).toBe(true);
+  const canvasMatchesContainer = () => canvas.evaluate((element) => {
+    const canvasElement = element as HTMLCanvasElement;
+    const container = element.closest(".maplibregl-map");
+    if (!container) return false;
+    const canvasRect = element.getBoundingClientRect();
+    const containerRect = container.getBoundingClientRect();
+    const devicePixelRatio = window.devicePixelRatio || 1;
+    const cssTolerance = 1;
+    const backingTolerance = Math.max(2, Math.ceil(devicePixelRatio));
+    return containerRect.width > 0 && containerRect.height > 0
+      && Math.abs(canvasRect.width - containerRect.width) <= cssTolerance
+      && Math.abs(canvasRect.height - containerRect.height) <= cssTolerance
+      && Math.abs(canvasElement.width - Math.round(containerRect.width * devicePixelRatio)) <= backingTolerance
+      && Math.abs(canvasElement.height - Math.round(containerRect.height * devicePixelRatio)) <= backingTolerance;
+  });
+  await expect.poll(canvasMatchesContainer, { message: "MapLibre canvas did not settle to its container size" }).toBe(true);
+
+  const dimensions = await canvas.evaluate((element) => {
+    const canvasElement = element as HTMLCanvasElement;
+    const container = element.closest(".maplibregl-map");
+    if (!container) throw new Error("MapLibre canvas has no container");
+    const canvasRect = element.getBoundingClientRect();
+    const containerRect = container.getBoundingClientRect();
+    return {
+      canvasCssWidth: canvasRect.width,
+      canvasCssHeight: canvasRect.height,
+      containerCssWidth: containerRect.width,
+      containerCssHeight: containerRect.height,
+      canvasBackingWidth: canvasElement.width,
+      canvasBackingHeight: canvasElement.height,
+      devicePixelRatio: window.devicePixelRatio || 1,
+    };
+  });
+  expect(Math.abs(dimensions.canvasCssWidth - dimensions.containerCssWidth)).toBeLessThanOrEqual(1);
+  expect(Math.abs(dimensions.canvasCssHeight - dimensions.containerCssHeight)).toBeLessThanOrEqual(1);
+  expect(Math.abs(dimensions.canvasBackingWidth - Math.round(dimensions.containerCssWidth * dimensions.devicePixelRatio)))
+    .toBeLessThanOrEqual(Math.max(2, Math.ceil(dimensions.devicePixelRatio)));
+  expect(Math.abs(dimensions.canvasBackingHeight - Math.round(dimensions.containerCssHeight * dimensions.devicePixelRatio)))
+    .toBeLessThanOrEqual(Math.max(2, Math.ceil(dimensions.devicePixelRatio)));
+
+  const localOrigin = new URL(page.url()).origin;
+  const requiredResponses = [
+    ["worker", localOrigin],
+    ["worker-shared", localOrigin],
+    ["style", OPENFREEMAP_ORIGIN],
+    ["tilejson", OPENFREEMAP_ORIGIN],
+    ["sprite-json", OPENFREEMAP_ORIGIN],
+    ["sprite-png", OPENFREEMAP_ORIGIN],
+    ["vector-tile", OPENFREEMAP_ORIGIN],
+  ] as const;
+  await expect.poll(
+    () => requiredResponses.filter(([kind]) => !responses.get(kind)?.length).map(([kind]) => kind),
+    { timeout: 15000, message: "required MapLibre/OpenFreeMap responses were not observed" },
+  ).toEqual([]);
+  for (const [kind, origin] of requiredResponses) {
+    const records = responses.get(kind) ?? [];
+    expect(records.every((record) => record.status === 200), `${kind} response status`).toBe(true);
+    expect(records.every((record) => new URL(record.url).origin === origin), `${kind} response origin`).toBe(true);
   }
 });
