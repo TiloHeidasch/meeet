@@ -177,6 +177,30 @@ test("direct routing uses fixed encoded URLs, nearest station snapping, planned 
   assert.ok(requests.every((request) => request.pathname.startsWith("/api/bgw-pt/v3/")));
 });
 
+test("route alternatives with a valid shape but a neighboring endpoint do not discard matching alternatives", async () => {
+  const provider = new MvgDirectRoutingProvider(async (input) => {
+    const url = new URL(String(input));
+    if (url.pathname.endsWith("/nearby")) {
+      const latitude = Number(url.searchParams.get("latitude"));
+      const longitude = Number(url.searchParams.get("longitude"));
+      return Response.json({ stations: [{ globalId: `station-${longitude}`, latitude, longitude }] });
+    }
+    const neighboring = mvgRoute(url, "2026-07-25T08:10:00.000+00:00");
+    neighboring.parts[0].to.stationGlobalId = "neighboring-station";
+    return Response.json([
+      neighboring,
+      mvgRoute(url, "2026-07-25T08:20:00.000+00:00"),
+    ]);
+  });
+  const response = await provider.getTravelTimeMatrix({
+    departureAt: DEPARTURE,
+    participants: [{ participantId: "one", origin: A, mode: "transit" }],
+    destinations: [{ id: "d", coordinate: { ...A, longitude: A.longitude + 0.001 }, sampleKind: "center" }],
+  });
+  assert.equal(response.travelTimes[0].status, "ok");
+  assert.equal(response.travelTimes[0].minutes, 20);
+});
+
 test("a valid final-part realtime arrival delay changes duration and marks the matrix live", async () => {
   const provider = new MvgDirectRoutingProvider(async (input) => {
     const url = new URL(String(input));
@@ -314,7 +338,7 @@ test("malformed, HTTP, and oversized upstream responses fail instead of becoming
 
 test("direct GETs reject genuine oversized responses and redirects", async () => {
   const oversized = new MvgDirectRoutingProvider(async () =>
-    new Response("x".repeat(128 * 1024 + 1), {
+    new Response("x".repeat(512 * 1024 + 1), {
       headers: { "content-type": "application/json" },
     }),
   );

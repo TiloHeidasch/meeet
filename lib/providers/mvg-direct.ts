@@ -33,7 +33,7 @@ export const MVG_DIRECT_SOURCE_URL = MVG_DIRECT_API_BASE_URL;
 export const MVG_DIRECT_VERSION = "bgw-pt/v3";
 export const MVG_DIRECT_TIMEOUT_MS = DEFAULT_PROVIDER_TIMEOUT_MS;
 export const MVG_DIRECT_MATRIX_DEADLINE_MS = 12_000;
-export const MVG_DIRECT_MAX_RESPONSE_BYTES = 128 * 1024;
+export const MVG_DIRECT_MAX_RESPONSE_BYTES = 512 * 1024;
 export const MVG_DIRECT_MAX_STATION_RESULTS = 100;
 export const MVG_DIRECT_MAX_ROUTE_RESULTS = 100;
 export const MVG_DIRECT_MAX_ROUTE_PARTS = 100;
@@ -561,16 +561,20 @@ function parseRoutes(
   if (value.length > MVG_DIRECT_MAX_ROUTE_RESULTS) {
     throw new Error("MVG routes response exceeds the route result limit.");
   }
-  return value.map((route) =>
-    parseRoute(route, originStationId, destinationStationId),
-  );
+  const routes = value
+    .map((route) => parseRoute(route, originStationId, destinationStationId))
+    .filter((route): route is MvgRoute => route !== null);
+  if (value.length > 0 && routes.length === 0) {
+    throw new Error("MVG routes response contains no route matching the requested stations.");
+  }
+  return routes;
 }
 
 function parseRoute(
   value: unknown,
   originStationId: string,
   destinationStationId: string,
-): MvgRoute {
+): MvgRoute | null {
   if (!isRecord(value) || !Array.isArray(value.parts)) {
     throw new Error("MVG route must contain a parts array.");
   }
@@ -618,7 +622,10 @@ function parseRoute(
     ? parseStationReference(lastPart.to)
     : null;
   if (firstFrom !== originStationId || finalTo !== destinationStationId) {
-    throw new Error("MVG route origin or destination identity does not match the request.");
+    // The endpoint can return a valid alternative ending at a station in the
+    // same interchange while also returning alternatives matching the request.
+    // Ignore only this alternative; malformed route shapes still fail closed.
+    return null;
   }
   if (!isRecord(lastPart.to) || typeof lastPart.to.plannedDeparture !== "string") {
     throw new Error("MVG route final destination lacks plannedDeparture.");

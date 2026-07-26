@@ -67,8 +67,9 @@ The direct routing contract is deliberately bounded:
   fit a smaller partial result.
 - Each participant origin and grid destination is snapped to the nearest
   returned station within 1,500 m. Access and egress use 75 m/min.
-- Planned timestamps are used. Upstream realtime fields are ignored; this
-  mode does not claim realtime predictions.
+- Realtime is used when the final route part supplies a valid bounded arrival
+  delay; planned timestamps are the fallback, and invalid realtime fields are
+  ignored.
 - The shared server-side upstream limiter allows four direct MVG requests in
   flight within one Node process/instance. This is not a deployment-wide
   distributed limit: multi-instance deployments can issue more concurrent
@@ -77,9 +78,9 @@ The direct routing contract is deliberately bounded:
   cancels queued and in-flight direct MVG work.
 - `MEEET_PROVIDER_TIMEOUT_MS` still controls each direct HTTP call and remains
   bounded to 250–10,000 ms. `MEEET_PROVIDER_MAX_RESPONSE_BYTES` still applies,
-  but each direct upstream response is capped at `min(setting, 128 KiB)`; the
+  but each direct upstream response is capped at `min(setting, 512 KiB)`; the
   general setting remains bounded to 16 KiB–2 MiB. The example default of 512
-  KiB therefore has an effective direct cap of 128 KiB.
+  KiB therefore uses the full direct cap.
 - Direct requests have no automatic retries. Upstream timeout, network, HTTP,
   response-size, or shape failures do not fall back to fixture routing.
 

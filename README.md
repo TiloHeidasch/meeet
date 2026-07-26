@@ -39,7 +39,7 @@ within one Node process/instance; this is not a deployment-wide distributed
 limit, so multi-instance deployments can issue more concurrent requests and
 need external rate limiting if required. It enforces a 12-second calculation
 deadline, and an aborted browser/API request cancels queued and in-flight direct
-MVG work. Each upstream response is capped at 128 KiB (a larger configured
+MVG work. Each upstream response is capped at 512 KiB (a larger configured
 response limit does not raise that cap). It does not retry automatically.
 
 Routing is transit-only and uses the complete 2x2 grid: 19 destinations and at
