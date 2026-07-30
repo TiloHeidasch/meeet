@@ -8,10 +8,12 @@ import type { MeetingCorridor } from "@/lib/domain/types";
 export type MapParticipant = { id: string; number: number; label: string; mode: string; latitude: number; longitude: number; color: string };
 export type MapPoi = { id: string; number: number; name: string; category: string; address?: string; coordinates: [number, number] };
 export type MapResultState = "initial" | "no-candidate" | "ok";
-type Props = { corridor?: MeetingCorridor; participants: readonly MapParticipant[]; pois: readonly MapPoi[]; selectedPoiId: string | null; onPoiSelect: (id: string) => void; resultState: MapResultState };
+export type MapRouteLeg = { participantId: string; color: string; geometry: { type: "LineString"; coordinates: [number, number][] } | null };
+type Props = { corridor?: MeetingCorridor; participants: readonly MapParticipant[]; pois: readonly MapPoi[]; routeLegs?: readonly MapRouteLeg[]; selectedPoiId: string | null; onPoiSelect: (id: string) => void; resultState: MapResultState };
 type MapState = "loading" | "ready" | "unavailable";
 type PointFeature = { type: "Feature"; id: string; properties: Record<string, string | number>; geometry: { type: "Point"; coordinates: [number, number] } };
 type PointCollection = { type: "FeatureCollection"; features: PointFeature[] };
+type RouteCollection = { type: "FeatureCollection"; features: Array<{ type: "Feature"; id: string; properties: Record<string, string>; geometry: { type: "LineString"; coordinates: [number, number][] } }> };
 const MUNICH_CENTER: [number, number] = [11.576, 48.137];
 const DEFAULT_MAP_STYLE_URL = "https://tiles.openfreemap.org/styles/liberty";
 const MAP_WORKER_URL = "/vendor/maplibre-gl/maplibre-gl-worker.mjs";
@@ -21,6 +23,7 @@ setWorkerUrl(MAP_WORKER_URL);
 
 function participantData(items: readonly MapParticipant[]): PointCollection { return { type: "FeatureCollection", features: items.map((p) => ({ type: "Feature", id: p.id, properties: { id: p.id, number: p.number, label: p.label, mode: p.mode, color: p.color }, geometry: { type: "Point", coordinates: [p.longitude, p.latitude] } })) }; }
 function poiData(items: readonly MapPoi[]): PointCollection { return { type: "FeatureCollection", features: items.map((p) => ({ type: "Feature", id: p.id, properties: { id: p.id, number: p.number, name: p.name, category: p.category }, geometry: { type: "Point", coordinates: p.coordinates } })) }; }
+function routeData(items: readonly MapRouteLeg[]): RouteCollection { return { type: "FeatureCollection", features: items.flatMap((leg) => leg.geometry ? [{ type: "Feature", id: leg.participantId, properties: { participantId: leg.participantId, color: leg.color }, geometry: leg.geometry }] : []) }; }
 function safeResourceUrl(value: unknown): string | undefined {
   if (typeof value !== "string" || value.length === 0) return undefined;
   try {
@@ -58,11 +61,11 @@ function mapAriaLabel(corridor: MeetingCorridor | undefined, resultState: MapRes
   return "Interactive Munich map showing participants, routed candidate centers, and limited nearby-venue search buffers";
 }
 
-export default function MapLibreCanvas({ corridor, participants, pois, selectedPoiId, onPoiSelect, resultState }: Props) {
+export default function MapLibreCanvas({ corridor, participants, pois, routeLegs = [], selectedPoiId, onPoiSelect, resultState }: Props) {
   const containerRef = useRef<HTMLDivElement>(null); const mapRef = useRef<Map | null>(null); const loadedRef = useRef(false);
-  const inputsRef = useRef({ corridor, participants, pois, onPoiSelect }); const [state, setState] = useState<MapState>("loading");
+  const inputsRef = useRef({ corridor, participants, pois, routeLegs, onPoiSelect }); const [state, setState] = useState<MapState>("loading");
   const styleUrl = process.env.NEXT_PUBLIC_MAP_STYLE_URL || DEFAULT_MAP_STYLE_URL; const customAttribution = process.env.NEXT_PUBLIC_MAP_ATTRIBUTION;
-  useEffect(() => { inputsRef.current = { corridor, participants, pois, onPoiSelect }; }, [corridor, participants, pois, onPoiSelect]);
+  useEffect(() => { inputsRef.current = { corridor, participants, pois, routeLegs, onPoiSelect }; }, [corridor, participants, pois, routeLegs, onPoiSelect]);
 
   useEffect(() => {
     if (!containerRef.current) { setState("unavailable"); return; }
@@ -124,6 +127,8 @@ export default function MapLibreCanvas({ corridor, participants, pois, selectedP
         map.addSource("meeet-corridor", { type: "geojson", data: current.corridor ?? { type: "FeatureCollection", features: [] } });
         map.addLayer({ id: "meeet-corridor-fill", type: "fill", source: "meeet-corridor", paint: { "fill-color": "#ef785e", "fill-opacity": 0.2 } });
         map.addLayer({ id: "meeet-corridor-line", type: "line", source: "meeet-corridor", paint: { "line-color": "#a64e39", "line-width": 2, "line-dasharray": [2, 2] } });
+        map.addSource("meeet-routes", { type: "geojson", data: routeData(current.routeLegs) });
+        map.addLayer({ id: "meeet-route-lines", type: "line", source: "meeet-routes", layout: { "line-cap": "round", "line-join": "round" }, paint: { "line-color": ["get", "color"], "line-width": 4, "line-opacity": 0.88 } });
         map.addSource("meeet-participants", { type: "geojson", data: participantData(current.participants) });
         map.addLayer({ id: "meeet-participant-points", type: "circle", source: "meeet-participants", paint: { "circle-color": ["get", "color"], "circle-radius": 10, "circle-stroke-color": "#fffdf8", "circle-stroke-width": 3 } });
         map.addLayer({ id: "meeet-participant-labels", type: "symbol", source: "meeet-participants", layout: { "text-field": ["concat", ["get", "number"], " · ", ["get", "mode"]], "text-size": 11, "text-offset": [0, 2], "text-anchor": "top" }, paint: { "text-color": "#202522", "text-halo-color": "#fffdf8", "text-halo-width": 2 } });
@@ -178,6 +183,6 @@ export default function MapLibreCanvas({ corridor, participants, pois, selectedP
     };
   }, [styleUrl, customAttribution]);
 
-  useEffect(() => { const map = mapRef.current; if (!map || !loadedRef.current) return; const corridorSource = map.getSource("meeet-corridor") as GeoJSONSource | undefined; const participantsSource = map.getSource("meeet-participants") as GeoJSONSource | undefined; const poisSource = map.getSource("meeet-pois") as GeoJSONSource | undefined; corridorSource?.setData(corridor ?? { type: "FeatureCollection", features: [] }); participantsSource?.setData(participantData(participants)); poisSource?.setData(poiData(pois)); if (map.getLayer("meeet-poi-selected")) map.setFilter("meeet-poi-selected", ["==", ["get", "id"], selectedPoiId ?? ""]); }, [corridor, participants, pois, selectedPoiId, state]);
+  useEffect(() => { const map = mapRef.current; if (!map || !loadedRef.current) return; const corridorSource = map.getSource("meeet-corridor") as GeoJSONSource | undefined; const routeSource = map.getSource("meeet-routes") as GeoJSONSource | undefined; const participantsSource = map.getSource("meeet-participants") as GeoJSONSource | undefined; const poisSource = map.getSource("meeet-pois") as GeoJSONSource | undefined; corridorSource?.setData(corridor ?? { type: "FeatureCollection", features: [] }); routeSource?.setData(routeData(routeLegs)); participantsSource?.setData(participantData(participants)); poisSource?.setData(poiData(pois)); if (map.getLayer("meeet-poi-selected")) map.setFilter("meeet-poi-selected", ["==", ["get", "id"], selectedPoiId ?? ""]); }, [corridor, participants, pois, routeLegs, selectedPoiId, state]);
   return <section className="relative h-full min-h-[430px] overflow-hidden rounded-[1.75rem] border border-[#cbd7cd] bg-[#dce9df] shadow-[0_18px_50px_rgba(52,74,59,.13)]" aria-labelledby="map-title" data-map-state={state}><h2 id="map-title" className="sr-only">Munich meeting area map</h2><div ref={containerRef} className="!absolute inset-0" aria-label={mapAriaLabel(corridor, resultState)} />{state === "loading" && <div className="absolute inset-0 grid place-items-center bg-[#dce9df] text-sm text-[#526057]" role="status">Loading Munich map…</div>}{state === "unavailable" && <div className="absolute inset-0 grid place-items-center bg-[#dce9df] p-6 text-center"><div className="max-w-sm rounded-2xl border border-[#cbd7cd] bg-[#fffdf8]/95 p-5 shadow-lg" role="status"><p className="font-semibold text-[#202522]">Map unavailable</p><p className="mt-2 text-sm leading-5 text-[#526057]">The configured map style could not be loaded. The setup and accessible venue list remain available.</p></div></div>}</section>;
 }

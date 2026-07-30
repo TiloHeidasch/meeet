@@ -3,6 +3,7 @@ export * from "./geo.ts";
 export * from "./grid.ts";
 export * from "./meeting.ts";
 export * from "./response.ts";
+export * from "./selected-venue-response.ts";
 export * from "./types.ts";
 export type {
   GeocodingProvider,

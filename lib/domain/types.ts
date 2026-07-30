@@ -37,6 +37,12 @@ export interface MeetingCalculationInput {
 
 export type GeoJsonPosition = [number, number];
 
+/** A stop-sequence geometry returned for a detailed venue route. */
+export interface GeoJsonLineString {
+  type: "LineString";
+  coordinates: GeoJsonPosition[];
+}
+
 export interface GeoJsonPolygon {
   type: "Polygon";
   coordinates: GeoJsonPosition[][];
@@ -261,6 +267,71 @@ export interface MeetingPointOfInterest {
   address?: string;
   source: string;
 }
+
+/**
+ * The client-selected venue sent to the venue-route endpoint. The optional
+ * POI fields let the client pass through the selected calculation result
+ * without making route projection depend on POI provenance.
+ */
+export interface SelectedVenueRouteVenue {
+  id: string;
+  name: string;
+  coordinates: GeoJsonPosition;
+  category?: PoiCategory;
+  address?: string;
+  source?: string;
+}
+
+export interface SelectedVenueRouteRequest {
+  selectedPoi: SelectedVenueRouteVenue;
+  participants: readonly MeetingParticipant[];
+  departureAt?: string;
+}
+
+export type VenueRouteRequest = SelectedVenueRouteRequest;
+export type SelectedVenueRequest = SelectedVenueRouteRequest;
+
+export type VenueRouteStepKind = "transit" | "summary";
+
+export interface SelectedVenueRouteStep {
+  kind: VenueRouteStepKind;
+  instruction: string;
+  from: LocationCoordinate | null;
+  to: LocationCoordinate | null;
+  fromStopId: string | null;
+  toStopId: string | null;
+  line: TransitLineReference | null;
+  departureAt: string | null;
+  arrivalAt: string | null;
+  durationMinutes: number | null;
+}
+
+export type VenueRouteStep = SelectedVenueRouteStep;
+
+export type SelectedVenueRouteLegStatus = "detailed" | "summary";
+
+export interface SelectedVenueRouteLeg {
+  participantId: string;
+  mode: TravelMode;
+  status: SelectedVenueRouteLegStatus;
+  summary: string;
+  durationMinutes: number | null;
+  steps: readonly SelectedVenueRouteStep[];
+  geometry: GeoJsonLineString | null;
+  source: string;
+}
+
+export type VenueRouteLeg = SelectedVenueRouteLeg;
+
+export interface SelectedVenueRouteResponse {
+  contractVersion: "meeet-venue-routes/v1";
+  status: "ok";
+  departureAt: string;
+  venue: SelectedVenueRouteVenue;
+  legs: readonly SelectedVenueRouteLeg[];
+}
+
+export type VenueRouteResponse = SelectedVenueRouteResponse;
 
 export type ProviderDeploymentKind =
   | "fixture"
