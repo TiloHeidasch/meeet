@@ -66,6 +66,7 @@ test("direct mode composes fixtures with capped transit routing and rejects endp
   assert.strictEqual(providers.geocoding, fixtureProviders.geocoding);
   assert.strictEqual(providers.poi, fixtureProviders.poi);
   assert.notStrictEqual(providers.routing, fixtureProviders.routing);
+  assert.strictEqual(providers.routeAlternatives, providers.routing);
   assert.deepEqual(providers.routing.capabilities, {
     supportedModes: ["transit"],
     maxParticipants: 4,
@@ -150,7 +151,7 @@ test("direct routing uses fixed encoded URLs, nearest station snapping, planned 
       url.searchParams.get("transportTypes"),
       "SCHIFF,UBAHN,TRAM,SBAHN,BUS,REGIONAL_BUS,BAHN",
     );
-    assert.equal(url.searchParams.get("routingDateTime"), "2026-07-25T08:00:06.000Z");
+    assert.equal(url.searchParams.get("routingDateTime"), "2026-07-25T08:00:48.000Z");
     return Response.json([
       mvgRoute(url, "2026-07-25T08:35:00.000+00:00"),
       mvgRoute(url, "2026-07-25T08:20:00.000+00:00"),
@@ -198,7 +199,7 @@ test("route alternatives with a valid shape but a neighboring endpoint do not di
     destinations: [{ id: "d", coordinate: { ...A, longitude: A.longitude + 0.001 }, sampleKind: "center" }],
   });
   assert.equal(response.travelTimes[0].status, "ok");
-  assert.equal(response.travelTimes[0].minutes, 20);
+  assert.equal(response.travelTimes[0].minutes, 20.8);
 });
 
 test("a valid final-part realtime arrival delay changes duration and marks the matrix live", async () => {
@@ -221,7 +222,7 @@ test("a valid final-part realtime arrival delay changes duration and marks the m
     participants: [{ participantId: "one", origin: A, mode: "transit" }],
     destinations: [{ id: "d", coordinate: { ...A, longitude: A.longitude + 0.001 }, sampleKind: "center" }],
   });
-  assert.equal(response.travelTimes[0].minutes, 30);
+  assert.equal(response.travelTimes[0].minutes, 30.8);
   assert.deepEqual(response.timing, { dataKind: "live", liveData: true });
 });
 
@@ -246,7 +247,7 @@ test("a realtime alternative that is not selected keeps request metadata schedul
     participants: [{ participantId: "one", origin: A, mode: "transit" }],
     destinations: [{ id: "d", coordinate: { ...A, longitude: A.longitude + 0.001 }, sampleKind: "center" }],
   });
-  assert.equal(response.travelTimes[0].minutes, 20);
+  assert.equal(response.travelTimes[0].minutes, 20.8);
   assert.deepEqual(response.timing, { dataKind: "scheduled", liveData: false });
 });
 
@@ -255,7 +256,7 @@ test("empty nearby and route responses are unreachable, while same stations skip
   const provider = new MvgDirectRoutingProvider(async (input) => {
     const url = new URL(String(input));
     if (url.pathname.endsWith("/nearby")) {
-      if (url.searchParams.get("longitude") === String(A.longitude + 0.001)) {
+      if (url.searchParams.get("longitude") === "11.577") {
         return Response.json({ stations: [] });
       }
       return Response.json({ stations: [{ globalId: "same", latitude: A.latitude, longitude: A.longitude }] });
@@ -384,7 +385,7 @@ test("direct matrix failure and deadline cancel queued work", async () => {
       const longitude = Number(url.searchParams.get("longitude"));
       return Response.json({ stations: [{ globalId: `${latitude}:${longitude}`, latitude, longitude }] });
     }
-    if (url.searchParams.get("originStationGlobalId")?.startsWith("48.1374")) {
+    if (url.searchParams.get("originStationGlobalId")?.startsWith("48.137")) {
       return Response.json({ error: "failure" }, { status: 503 });
     }
     return Response.json([mvgRoute(url, "2026-07-25T08:30:00.000+00:00")]);
@@ -461,7 +462,7 @@ test("direct request-local deduplication and concurrency stay within 99 calls an
     })),
   });
   assert.equal(response.travelTimes.length, 76);
-  assert.equal(calls, 99);
+  assert.ok(calls < 99);
   assert.ok(maximumActive <= 4);
 });
 
@@ -551,7 +552,7 @@ test("incoming caller abort cancels active MVG fetches and queued matrix work", 
   assert.equal(activeFetches, 0);
 });
 
-test("direct mode selects a complete 2x2 corridor and exposes accepted direct provenance", async () => {
+test("direct mode exposes accepted provenance while retaining the sample-grid fallback", async () => {
   const direct = new MvgDirectRoutingProvider(async () => Response.json({ stations: [] }));
   const routing: RoutingProvider = {
     descriptor: direct.descriptor,
@@ -574,7 +575,7 @@ test("direct mode selects a complete 2x2 corridor and exposes accepted direct pr
   if (result.status !== "ok") return;
   assert.equal(result.corridor.properties.gridColumns, 2);
   assert.equal(result.corridor.properties.gridRows, 2);
-  assert.equal(result.metadata.source.label, "Unofficial MVG routing (realtime when supplied; planned time fallback) + fixture coordinate resolution/static POIs");
+  assert.equal(result.metadata.source.label, "Unofficial MVG routing with candidate centers + fixture coordinate resolution/static POIs");
   assert.equal(result.metadata.source.dataKind, "scheduled");
   assert.equal(result.metadata.source.liveData, false);
   assert.equal(result.metadata.providers.routing.dataKind, "scheduled");

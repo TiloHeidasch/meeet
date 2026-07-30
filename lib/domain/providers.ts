@@ -8,6 +8,8 @@ import type {
   ResolvedLocation,
   RoutingMatrixRequest,
   RoutingMatrixResponse,
+  RouteAlternativeDiscoveryRequest,
+  RouteAlternativeDiscoveryResult,
   MapConfigurationProvenance,
   RoutingProviderCapabilities,
 } from "./types.ts";
@@ -36,6 +38,14 @@ export interface RoutingProvider {
   getTravelTimeMatrix(request: RoutingMatrixRequest): Promise<RoutingMatrixResponse>;
 }
 
+/** Separate bounded boundary for finite provider-returned route alternatives. */
+export interface RouteAlternativeProvider {
+  readonly descriptor: ProviderDescriptor;
+  discoverRouteAlternatives(
+    request: RouteAlternativeDiscoveryRequest,
+  ): Promise<RouteAlternativeDiscoveryResult>;
+}
+
 /** Server-only boundary for replacing static demo POIs in Phase 2. */
 export interface PoiProvider {
   readonly descriptor: ProviderDescriptor;
@@ -48,5 +58,6 @@ export interface MeetingProviders {
   geocoding: GeocodingProvider;
   routing: RoutingProvider;
   poi: PoiProvider;
+  routeAlternatives?: RouteAlternativeProvider;
   mapConfiguration?: MapConfigurationProvenance;
 }

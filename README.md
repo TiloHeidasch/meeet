@@ -30,7 +30,8 @@ MEEET_PROVIDER_MAX_RESPONSE_BYTES=524288
 ```
 
 This mode calls only the fixed, server-side unofficial endpoint
-`https://www.mvg.de/api/bgw-pt/v3` (the nearby-stations and routes paths), with
+`https://www.mvg.de/api/bgw-pt/v3` (the locations, nearby-stations, and routes
+paths), with
 no token. Any non-empty `MEEET_ROUTING_*`, `MEEET_GEOCODING_*`, or
 `MEEET_POI_*` variable conflicts with this mode and is rejected; deployment
 metadata must be omitted or `unknown`. The timeout and response-size settings
@@ -38,26 +39,31 @@ still apply. The direct provider shares a four-request upstream concurrency cap
 within one Node process/instance; this is not a deployment-wide distributed
 limit, so multi-instance deployments can issue more concurrent requests and
 need external rate limiting if required. It enforces a 12-second calculation
-deadline, and an aborted browser/API request cancels queued and in-flight direct
-MVG work. Each upstream response is capped at 512 KiB (a larger configured
-response limit does not raise that cap). It does not retry automatically.
+deadline. An aborted browser/API request stops its own wait; queued uncached
+work is removed, in-flight uncached work is aborted, and an active shared
+location/station cache fill keeps its limiter slot until the fill settles. Each
+upstream response is capped at 512 KiB (a larger configured response limit does
+not raise that cap). It does not retry automatically.
 
-Routing is transit-only and uses the complete 2x2 grid: 19 destinations and at
-most 76 matrix entries for four participants. Origins and destinations are
-snapped to a returned station within 1,500 m, with access and egress estimated
-at 75 m/min. Realtime is used when the final route part supplies a valid
-bounded arrival delay; planned timestamps are the fallback. Geocoding is
-fixture coordinate pass-through and POIs are static fixtures; there is no
-routing fallback. This mode does not provide bike or car routing and makes no
-MVV or official-MVG-API claim.
+Routing is transit-only. The first two participants are evaluated in both
+directions against the finite alternatives returned by MVG; actual route-part
+station endpoints and three explicit Munich hubs become candidate centers. At
+most 10 candidate centers are routed for all participants in one matrix
+(subject to the provider cap of 19 destinations and 76 entries). Origins and
+candidate centers are snapped to a returned station within 1,500 m, with access
+and egress estimated at 75 m/min. The provider descriptor is scheduled and does
+not claim an MVG/MVV live feed. Geocoding is fixture coordinate pass-through and
+POIs are static fixtures; there is no routing fallback. This mode does not
+provide bike or car routing and makes no MVV or official-MVG-API claim.
 
 Treat the upstream as moderate-use only: it is unofficial, undocumented,
 potentially unstable, and has no SLA. Production or commercial use requires
-permission. Exact participant and grid-destination coordinates
-are sent to MVG for station lookup. The application cannot establish MVG
-operator logging or retention guarantees, so treat upstream logging and
-retention as uncertain; the existing server-side coordinate-lifetime and
-request-log precautions do not change that.
+permission. Rounded nearby-station coordinate buckets are sent to MVG for
+station lookup; exact input coordinates remain server-side for walking and
+access calculations. The application cannot establish MVG operator logging or
+retention guarantees, so treat upstream logging and retention as uncertain; the
+existing server-side coordinate-lifetime and request-log precautions do not
+change that.
 
 ## Map configuration
 

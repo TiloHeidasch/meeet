@@ -19,10 +19,12 @@ export function createMeetingProviders(
     return withMapConfiguration(fixtureProviders, config);
   }
   if (config.mode === "mvg-direct-transit") {
+    const direct = new MvgDirectRoutingProvider(config);
     return withMapConfiguration(
       {
         geocoding: fixtureProviders.geocoding,
-        routing: new MvgDirectRoutingProvider(config),
+        routing: direct,
+        routeAlternatives: direct,
         poi: fixtureProviders.poi,
       },
       config,

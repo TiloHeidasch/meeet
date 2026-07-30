@@ -1,17 +1,17 @@
-# Phase 2 provider deployment contract
+# Provider deployment contract
 
 Runtime baseline: Node `24.x`, matching the pinned MapLibre 6 dependency
 graph and the Next 16 application runtime.
 
-The browser calls only `/api/meeting/calculate`. Provider endpoints and
-credentials are read from server-only `MEEET_*` environment variables and are
-never `NEXT_PUBLIC_*` values.
+The browser calls `/api/meeting/calculate` and `/api/locations/search` only.
+Provider endpoints and credentials are read from server-only `MEEET_*`
+environment variables and are never `NEXT_PUBLIC_*` values.
 
 ## Configuration
 
 | Variable | Meaning |
 | --- | --- |
-| `MEEET_PROVIDER_MODE` | `fixture`, `configured`, or `mvg-direct-transit`; defaults to `fixture` when no provider endpoint is present |
+| `MEEET_PROVIDER_MODE` | `fixture`, `configured`, or `mvg-direct-transit`; defaults to `mvg-direct-transit` when no provider endpoint is present |
 | `MEEET_PROVIDER_DEPLOYMENT` | `fixture`, `self-hosted`, `managed`, or `unknown` metadata; direct mode requires this to be omitted or `unknown` |
 | `MEEET_PROVIDER_TIMEOUT_MS` | HTTP timeout, bounded to 250–10,000 ms |
 | `MEEET_PROVIDER_MAX_RESPONSE_BYTES` | Response limit, bounded to 16 KiB–2 MiB |
@@ -27,8 +27,9 @@ name/URL, attribution, version, and ISO retrieval-date variables. Placeholder
 or missing provenance fails configuration; it is never emitted as fixture
 metadata.
 
-With no endpoint configured and no explicit direct mode, the deterministic local
-providers remain active. If any endpoint is configured, missing provider
+With no endpoint configured and no explicit mode, direct MVG transit routing
+remains active. Set `MEEET_PROVIDER_MODE=fixture` for deterministic local
+providers. If any endpoint is configured, missing provider
 endpoints intentionally return `PROVIDER_NOT_CONFIGURED`; there is no
 public-service fallback. Invalid configuration returns
 `PROVIDER_CONFIGURATION_INVALID`. Configured network, timeout, response-size,
@@ -53,29 +54,59 @@ whose only network origin is the fixed unofficial MVG BGW PT v3 base endpoint:
 https://www.mvg.de/api/bgw-pt/v3
 ```
 
-The provider uses `/stations/nearby` and `/routes` below that base URL, sends no
-token, rejects redirects, and has no configurable URL or routing fallback. This
-is an unofficial integration with an unstable upstream and no SLA; use it for
-moderate traffic only. It makes no claim to an official MVG API or to MVV data
-or an official MVV API.
+The provider uses `/locations`, `/stations/nearby`, and `/routes` below that
+base URL, sends no token, rejects redirects, and has no configurable URL or
+routing fallback. This is an unofficial integration with an unstable upstream
+and no SLA; use it for moderate traffic only. It makes no claim to an official
+MVG API or to MVV data or an official MVV API.
+
+The server-only `GET /api/locations/search?q=...` handler validates and
+normalizes a query of at most 80 characters before requesting the fixed
+upstream `/locations` endpoint. The raw upstream response is always
+`cache: "no-store"`; only the bounded, parsed, strictly validated plain DTO is
+cached with a requested 24-hour `cacheLife` revalidation policy. Revalidation
+does not impose a hard retention deadline: validated values can remain until
+cache eviction, restart, or replacement. The default Cache Components storage
+is in memory and is not guaranteed to survive restarts or be shared across
+instances. The response is limited to 20
+deduplicated results whose labels and finite WGS84 coordinates are inside
+Munich's official application boundary. Invalid requests and upstream failures
+receive generic application errors; upstream response details are not exposed
+to callers.
 
 The direct routing contract is deliberately bounded:
 
 - Transit mode only. Bike and car routing are not provided by this mode.
-- A complete 2x2 Munich grid is selected, with 19 unique destinations. With
-  four participants, this is 76 matrix entries; the grid is not truncated to
-  fit a smaller partial result.
-- Each participant origin and grid destination is snapped to the nearest
+- The first two transit participants, in request order, are evaluated in both
+  directions against the finite, distinct alternatives returned by MVG. The
+  application does not claim to enumerate every theoretical route.
+- Route midpoint candidates are real route-part station endpoints nearest the
+  effective half-way point. Coordinates are never interpolated. Marienplatz,
+  Odeonsplatz, and Sendlinger Tor are explicit coordinate-only candidate
+  anchors; they are not MVG `via` itineraries or constrained via calls.
+- At most 10 candidate centers are routed for every participant in one bounded
+  matrix. Only reachable centers within the configured median ± tolerance are
+  retained; additional participants can therefore exclude candidates that
+  would pass for the first two. Survivors are ranked by normalized travel-time
+  spread, maximum travel time, and stable candidate ID.
+- POI search is limited to approximately 350 m buffers around the retained
+  candidate centers, clipped to the official Munich application boundary.
+  Buffer interiors and returned POIs are not independently routed or proven to
+  have equal travel times.
+- Each participant origin and candidate center is snapped to the nearest
   returned station within 1,500 m. Access and egress use 75 m/min.
-- Realtime is used when the final route part supplies a valid bounded arrival
-  delay; planned timestamps are the fallback, and invalid realtime fields are
-  ignored.
+- Direct provider provenance remains scheduled and does not claim an MVG or MVV
+  live feed. Matrix responses carry request-local timing metadata separately;
+  that metadata does not establish a persistent live-data source.
 - The shared server-side upstream limiter allows four direct MVG requests in
   flight within one Node process/instance. This is not a deployment-wide
   distributed limit: multi-instance deployments can issue more concurrent
   requests and require external rate limiting if needed. One matrix
-  calculation has a 12-second deadline, and an aborted browser/API request
-  cancels queued and in-flight direct MVG work.
+  calculation has a 12-second deadline. An aborted browser/API request stops
+  its own wait; queued uncached work is removed, in-flight uncached work is
+  aborted, and an active shared cached location/station fill remains in its
+  limiter slot until it completes or hits its configured timeout, so another
+  caller can safely reuse the result.
 - `MEEET_PROVIDER_TIMEOUT_MS` still controls each direct HTTP call and remains
   bounded to 250–10,000 ms. `MEEET_PROVIDER_MAX_RESPONSE_BYTES` still applies,
   but each direct upstream response is capped at `min(setting, 512 KiB)`; the
@@ -84,18 +115,33 @@ The direct routing contract is deliberately bounded:
 - Direct requests have no automatic retries. Upstream timeout, network, HTTP,
   response-size, or shape failures do not fall back to fixture routing.
 
+Fixture mode and configured gateway mode retain their existing bounded
+sample-grid calculation and fallback behavior; the route-candidate search is
+specific to direct MVG mode.
+
 Direct mode composes the direct routing provider with fixture geocoding and
 fixture POIs: submitted coordinates pass through the fixture geocoder without
-an external geocoding call, and the POI result is drawn from static fixture
-entries filtered to the resulting corridor.
+an external geocoding call, and static fixture entries are filtered to the
+limited candidate-buffer search area.
 
-Exact WGS84 participant origins and grid-destination coordinates are sent to
-MVG's nearby-stations endpoint for station lookup. Subsequent route calls use
-the selected station IDs and planned routing timestamps. Treat coordinates as
-disclosed to MVG. The application does not establish the MVG operator's
-logging or retention policy; that policy is uncertain, and application-side
-request-log redaction and calculation-lifetime retention cannot guarantee what
-the upstream retains.
+Nearby-station request coordinates are rounded to three decimal degrees before
+being sent to MVG. At Munich's latitude this is a conservative cache bucket of
+roughly 50–150 m. The raw nearby response is `cache: "no-store"`; only the
+validated station DTO is cached with the same requested 24-hour `cacheLife`
+revalidation policy and retention limitations above. Access and egress walking
+time still use the participant's exact WGS84
+coordinate. Alternative and matrix route calls use the selected station IDs
+and planned routing timestamps; `/routes` is explicitly `cache: "no-store"` and
+is not cached by this application.
+
+The browser's search text is sent to this server and the normalized query is
+forwarded to MVG's `/locations` endpoint. Rounded nearby coordinate buckets
+are sent to MVG for station lookup; exact input coordinates remain server-side
+for walking and access calculations. Treat the search text and rounded nearby
+coordinate buckets as disclosed to MVG. The application does not establish the
+MVG operator's logging or retention policy; that policy is uncertain. The
+application retains only the validated cached DTOs described above, subject to
+their cache lifecycle, and cannot guarantee what the upstream retains.
 
 ## Routing gateway
 

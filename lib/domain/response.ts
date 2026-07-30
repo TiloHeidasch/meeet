@@ -93,14 +93,33 @@ function validateOkResponse(
     ],
     [],
     issues,
+    ["candidates"],
   );
   validateCoordinate(value.meetingPoint, ["meetingPoint"], issues);
   validateCorridor(value.corridor, ["corridor"], issues);
   validateTravelTimeRange(value.travelTimeRange, ["travelTimeRange"], issues);
   validateTravelTimes(value.travelTimes, value.requestSnapshot, issues);
   validatePois(value.pois, ["pois"], issues);
+  const routeCandidateCorridor = isRouteCandidateCorridor(value.corridor);
+  if (routeCandidateCorridor && !("candidates" in value)) {
+    issues.push(issue(["candidates"], "missing_field", "Route-candidate responses must expose verified candidates."));
+  } else if ("candidates" in value) {
+    validateCandidates(value.candidates, value.requestSnapshot, issues);
+    if (
+      routeCandidateCorridor &&
+      isRecord(value.corridor) &&
+      isRecord(value.corridor.properties) &&
+      Array.isArray(value.candidates) &&
+      value.candidates.length !== value.corridor.properties.candidateCount
+    ) {
+      issues.push(issue(["candidates"], "mismatched_count", "Candidates must match the corridor candidate count."));
+    }
+    if (routeCandidateCorridor) {
+      validateRouteCandidateResponseCoherence(value, issues);
+    }
+  }
   validateSnapshot(value.requestSnapshot, ["requestSnapshot"], issues);
-  validateMetadata(value.metadata, ["metadata"], issues);
+  validateMetadata(value.metadata, ["metadata"], issues, routeCandidateCorridor);
 }
 
 function validateNoCorridorResponse(
@@ -112,13 +131,21 @@ function validateNoCorridorResponse(
     issues.push(issue(["reason"], "invalid_type", "reason must be an object."));
   } else {
     requireKeys(value.reason, ["code", "message"], ["reason"], issues);
-    if (value.reason.code !== "NO_COMPARABLE_GRID_CELL") {
+    if (
+      value.reason.code !== "NO_COMPARABLE_GRID_CELL" &&
+      value.reason.code !== "NO_COMPARABLE_ROUTE_CANDIDATE"
+    ) {
       issues.push(issue(["reason", "code"], "invalid_value", "Unknown no-corridor reason."));
     }
     validateString(value.reason.message, ["reason", "message"], issues, 1);
   }
   validateSnapshot(value.requestSnapshot, ["requestSnapshot"], issues);
-  validateMetadata(value.metadata, ["metadata"], issues);
+  validateMetadata(
+    value.metadata,
+    ["metadata"],
+    issues,
+    isRecord(value.reason) && value.reason.code === "NO_COMPARABLE_ROUTE_CANDIDATE",
+  );
 }
 
 function validateSnapshot(
@@ -210,45 +237,95 @@ function validateCorridor(
   if (!isRecord(value.properties)) {
     issues.push(issue(path.concat("properties"), "invalid_type", "corridor properties are required."));
   } else {
-    requireKeys(
-      value.properties,
-      [
-        "kind",
-        "approximation",
-        "verification",
-        "tolerancePercent",
-        "cellCount",
-        "gridColumns",
-        "gridRows",
-        "boundaryName",
-        "geometryGuarantee",
-      ],
-      path.concat("properties"),
-      issues,
-    );
-    if (value.properties.kind !== "sample-grid-corridor") {
-      issues.push(issue(path.concat("properties", "kind"), "invalid_value", "Unsupported corridor kind."));
-    }
-    if (value.properties.approximation !== "sample-grid") {
-      issues.push(issue(path.concat("properties", "approximation"), "invalid_value", "Corridor must declare sample-grid approximation."));
-    }
-    if (value.properties.verification !== "center-and-clipped-vertices") {
-      issues.push(issue(path.concat("properties", "verification"), "invalid_value", "Corridor sample verification metadata is missing."));
-    }
-    validateTolerance(value.properties.tolerancePercent, path.concat("properties", "tolerancePercent"), issues);
-    validateBoundedInteger(value.properties.cellCount, path.concat("properties", "cellCount"), issues, 1, MAX_CORRIDOR_POLYGONS);
-    validateBoundedInteger(value.properties.gridColumns, path.concat("properties", "gridColumns"), issues, 1, 64);
-    validateBoundedInteger(value.properties.gridRows, path.concat("properties", "gridRows"), issues, 1, 64);
-    validateString(value.properties.boundaryName, path.concat("properties", "boundaryName"), issues, 1);
-    validateString(value.properties.geometryGuarantee, path.concat("properties", "geometryGuarantee"), issues, 1);
-    if (!String(value.properties.geometryGuarantee).includes("not independently routed")) {
-      issues.push(issue(path.concat("properties", "geometryGuarantee"), "missing_caveat", "Corridor must declare the unverified-interior caveat."));
+    const propertiesPath = path.concat("properties");
+    if (value.properties.kind === "sample-grid-corridor") {
+      requireKeys(
+        value.properties,
+        [
+          "kind",
+          "approximation",
+          "verification",
+          "tolerancePercent",
+          "cellCount",
+          "gridColumns",
+          "gridRows",
+          "boundaryName",
+          "geometryGuarantee",
+        ],
+        propertiesPath,
+        issues,
+      );
+      if (value.properties.approximation !== "sample-grid") {
+        issues.push(issue(propertiesPath.concat("approximation"), "invalid_value", "Corridor must declare sample-grid approximation."));
+      }
+      if (value.properties.verification !== "center-and-clipped-vertices") {
+        issues.push(issue(propertiesPath.concat("verification"), "invalid_value", "Corridor sample verification metadata is missing."));
+      }
+      validateTolerance(value.properties.tolerancePercent, propertiesPath.concat("tolerancePercent"), issues);
+      validateBoundedInteger(value.properties.cellCount, propertiesPath.concat("cellCount"), issues, 1, MAX_CORRIDOR_POLYGONS);
+      validateBoundedInteger(value.properties.gridColumns, propertiesPath.concat("gridColumns"), issues, 1, 64);
+      validateBoundedInteger(value.properties.gridRows, propertiesPath.concat("gridRows"), issues, 1, 64);
+      validateString(value.properties.boundaryName, propertiesPath.concat("boundaryName"), issues, 1);
+      validateString(value.properties.geometryGuarantee, propertiesPath.concat("geometryGuarantee"), issues, 1);
+      if (!String(value.properties.geometryGuarantee).includes("not independently routed")) {
+        issues.push(issue(propertiesPath.concat("geometryGuarantee"), "missing_caveat", "Corridor must declare the unverified-interior caveat."));
+      }
+    } else if (value.properties.kind === "route-candidate-search-area") {
+      requireKeys(
+        value.properties,
+        [
+          "kind",
+          "approximation",
+          "verification",
+          "tolerancePercent",
+          "cellCount",
+          "candidateCount",
+          "bufferRadiusMeters",
+          "boundaryName",
+          "geometryGuarantee",
+        ],
+        propertiesPath,
+        issues,
+      );
+      if (value.properties.approximation !== "route-candidate-search") {
+        issues.push(issue(propertiesPath.concat("approximation"), "invalid_value", "Corridor must declare route-candidate search approximation."));
+      }
+      if (value.properties.verification !== "candidate-centers-routed") {
+        issues.push(issue(propertiesPath.concat("verification"), "invalid_value", "Corridor must declare routed candidate-center verification."));
+      }
+      validateTolerance(value.properties.tolerancePercent, propertiesPath.concat("tolerancePercent"), issues);
+      validateBoundedInteger(value.properties.cellCount, propertiesPath.concat("cellCount"), issues, 1, MAX_CORRIDOR_POLYGONS);
+      validateBoundedInteger(value.properties.candidateCount, propertiesPath.concat("candidateCount"), issues, 1, MAX_ROUTE_CANDIDATES);
+      if (
+        typeof value.properties.cellCount === "number" &&
+        typeof value.properties.candidateCount === "number" &&
+        value.properties.cellCount !== value.properties.candidateCount
+      ) {
+        issues.push(issue(propertiesPath.concat("candidateCount"), "mismatched_count", "Route-candidate counts must agree."));
+      }
+      validateFiniteBoundedNumber(value.properties.bufferRadiusMeters, propertiesPath.concat("bufferRadiusMeters"), issues, 300, 400);
+      validateString(value.properties.boundaryName, propertiesPath.concat("boundaryName"), issues, 1);
+      validateString(value.properties.geometryGuarantee, propertiesPath.concat("geometryGuarantee"), issues, 1);
+      if (!String(value.properties.geometryGuarantee).includes("not independently routed") ||
+        !String(value.properties.geometryGuarantee).includes("350m")) {
+        issues.push(issue(propertiesPath.concat("geometryGuarantee"), "missing_caveat", "Route-candidate buffers must declare their limited unverified area."));
+      }
+    } else {
+      issues.push(issue(propertiesPath.concat("kind"), "invalid_value", "Unsupported corridor kind."));
     }
   }
   const geometry = validateGeometry(value.geometry, path.concat("geometry"), issues);
   if (!geometry || geometry.type !== "MultiPolygon") {
     issues.push(issue(path.concat("geometry"), "invalid_value", "Corridor geometry must be a non-empty MultiPolygon."));
   }
+}
+
+const MAX_ROUTE_CANDIDATES = 10;
+
+function isRouteCandidateCorridor(value: unknown): boolean {
+  return isRecord(value) &&
+    isRecord(value.properties) &&
+    value.properties.kind === "route-candidate-search-area";
 }
 
 function validateGeometry(
@@ -306,14 +383,19 @@ function validateTravelTimeRange(value: unknown, path: Array<string | number>, i
   if (typeof value.isComparable !== "boolean") issues.push(issue(path.concat("isComparable"), "invalid_type", "isComparable must be boolean."));
 }
 
-function validateTravelTimes(value: unknown, snapshot: unknown, issues: ResponseValidationIssue[]): void {
+function validateTravelTimes(
+  value: unknown,
+  snapshot: unknown,
+  issues: ResponseValidationIssue[],
+  basePath: Array<string | number> = ["travelTimes"],
+): void {
   if (!Array.isArray(value) || value.length < 2 || value.length > 4) {
-    issues.push(issue(["travelTimes"], "invalid_length", "travelTimes must contain 2 to 4 entries."));
+    issues.push(issue(basePath, "invalid_length", "travelTimes must contain 2 to 4 entries."));
     return;
   }
   const ids = new Set<string>();
   value.forEach((item, index) => {
-    const path = ["travelTimes", index];
+    const path = [...basePath, index];
     if (!isRecord(item)) {
       issues.push(issue(path, "invalid_type", "Travel time must be an object."));
       return;
@@ -331,16 +413,192 @@ function validateTravelTimes(value: unknown, snapshot: unknown, issues: Response
   if (isRecord(snapshot) && Array.isArray(snapshot.participants)) {
     const expected = new Set(snapshot.participants.flatMap((participant) => isRecord(participant) && typeof participant.id === "string" ? [participant.id] : []));
     const expectedModes = new Map(snapshot.participants.flatMap((participant) => isRecord(participant) && typeof participant.id === "string" && isTravelMode(participant.mode) ? [[participant.id, participant.mode] as const] : []));
-    if (value.length !== expected.size) issues.push(issue(["travelTimes"], "invalid_length", "Travel times must cover every snapshot participant exactly once."));
+    if (value.length !== expected.size) issues.push(issue(basePath, "invalid_length", "Travel times must cover every snapshot participant exactly once."));
     ids.forEach((id) => {
-      if (!expected.has(id)) issues.push(issue(["travelTimes"], "unknown_participant", "Travel time references an unknown participant."));
+      if (!expected.has(id)) issues.push(issue(basePath, "unknown_participant", "Travel time references an unknown participant."));
     });
     value.forEach((item, index) => {
       if (isRecord(item) && typeof item.participantId === "string" && expectedModes.get(item.participantId) !== item.mode) {
-        issues.push(issue(["travelTimes", index, "mode"], "mismatched_mode", "Travel time mode does not match the request snapshot."));
+        issues.push(issue([...basePath, index, "mode"], "mismatched_mode", "Travel time mode does not match the request snapshot."));
       }
     });
   }
+}
+
+function validateCandidates(
+  value: unknown,
+  snapshot: unknown,
+  issues: ResponseValidationIssue[],
+): void {
+  const path: Array<string | number> = ["candidates"];
+  if (!Array.isArray(value) || value.length < 1 || value.length > MAX_ROUTE_CANDIDATES) {
+    issues.push(issue(path, "invalid_length", "candidates must contain 1 to 10 verified entries."));
+    return;
+  }
+  const ids = new Set<string>();
+  value.forEach((candidate, index) => {
+    const candidatePath = [...path, index];
+    if (!isRecord(candidate)) {
+      issues.push(issue(candidatePath, "invalid_type", "Candidate must be an object."));
+      return;
+    }
+    requireKeys(
+      candidate,
+      [
+        "id",
+        "kind",
+        "label",
+        "coordinate",
+        "travelTimeRange",
+        "travelTimes",
+        "normalizedSpread",
+        "maxTravelMinutes",
+      ],
+      candidatePath,
+      issues,
+    );
+    validateString(candidate.id, candidatePath.concat("id"), issues, 1);
+    if (typeof candidate.id === "string") {
+      if (ids.has(candidate.id)) issues.push(issue(candidatePath.concat("id"), "duplicate", "Candidate ids must be unique."));
+      ids.add(candidate.id);
+    }
+    if (candidate.kind !== "route-part-endpoint" && candidate.kind !== "fixed-hub") {
+      issues.push(issue(candidatePath.concat("kind"), "invalid_value", "Unknown candidate kind."));
+    }
+    validateString(candidate.label, candidatePath.concat("label"), issues, 1);
+    validateCoordinate(candidate.coordinate, candidatePath.concat("coordinate"), issues);
+    validateTravelTimeRange(candidate.travelTimeRange, candidatePath.concat("travelTimeRange"), issues);
+    if (isRecord(candidate.travelTimeRange) && candidate.travelTimeRange.isComparable !== true) {
+      issues.push(issue(candidatePath.concat("travelTimeRange", "isComparable"), "invalid_value", "Verified candidates must be comparable."));
+    }
+    validateTravelTimes(candidate.travelTimes, snapshot, issues, candidatePath.concat("travelTimes"));
+    validateFiniteBoundedNumber(candidate.normalizedSpread, candidatePath.concat("normalizedSpread"), issues, 0, 24 * 60);
+    validateFiniteBoundedNumber(candidate.maxTravelMinutes, candidatePath.concat("maxTravelMinutes"), issues, 0, 24 * 60);
+  });
+}
+
+function validateRouteCandidateResponseCoherence(
+  value: Record<string, unknown>,
+  issues: ResponseValidationIssue[],
+): void {
+  if (!Array.isArray(value.candidates) || value.candidates.length === 0) return;
+
+  if (value.candidates.every(isRankableCandidate)) {
+    for (let index = 1; index < value.candidates.length; index += 1) {
+      const previous = value.candidates[index - 1];
+      const current = value.candidates[index];
+      if (compareCandidateRanking(previous, current) > 0) {
+        issues.push(
+          issue(
+            ["candidates", index],
+            "invalid_order",
+            "Candidates must be sorted by normalized spread, max travel time, then id.",
+          ),
+        );
+      }
+    }
+  }
+
+  const first = value.candidates[0];
+  if (!isRecord(first)) return;
+
+  if (
+    isCoordinateValue(first.coordinate) &&
+    isCoordinateValue(value.meetingPoint) &&
+    !sameCoordinate(first.coordinate, value.meetingPoint)
+  ) {
+    issues.push(
+      issue(
+        ["meetingPoint"],
+        "mismatched_selection",
+        "meetingPoint must match the first verified route candidate.",
+      ),
+    );
+  }
+  if (
+    Array.isArray(first.travelTimes) &&
+    Array.isArray(value.travelTimes) &&
+    !sameTravelTimes(first.travelTimes, value.travelTimes)
+  ) {
+    issues.push(
+      issue(
+        ["travelTimes"],
+        "mismatched_selection",
+        "travelTimes must match the first verified route candidate.",
+      ),
+    );
+  }
+  if (
+    isRecord(first.travelTimeRange) &&
+    isRecord(value.travelTimeRange) &&
+    !sameTravelTimeRange(first.travelTimeRange, value.travelTimeRange)
+  ) {
+    issues.push(
+      issue(
+        ["travelTimeRange"],
+        "mismatched_selection",
+        "travelTimeRange must match the first verified route candidate.",
+      ),
+    );
+  }
+}
+
+function isRankableCandidate(value: unknown): value is Record<string, unknown> {
+  return isRecord(value) &&
+    typeof value.id === "string" &&
+    typeof value.normalizedSpread === "number" &&
+    Number.isFinite(value.normalizedSpread) &&
+    typeof value.maxTravelMinutes === "number" &&
+    Number.isFinite(value.maxTravelMinutes);
+}
+
+function compareCandidateRanking(
+  left: Record<string, unknown>,
+  right: Record<string, unknown>,
+): number {
+  return (left.normalizedSpread as number) - (right.normalizedSpread as number) ||
+    (left.maxTravelMinutes as number) - (right.maxTravelMinutes as number) ||
+    (left.id as string).localeCompare(right.id as string);
+}
+
+function isCoordinateValue(value: unknown): value is Record<string, unknown> {
+  return isRecord(value) &&
+    typeof value.latitude === "number" &&
+    Number.isFinite(value.latitude) &&
+    typeof value.longitude === "number" &&
+    Number.isFinite(value.longitude);
+}
+
+function sameCoordinate(
+  left: Record<string, unknown>,
+  right: Record<string, unknown>,
+): boolean {
+  return left.latitude === right.latitude && left.longitude === right.longitude;
+}
+
+function sameTravelTimes(left: unknown[], right: unknown[]): boolean {
+  if (left.length !== right.length) return false;
+  return left.every((item, index) => {
+    const other = right[index];
+    return isRecord(item) && isRecord(other) &&
+      item.participantId === other.participantId &&
+      item.mode === other.mode &&
+      item.minutes === other.minutes &&
+      item.source === other.source;
+  });
+}
+
+function sameTravelTimeRange(
+  left: Record<string, unknown>,
+  right: Record<string, unknown>,
+): boolean {
+  return left.targetMinutes === right.targetMinutes &&
+    left.lowerMinutes === right.lowerMinutes &&
+    left.upperMinutes === right.upperMinutes &&
+    left.observedMinMinutes === right.observedMinMinutes &&
+    left.observedMaxMinutes === right.observedMaxMinutes &&
+    left.tolerancePercent === right.tolerancePercent &&
+    left.isComparable === right.isComparable;
 }
 
 function validatePois(value: unknown, path: Array<string | number>, issues: ResponseValidationIssue[]): void {
@@ -369,7 +627,12 @@ function validatePois(value: unknown, path: Array<string | number>, issues: Resp
   });
 }
 
-function validateMetadata(value: unknown, path: Array<string | number>, issues: ResponseValidationIssue[]): void {
+function validateMetadata(
+  value: unknown,
+  path: Array<string | number>,
+  issues: ResponseValidationIssue[],
+  routeCandidateSearch = false,
+): void {
   if (!isRecord(value)) {
     issues.push(issue(path, "invalid_type", "metadata must be an object."));
     return;
@@ -386,7 +649,16 @@ function validateMetadata(value: unknown, path: Array<string | number>, issues: 
     validateString(value.source.label, path.concat("source", "label"), issues, 1);
   }
   validateString(value.approximation, path.concat("approximation"), issues, 1);
-  if (!String(value.approximation).includes("Sample-grid approximation")) issues.push(issue(path.concat("approximation"), "missing_caveat", "Metadata must describe sample-grid approximation."));
+  if (routeCandidateSearch) {
+    if (
+      !String(value.approximation).includes("Route-candidate approximation") ||
+      !String(value.approximation).includes("not independently routed")
+    ) {
+      issues.push(issue(path.concat("approximation"), "missing_caveat", "Metadata must describe the limited route-candidate search area."));
+    }
+  } else if (!String(value.approximation).includes("Sample-grid approximation")) {
+    issues.push(issue(path.concat("approximation"), "missing_caveat", "Metadata must describe sample-grid approximation."));
+  }
   if (!isRecord(value.providers)) issues.push(issue(path.concat("providers"), "invalid_type", "Provider descriptors are required."));
   else {
     validateProviderDescriptor(value.providers.geocoding, "geocoding", path.concat("providers", "geocoding"), issues);

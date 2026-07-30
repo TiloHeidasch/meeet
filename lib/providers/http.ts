@@ -30,6 +30,8 @@ export class HttpProviderError extends Error {
 
 export type FetchImplementation = typeof fetch;
 
+export type HttpJsonFetchOptions = Pick<RequestInit, "cache" | "next">;
+
 export class HttpJsonClient {
   constructor(
     private readonly options: HttpJsonClientOptions,
@@ -40,8 +42,12 @@ export class HttpJsonClient {
     return this.requestJson<T>(this.options.endpointUrl, "POST", payload, signal);
   }
 
-  async getJson<T>(url = this.options.endpointUrl, signal?: AbortSignal): Promise<T> {
-    return this.requestJson<T>(url, "GET", undefined, signal);
+  async getJson<T>(
+    url = this.options.endpointUrl,
+    signal?: AbortSignal,
+    fetchOptions?: HttpJsonFetchOptions,
+  ): Promise<T> {
+    return this.requestJson<T>(url, "GET", undefined, signal, fetchOptions);
   }
 
   private async requestJson<T>(
@@ -49,6 +55,7 @@ export class HttpJsonClient {
     method: "GET" | "POST",
     payload?: unknown,
     externalSignal?: AbortSignal,
+    fetchOptions?: HttpJsonFetchOptions,
   ): Promise<T> {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), this.options.timeoutMs);
@@ -72,6 +79,7 @@ export class HttpJsonClient {
           method,
           headers,
           ...(method === "POST" ? { body: JSON.stringify(payload) } : {}),
+          ...fetchOptions,
           signal: controller.signal,
           redirect: "error",
         });
@@ -88,9 +96,11 @@ export class HttpJsonClient {
         );
       }
       if (!response.ok) {
+        await cancelResponseBody(response);
         throw new HttpProviderError("http", `Configured provider returned HTTP ${response.status}.`);
       }
       if (response.url && response.url !== url) {
+        await cancelResponseBody(response);
         throw new HttpProviderError(
           "http",
           "Configured provider response URL did not match the fixed endpoint.",
@@ -140,6 +150,7 @@ export function createHttpJsonClient(
 async function readBoundedText(response: Response, maximumBytes: number): Promise<string> {
   const contentLength = Number(response.headers.get("content-length"));
   if (Number.isFinite(contentLength) && contentLength > maximumBytes) {
+    await cancelResponseBody(response);
     throw new HttpProviderError(
       "response-too-large",
       "Configured provider response exceeds the response-size limit.",
@@ -157,7 +168,7 @@ async function readBoundedText(response: Response, maximumBytes: number): Promis
       if (done) break;
       total += value.byteLength;
       if (total > maximumBytes) {
-        await reader.cancel();
+        await cancelReader(reader);
         throw new HttpProviderError(
           "response-too-large",
           "Configured provider response exceeds the response-size limit.",
@@ -175,4 +186,49 @@ async function readBoundedText(response: Response, maximumBytes: number): Promis
     offset += chunk.byteLength;
   }
   return new TextDecoder().decode(merged);
+}
+
+export function raceWithAbort<T>(
+  promise: Promise<T>,
+  signal?: AbortSignal,
+): Promise<T> {
+  if (!signal) return promise;
+  if (signal.aborted) {
+    return Promise.reject(new HttpProviderError("aborted", "Provider request was aborted."));
+  }
+  return new Promise<T>((resolve, reject) => {
+    const abort = () => {
+      cleanup();
+      reject(new HttpProviderError("aborted", "Provider request was aborted."));
+    };
+    const cleanup = () => signal.removeEventListener("abort", abort);
+    signal.addEventListener("abort", abort, { once: true });
+    promise.then(
+      (value) => {
+        cleanup();
+        resolve(value);
+      },
+      (error: unknown) => {
+        cleanup();
+        reject(error);
+      },
+    );
+  });
+}
+
+async function cancelResponseBody(response: Response): Promise<void> {
+  if (!response.body) return;
+  try {
+    await response.body.cancel();
+  } catch {
+    // Preserve the response-size error even if body cleanup fails.
+  }
+}
+
+async function cancelReader(reader: ReadableStreamDefaultReader<Uint8Array>): Promise<void> {
+  try {
+    await reader.cancel();
+  } catch {
+    // Preserve the response-size error even if body cleanup fails.
+  }
 }

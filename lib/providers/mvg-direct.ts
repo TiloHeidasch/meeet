@@ -1,5 +1,6 @@
 import "server-only";
 
+import { cacheLife } from "next/cache";
 import { haversineDistanceKm } from "../domain/geo.ts";
 import type {
   ProviderDescriptor,
@@ -10,8 +11,17 @@ import type {
   RoutingMatrixTimingMetadata,
   RoutingProviderCapabilities,
   RoutingParticipant,
+  RouteAlternative,
+  RouteAlternativeDiscoveryRequest,
+  RouteAlternativeDiscoveryResult,
+  RoutePart,
+  RouteStationReference,
 } from "../domain/types.ts";
-import type { RoutingProvider } from "../domain/providers.ts";
+import type {
+  RouteAlternativeProvider,
+  RoutingProvider,
+} from "../domain/providers.ts";
+import { withRouteAlternativeIdentities } from "../domain/route-candidates.ts";
 import {
   DEFAULT_PROVIDER_TIMEOUT_MS,
   DEFAULT_PROVIDER_MAX_RESPONSE_BYTES,
@@ -19,27 +29,49 @@ import {
 } from "./config.ts";
 import {
   createHttpJsonClient,
+  type HttpJsonFetchOptions,
   type FetchImplementation,
   HttpProviderError,
 } from "./http.ts";
+import {
+  MVG_DIRECT_API_BASE_URL,
+  MVG_DIRECT_NEARBY_CACHE_DECIMAL_PLACES,
+  MVG_DIRECT_NEARBY_URL,
+  MVG_DIRECT_ROUTES_URL,
+  MVG_UPSTREAM_REVALIDATE_SECONDS,
+} from "./mvg-constants.ts";
+import {
+  MVG_DIRECT_LIMITER,
+  runMvgDirectCacheFill,
+} from "./mvg-limiter.ts";
 
-export const MVG_DIRECT_API_ORIGIN = "https://www.mvg.de";
-export const MVG_DIRECT_API_BASE_URL =
-  `${MVG_DIRECT_API_ORIGIN}/api/bgw-pt/v3`;
-export const MVG_DIRECT_NEARBY_URL =
-  `${MVG_DIRECT_API_BASE_URL}/stations/nearby`;
-export const MVG_DIRECT_ROUTES_URL = `${MVG_DIRECT_API_BASE_URL}/routes`;
+export {
+  MVG_DIRECT_MAX_CONCURRENCY,
+  runMvgDirectCacheFill,
+} from "./mvg-limiter.ts";
+
+export {
+  MVG_DIRECT_API_BASE_URL,
+  MVG_DIRECT_API_ORIGIN,
+  MVG_DIRECT_LOCATIONS_URL,
+  MVG_DIRECT_NEARBY_CACHE_DECIMAL_PLACES,
+  MVG_DIRECT_NEARBY_URL,
+  MVG_DIRECT_ROUTES_URL,
+  MVG_UPSTREAM_REVALIDATE_SECONDS,
+} from "./mvg-constants.ts";
+
 export const MVG_DIRECT_SOURCE_URL = MVG_DIRECT_API_BASE_URL;
 export const MVG_DIRECT_VERSION = "bgw-pt/v3";
 export const MVG_DIRECT_TIMEOUT_MS = DEFAULT_PROVIDER_TIMEOUT_MS;
 export const MVG_DIRECT_MATRIX_DEADLINE_MS = 12_000;
+export const MVG_DIRECT_MAX_ITINERARY_DURATION_MS = 24 * 60 * 60 * 1_000;
 export const MVG_DIRECT_MAX_RESPONSE_BYTES = 512 * 1024;
 export const MVG_DIRECT_MAX_STATION_RESULTS = 100;
 export const MVG_DIRECT_MAX_ROUTE_RESULTS = 100;
 export const MVG_DIRECT_MAX_ROUTE_PARTS = 100;
+export const MVG_DIRECT_MAX_ROUTE_ALTERNATIVES = 20;
 export const MVG_DIRECT_MAX_RADIUS_METERS = 1_500;
 export const MVG_DIRECT_WALKING_METERS_PER_MINUTE = 75;
-export const MVG_DIRECT_MAX_CONCURRENCY = 4;
 export const MVG_DIRECT_MAX_ARRIVAL_DELAY_MINUTES = 24 * 60;
 export const MVG_DIRECT_TRANSPORT_TYPES =
   "SCHIFF,UBAHN,TRAM,SBAHN,BUS,REGIONAL_BUS,BAHN";
@@ -91,7 +123,7 @@ interface MvgRouteResult {
  * This class deliberately owns no configurable URL: the endpoint constants
  * above are the only network destinations it can use.
  */
-export class MvgDirectRoutingProvider implements RoutingProvider {
+export class MvgDirectRoutingProvider implements RoutingProvider, RouteAlternativeProvider {
   readonly descriptor: ProviderDescriptor;
   readonly capabilities = MVG_DIRECT_CAPABILITIES;
   private readonly timeoutMs: number;
@@ -126,7 +158,7 @@ export class MvgDirectRoutingProvider implements RoutingProvider {
       version: MVG_DIRECT_VERSION,
       retrievedAt: new Date().toISOString(),
       notes:
-        "Unofficial MVG BGW PT v3 endpoint with no SLA; realtime is used when supplied on the final route part, invalid realtime fields ignored, and planned timestamps used as the fallback. Coordinates are snapped to the nearest returned station within 1500 m using 75 m/min walking access and egress. Transit-only and capped at a complete 2x2 grid (19 destinations; 76 matrix entries).",
+        "Unofficial MVG BGW PT v3 endpoint with no SLA; realtime is used when supplied on the final route part, invalid realtime fields ignored, and planned timestamps used as the fallback. Transit-only; coordinates snap within 1500 m with 75 m/min access and egress. Meeting searches use finite bidirectional alternatives, explicit Munich hub candidates, and at most 10 candidate centers in one matrix.",
       feeds: null,
     };
     this.descriptor = {
@@ -162,10 +194,12 @@ export class MvgDirectRoutingProvider implements RoutingProvider {
         const key = coordinateKey(coordinate);
         const existing = stationCache.get(key);
         if (existing) return existing;
-        const promise = MVG_DIRECT_LIMITER.run(
-          () => this.findNearestStation(coordinate, operationController.signal),
-          operationController.signal,
-        );
+        const promise = this.fetchImplementation === globalThis.fetch
+          ? this.findCachedNearestStation(coordinate, operationController.signal)
+          : MVG_DIRECT_LIMITER.run(
+              () => this.findNearestStation(coordinate, operationController.signal),
+              operationController.signal,
+            );
         stationCache.set(key, promise);
         return promise;
       };
@@ -287,31 +321,131 @@ export class MvgDirectRoutingProvider implements RoutingProvider {
     }
   }
 
+  async discoverRouteAlternatives(
+    request: RouteAlternativeDiscoveryRequest,
+  ): Promise<RouteAlternativeDiscoveryResult> {
+    validateRouteAlternativeRequest(request);
+    const operationController = new AbortController();
+    const abortOperation = () => operationController.abort();
+    request.signal?.addEventListener("abort", abortOperation, { once: true });
+    if (request.signal?.aborted) operationController.abort();
+    const deadline = setTimeout(
+      () => operationController.abort(),
+      this.matrixDeadlineMs,
+    );
+    try {
+      const [originStation, destinationStation] = await Promise.all([
+        this.findNearestStationForAlternatives(
+          request.origin,
+          operationController.signal,
+        ),
+        this.findNearestStationForAlternatives(
+          request.destination,
+          operationController.signal,
+        ),
+      ]);
+      const originReference = originStation
+        ? toRouteStationReference(originStation)
+        : null;
+      const destinationReference = destinationStation
+        ? toRouteStationReference(destinationStation)
+        : null;
+      if (!originStation || !destinationStation || !originReference || !destinationReference) {
+        return {
+          originStation: originReference,
+          destinationStation: destinationReference,
+          alternatives: [],
+        };
+      }
+
+      const stationReadyAt = new Date(
+        Date.parse(request.departureAt) + originStation.walkingMinutes * 60_000,
+      ).toISOString();
+      const alternatives = await MVG_DIRECT_LIMITER.run(
+        () => this.fetchRouteAlternatives(
+          originReference,
+          destinationReference,
+          stationReadyAt,
+          operationController.signal,
+        ),
+        operationController.signal,
+      );
+      return {
+        originStation: originReference,
+        destinationStation: destinationReference,
+        alternatives,
+      };
+    } finally {
+      clearTimeout(deadline);
+      request.signal?.removeEventListener("abort", abortOperation);
+    }
+  }
+
+  private async findNearestStationForAlternatives(
+    coordinate: { latitude: number; longitude: number },
+    signal: AbortSignal,
+  ): Promise<SnappedStation | null> {
+    return this.fetchImplementation === globalThis.fetch
+      ? this.findCachedNearestStation(coordinate, signal)
+      : MVG_DIRECT_LIMITER.run(
+          () => this.findNearestStation(coordinate, signal),
+          signal,
+        );
+  }
+
+  private async fetchRouteAlternatives(
+    origin: RouteStationReference,
+    destination: RouteStationReference,
+    stationReadyAt: string,
+    signal: AbortSignal,
+  ): Promise<readonly RouteAlternative[]> {
+    const url = new URL(MVG_DIRECT_ROUTES_URL);
+    url.searchParams.set("originStationGlobalId", origin.id);
+    url.searchParams.set("destinationStationGlobalId", destination.id);
+    url.searchParams.set("routingDateTime", stationReadyAt);
+    url.searchParams.set("routingDateTimeIsArrival", "false");
+    url.searchParams.set("transportTypes", MVG_DIRECT_TRANSPORT_TYPES);
+    url.searchParams.set("changeSpeed", "NORMAL");
+    url.searchParams.set("routeType", "LEAST_TIME");
+    const payload = await this.getJson(url.toString(), signal, {
+      cache: "no-store",
+    });
+    return parseMvgRouteAlternatives(payload, origin, destination, stationReadyAt);
+  }
+
+  private async findCachedNearestStation(
+    coordinate: { latitude: number; longitude: number },
+    signal: AbortSignal,
+  ): Promise<SnappedStation | null> {
+    const latitude = nearbyCacheCoordinate(coordinate.latitude);
+    const longitude = nearbyCacheCoordinate(coordinate.longitude);
+    const fill = runMvgDirectCacheFill(
+      () => getCachedMvgStations(
+        latitude,
+        longitude,
+        this.timeoutMs,
+        this.maxResponseBytes,
+      ),
+      signal,
+    );
+    return fill.then((stations) => findNearestStation(coordinate, stations));
+  }
+
   private async findNearestStation(
     coordinate: { latitude: number; longitude: number },
     signal: AbortSignal,
   ): Promise<SnappedStation | null> {
     const url = new URL(MVG_DIRECT_NEARBY_URL);
-    url.searchParams.set("latitude", String(coordinate.latitude));
-    url.searchParams.set("longitude", String(coordinate.longitude));
-    const payload = await this.getJson(url.toString(), signal);
-    const stations = parseStations(payload);
-    let nearest: SnappedStation | undefined;
-    for (const station of stations) {
-      const distanceMeters = haversineDistanceKm(coordinate, station) * 1_000;
-      if (distanceMeters > MVG_DIRECT_MAX_RADIUS_METERS) continue;
-      const candidate: SnappedStation = {
-        ...station,
-        walkingMinutes: roundMinutes(
-          distanceMeters / MVG_DIRECT_WALKING_METERS_PER_MINUTE,
-        ),
-      };
-      const nearestDistance = nearest
-        ? haversineDistanceKm(coordinate, nearest) * 1_000
-        : Number.POSITIVE_INFINITY;
-      if (distanceMeters < nearestDistance) nearest = candidate;
-    }
-    return nearest ?? null;
+    const latitude = nearbyCacheCoordinate(coordinate.latitude);
+    const longitude = nearbyCacheCoordinate(coordinate.longitude);
+    url.searchParams.set("latitude", latitude);
+    url.searchParams.set("longitude", longitude);
+    const stations = parseStations(await this.getJson(
+      url.toString(),
+      signal,
+      { cache: "no-store" },
+    ));
+    return findNearestStation(coordinate, stations);
   }
 
   private async findEarliestEffectiveArrival(
@@ -328,7 +462,9 @@ export class MvgDirectRoutingProvider implements RoutingProvider {
     url.searchParams.set("transportTypes", MVG_DIRECT_TRANSPORT_TYPES);
     url.searchParams.set("changeSpeed", "NORMAL");
     url.searchParams.set("routeType", "LEAST_TIME");
-    const payload = await this.getJson(url.toString(), signal);
+    const payload = await this.getJson(url.toString(), signal, {
+      cache: "no-store",
+    });
     const routes = parseRoutes(payload, originStationId, destinationStationId);
     const transitRoutes = routes.filter((route) => route.hasTransit);
     if (transitRoutes.length === 0) return UNREACHABLE;
@@ -354,7 +490,11 @@ export class MvgDirectRoutingProvider implements RoutingProvider {
     };
   }
 
-  private async getJson(url: string, signal: AbortSignal): Promise<unknown> {
+  private async getJson(
+    url: string,
+    signal: AbortSignal,
+    fetchOptions?: HttpJsonFetchOptions,
+  ): Promise<unknown> {
     // The URL is assembled only from the fixed endpoint constants and encoded
     // URLSearchParams above. Keep this assertion as a second fixed-origin gate.
     const parsed = new URL(url);
@@ -376,8 +516,57 @@ export class MvgDirectRoutingProvider implements RoutingProvider {
       null,
       this.fetchImplementation,
     );
-    return client.getJson(url, signal);
+    return client.getJson(url, signal, fetchOptions);
   }
+}
+
+async function getCachedMvgStations(
+  latitude: string,
+  longitude: string,
+  timeoutMs: number,
+  maxResponseBytes: number,
+): Promise<Station[]> {
+  "use cache";
+  cacheLife({ revalidate: MVG_UPSTREAM_REVALIDATE_SECONDS });
+  const url = new URL(MVG_DIRECT_NEARBY_URL);
+  url.searchParams.set("latitude", latitude);
+  url.searchParams.set("longitude", longitude);
+  const client = createHttpJsonClient(
+    url.toString(),
+    {
+      // Cache fills have their own timeout and deliberately do not inherit a
+      // caller's abort signal, so another request can reuse an in-flight fill.
+      timeoutMs,
+      maxResponseBytes,
+    },
+    null,
+  );
+  const payload = await client.getJson(url.toString(), undefined, {
+    cache: "no-store",
+  });
+  return parseStations(payload);
+}
+
+function findNearestStation(
+  coordinate: { latitude: number; longitude: number },
+  stations: Station[],
+): SnappedStation | null {
+  let nearest: SnappedStation | undefined;
+  for (const station of stations) {
+    const distanceMeters = haversineDistanceKm(coordinate, station) * 1_000;
+    if (distanceMeters > MVG_DIRECT_MAX_RADIUS_METERS) continue;
+    const candidate: SnappedStation = {
+      ...station,
+      walkingMinutes: roundMinutes(
+        distanceMeters / MVG_DIRECT_WALKING_METERS_PER_MINUTE,
+      ),
+    };
+    const nearestDistance = nearest
+      ? haversineDistanceKm(coordinate, nearest) * 1_000
+      : Number.POSITIVE_INFINITY;
+    if (distanceMeters < nearestDistance) nearest = candidate;
+  }
+  return nearest ?? null;
 }
 
 /** Descriptive alias for callers that name the mode rather than its routing role. */
@@ -425,6 +614,26 @@ function validateRequest(request: RoutingMatrixRequest): void {
   }
 }
 
+function validateRouteAlternativeRequest(
+  request: RouteAlternativeDiscoveryRequest,
+): void {
+  if (!Number.isFinite(Date.parse(request.departureAt))) {
+    throw new RangeError("MVG route alternatives require a valid departure instant.");
+  }
+  validateCoordinate(request.origin);
+  validateCoordinate(request.destination);
+}
+
+function toRouteStationReference(station: SnappedStation): RouteStationReference {
+  return {
+    id: station.id,
+    coordinate: {
+      latitude: station.latitude,
+      longitude: station.longitude,
+    },
+  };
+}
+
 function validateCoordinate(coordinate: { latitude: number; longitude: number }): void {
   if (
     !Number.isFinite(coordinate.latitude) ||
@@ -440,6 +649,13 @@ function validateCoordinate(coordinate: { latitude: number; longitude: number })
 
 function coordinateKey(coordinate: { latitude: number; longitude: number }): string {
   return `${coordinate.latitude}:${coordinate.longitude}`;
+}
+
+function nearbyCacheCoordinate(value: number): string {
+  const factor = 10 ** MVG_DIRECT_NEARBY_CACHE_DECIMAL_PLACES;
+  return (Math.round(value * factor) / factor).toFixed(
+    MVG_DIRECT_NEARBY_CACHE_DECIMAL_PLACES,
+  );
 }
 
 function walkingMinutes(
@@ -570,6 +786,317 @@ function parseRoutes(
   return routes;
 }
 
+/** Parse the finite, uncached route-alternative response used by Phase 2. */
+export function parseMvgRouteAlternatives(
+  value: unknown,
+  origin: RouteStationReference,
+  destination: RouteStationReference,
+  stationReadyAt: string,
+): readonly RouteAlternative[] {
+  if (!Array.isArray(value)) {
+    throw new Error("MVG route alternatives response must be a JSON array.");
+  }
+  if (value.length > MVG_DIRECT_MAX_ROUTE_ALTERNATIVES) {
+    throw new Error("MVG route alternatives response exceeds the alternative limit.");
+  }
+  const stationReadyTimestamp = parseBoundedRouteTimestamp(
+    stationReadyAt,
+    stationReadyAt,
+    "station readiness",
+  );
+  const parsed = value
+    .map((route) => parseRouteAlternative(
+      route,
+      origin,
+      destination,
+      stationReadyAt,
+      stationReadyTimestamp,
+    ))
+    .filter((route): route is RouteAlternative => route !== null);
+  return deduplicateRouteAlternatives(parsed);
+}
+
+function parseRouteAlternative(
+  value: unknown,
+  origin: RouteStationReference,
+  destination: RouteStationReference,
+  stationReadyAt: string,
+  stationReadyTimestamp: number,
+): RouteAlternative | null {
+  if (!isRecord(value) || !Array.isArray(value.parts)) {
+    throw new Error("MVG route alternative must contain a parts array.");
+  }
+  if (value.parts.length === 0 || value.parts.length > MVG_DIRECT_MAX_ROUTE_PARTS) {
+    throw new Error("MVG route alternative contains an invalid parts array.");
+  }
+  const providerItineraryId = optionalRouteString(value, [
+    "id",
+    "routeId",
+    "itineraryId",
+  ], "route itinerary identity");
+  const parts: RoutePart[] = [];
+  let previousToStationId: string | null = null;
+  let previousPlannedArrivalAt = stationReadyAt;
+  let previousEffectiveArrivalTimestamp = stationReadyTimestamp;
+  let hasTransit = false;
+  let usedRealtime = false;
+
+  for (const [index, rawPart] of value.parts.entries()) {
+    if (!isRecord(rawPart) || !isRecord(rawPart.from) || !isRecord(rawPart.to)) {
+      throw new Error("MVG route alternative parts must contain from and to stations.");
+    }
+    const from = parseAlternativeStation(rawPart.from);
+    const to = parseAlternativeStation(rawPart.to);
+    if (previousToStationId !== null && from.id !== previousToStationId) {
+      throw new Error("MVG route alternative parts are not continuous.");
+    }
+    const line = parseAlternativeLine(rawPart.line);
+    hasTransit ||= MVG_DIRECT_TRANSIT_TYPES.has(line.type);
+
+    const explicitDepartureAt = optionalRouteTimestamp(
+      rawPart.from,
+      "plannedDeparture",
+      stationReadyAt,
+      stationReadyAt,
+    );
+    const plannedDepartureAt = explicitDepartureAt ?? previousPlannedArrivalAt;
+    const plannedArrivalAt = requiredRouteTimestamp(
+      rawPart.to,
+      "plannedDeparture",
+      stationReadyAt,
+      `part ${index} arrival`,
+    );
+    const departureTimestamp = parseBoundedRouteTimestamp(
+      plannedDepartureAt,
+      stationReadyAt,
+      `part ${index} departure`,
+    );
+    const arrivalTimestamp = parseBoundedRouteTimestamp(
+      plannedArrivalAt,
+      stationReadyAt,
+      `part ${index} arrival`,
+    );
+    if (arrivalTimestamp < departureTimestamp) {
+      throw new Error("MVG route alternative contains reversed planned timestamps.");
+    }
+    if (departureTimestamp < previousEffectiveArrivalTimestamp) {
+      throw new Error("MVG route alternative contains overlapping parts.");
+    }
+
+    const isRealtime = rawPart.realTime === true;
+    if (rawPart.realTime !== undefined && typeof rawPart.realTime !== "boolean") {
+      throw new Error("MVG route alternative contains an invalid realtime flag.");
+    }
+    const delay = isRealtime
+      ? parseBoundedArrivalDelay(
+          isRecord(rawPart.to) ? rawPart.to.arrivalDelayInMinutes : undefined,
+        )
+      : null;
+    const isFinalPart = index === value.parts.length - 1;
+    const effectiveArrivalTimestamp = isFinalPart && delay !== null
+      ? arrivalTimestamp + delay * 60_000
+      : arrivalTimestamp;
+    if (effectiveArrivalTimestamp < stationReadyTimestamp ||
+      effectiveArrivalTimestamp > stationReadyTimestamp + MVG_DIRECT_MAX_ITINERARY_DURATION_MS) {
+      throw new Error("MVG route alternative contains an unbounded effective timestamp.");
+    }
+    if (effectiveArrivalTimestamp < departureTimestamp) {
+      throw new Error("MVG route alternative contains an invalid effective arrival timestamp.");
+    }
+    const effectiveArrivalAt = new Date(effectiveArrivalTimestamp).toISOString();
+    const part: RoutePart = {
+      from,
+      to,
+      plannedDepartureAt,
+      plannedArrivalAt,
+      effectiveDepartureAt: plannedDepartureAt,
+      effectiveArrivalAt,
+      line,
+    };
+    parts.push(part);
+    previousToStationId = to.id;
+    previousPlannedArrivalAt = plannedArrivalAt;
+    previousEffectiveArrivalTimestamp = effectiveArrivalTimestamp;
+    if (isFinalPart && delay !== null) usedRealtime = true;
+  }
+
+  if (parts[0].from.id !== origin.id || parts[parts.length - 1].to.id !== destination.id) {
+    return null;
+  }
+  if (!hasTransit) return null;
+
+  const plannedDepartureAt = parts[0].plannedDepartureAt;
+  const plannedArrivalAt = parts[parts.length - 1].plannedArrivalAt;
+  const effectiveDepartureAt = parts[0].effectiveDepartureAt;
+  const effectiveArrivalAt = parts[parts.length - 1].effectiveArrivalAt;
+  const effectiveDepartureTimestamp = Date.parse(effectiveDepartureAt);
+  const effectiveArrivalTimestamp = Date.parse(effectiveArrivalAt);
+  if (
+    effectiveArrivalTimestamp < effectiveDepartureTimestamp ||
+    effectiveArrivalTimestamp > stationReadyTimestamp + MVG_DIRECT_MAX_ITINERARY_DURATION_MS
+  ) {
+    throw new Error("MVG route alternative contains an invalid itinerary duration.");
+  }
+  return withRouteAlternativeIdentities({
+    providerItineraryId,
+    origin,
+    destination,
+    parts,
+    plannedDepartureAt,
+    plannedArrivalAt,
+    effectiveDepartureAt,
+    effectiveArrivalAt,
+    usedRealtime,
+  });
+}
+
+function deduplicateRouteAlternatives(
+  alternatives: readonly RouteAlternative[],
+): readonly RouteAlternative[] {
+  const byTimedIdentity = new Map<string, RouteAlternative>();
+  const byProviderItineraryId = new Map<string, string>();
+  for (const alternative of alternatives) {
+    const timedIdentity = `${alternative.itineraryIdentity}\u0000${routeTimingFingerprint(alternative)}`;
+    if (alternative.providerItineraryId !== null) {
+      const existingProviderIdentity = byProviderItineraryId.get(alternative.providerItineraryId);
+      if (existingProviderIdentity && existingProviderIdentity !== timedIdentity) {
+        throw new Error("MVG route alternatives contain conflicting itinerary timing.");
+      }
+      byProviderItineraryId.set(alternative.providerItineraryId, timedIdentity);
+    }
+    if (byTimedIdentity.has(timedIdentity)) {
+      continue;
+    }
+    byTimedIdentity.set(timedIdentity, alternative);
+  }
+  return [...byTimedIdentity.values()];
+}
+
+function parseAlternativeStation(value: Record<string, unknown>): RouteStationReference {
+  const id = firstString(value, [
+    "stationGlobalId",
+    "stationGlobalID",
+    "globalId",
+    "globalID",
+    "id",
+  ]);
+  if (!id || id.length > 200) {
+    throw new Error("MVG route alternative contains an invalid station identity.");
+  }
+  return { id, coordinate: parseOptionalRouteCoordinate(value) };
+}
+
+function parseAlternativeLine(value: unknown): RoutePart["line"] {
+  if (!isRecord(value)) {
+    throw new Error("MVG route alternative part must contain a transit line.");
+  }
+  const type = firstString(value, ["transportType"]);
+  if (!type) throw new Error("MVG route alternative line lacks a transport type.");
+  const identity = optionalRouteString(value, [
+    "globalId",
+    "globalID",
+    "lineId",
+    "lineID",
+    "id",
+    "name",
+    "label",
+    "shortName",
+    "designation",
+  ], "transit line identity") ?? type.toUpperCase();
+  return { identity, type: type.toUpperCase() };
+}
+
+function optionalRouteString(
+  value: Record<string, unknown>,
+  keys: readonly string[],
+  label: string,
+): string | null {
+  for (const key of keys) {
+    if (!(key in value)) continue;
+    if (typeof value[key] !== "string" || value[key].trim().length === 0) {
+      throw new Error(`MVG route alternative contains an invalid ${label}.`);
+    }
+    const result = value[key].trim();
+    if (result.length > 200) throw new Error(`MVG route alternative ${label} is too long.`);
+    return result;
+  }
+  return null;
+}
+
+function optionalRouteTimestamp(
+  value: Record<string, unknown>,
+  key: string,
+  stationReadyAt: string,
+  label: string,
+): string | null {
+  if (!(key in value)) return null;
+  if (typeof value[key] !== "string") {
+    throw new Error(`MVG route alternative contains an invalid ${label}.`);
+  }
+  parseBoundedRouteTimestamp(value[key], stationReadyAt, label);
+  return value[key];
+}
+
+function requiredRouteTimestamp(
+  value: Record<string, unknown>,
+  key: string,
+  stationReadyAt: string,
+  label: string,
+): string {
+  const timestamp = optionalRouteTimestamp(value, key, stationReadyAt, label);
+  if (!timestamp) throw new Error(`MVG route alternative is missing a ${label} timestamp.`);
+  return timestamp;
+}
+
+function parseBoundedRouteTimestamp(
+  value: unknown,
+  stationReadyAt: string,
+  label: string,
+): number {
+  if (typeof value !== "string" ||
+    !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,3})?(?:Z|[+-]\d{2}:\d{2})$/.test(value)) {
+    throw new Error(`MVG route alternative contains an invalid ${label} timestamp.`);
+  }
+  const timestamp = Date.parse(value);
+  const ready = Date.parse(stationReadyAt);
+  if (!Number.isFinite(timestamp) || !Number.isFinite(ready) ||
+    timestamp < ready || timestamp > ready + MVG_DIRECT_MAX_ITINERARY_DURATION_MS) {
+    throw new Error(`MVG route alternative contains an unbounded ${label} timestamp.`);
+  }
+  return timestamp;
+}
+
+function parseOptionalRouteCoordinate(
+  value: Record<string, unknown>,
+): { latitude: number; longitude: number } | null {
+  const directKeys = ["latitude", "lat", "longitude", "lon", "lng"];
+  const hasDirectCoordinate = directKeys.some((key) => key in value);
+  if (hasDirectCoordinate) {
+    const coordinate = parseCoordinateValue(value);
+    if (!coordinate) throw new Error("MVG route alternative contains an invalid endpoint coordinate.");
+    return coordinate;
+  }
+  const nestedKeys = ["location", "coordinate", "coordinates"];
+  if (nestedKeys.some((key) => key in value)) {
+    if (nestedKeys.some((key) => value[key] !== null && value[key] !== undefined)) {
+      const coordinate = parseCoordinateValue(value);
+      if (!coordinate) throw new Error("MVG route alternative contains an invalid endpoint coordinate.");
+      return coordinate;
+    }
+  }
+  return null;
+}
+
+function routeTimingFingerprint(alternative: RouteAlternative): string {
+  return JSON.stringify({
+    plannedDepartureAt: alternative.plannedDepartureAt,
+    plannedArrivalAt: alternative.plannedArrivalAt,
+    effectiveDepartureAt: alternative.effectiveDepartureAt,
+    effectiveArrivalAt: alternative.effectiveArrivalAt,
+    usedRealtime: alternative.usedRealtime,
+  });
+}
+
 function parseRoute(
   value: unknown,
   originStationId: string,
@@ -695,60 +1222,3 @@ function isWgs84(latitude: number, longitude: number): boolean {
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
-
-class ConcurrencyLimiter {
-  private active = 0;
-  private readonly queue: Array<() => void> = [];
-
-  constructor(private readonly maximum: number) {}
-
-  run<T>(operation: () => Promise<T>, signal: AbortSignal): Promise<T> {
-    if (signal.aborted) {
-      return Promise.reject(new HttpProviderError("aborted", "Provider request was aborted."));
-    }
-    return new Promise<T>((resolve, reject) => {
-      let queued = true;
-      let settled = false;
-      const start = () => {
-        if (settled) return;
-        queued = false;
-        signal.removeEventListener("abort", abort);
-        if (signal.aborted) {
-          settled = true;
-          reject(new HttpProviderError("aborted", "Provider request was aborted."));
-          return;
-        }
-        this.active += 1;
-        Promise.resolve()
-          .then(operation)
-          .then(resolve, reject)
-          .finally(() => {
-            settled = true;
-            this.active -= 1;
-            this.startNext();
-          });
-      };
-      const abort = () => {
-        if (!queued || settled) return;
-        queued = false;
-        settled = true;
-        const index = this.queue.indexOf(start);
-        if (index >= 0) this.queue.splice(index, 1);
-        reject(new HttpProviderError("aborted", "Provider request was aborted."));
-      };
-      signal.addEventListener("abort", abort, { once: true });
-      if (this.active < this.maximum) start();
-      else this.queue.push(start);
-    });
-  }
-
-  private startNext(): void {
-    while (this.active < this.maximum) {
-      const next = this.queue.shift();
-      if (!next) return;
-      next();
-    }
-  }
-}
-
-const MVG_DIRECT_LIMITER = new ConcurrencyLimiter(MVG_DIRECT_MAX_CONCURRENCY);

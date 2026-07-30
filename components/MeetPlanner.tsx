@@ -1,8 +1,8 @@
 "use client";
 
-import { useMemo, useRef, useState, type FormEvent } from "react";
+import { useEffect, useMemo, useRef, useState, type FormEvent, type KeyboardEvent } from "react";
 import dynamic from "next/dynamic";
-import type { MapParticipant, MapPoi } from "./MapLibreCanvas";
+import type { MapParticipant, MapPoi, MapResultState } from "./MapLibreCanvas";
 import { validateMeetingCalculationResponse } from "@/lib/client/meeting-response";
 import type { MeetingCalculationResponse } from "@/lib/client/meeting-response";
 
@@ -14,19 +14,11 @@ const MapLibreCanvas = dynamic(() => import("./MapLibreCanvas"), {
 type Mode = "transit" | "bike" | "car";
 type ProviderMode = "fixture" | "configured" | "mvg-direct-transit";
 export type PlannerCapability = { mode: ProviderMode; supportedModes: Mode[] };
-type LocationChoice = { label: string; lat: number; lng: number; x: number; y: number };
+type LocationChoice = { label: string; lat: number; lng: number };
+type LocationSearchResult = { label: string; latitude: number; longitude: number };
 type Participant = { id: string; name: string; location: LocationChoice | null; mode: Mode };
 type CalculationState = { response: MeetingCalculationResponse; submittedParticipants: Participant[] };
 
-const LOCATIONS: LocationChoice[] = [
-  { label: "Marienplatz", lat: 48.1374, lng: 11.5755, x: 49, y: 49 },
-  { label: "Odeonsplatz", lat: 48.1428, lng: 11.5772, x: 54, y: 34 },
-  { label: "München Hbf", lat: 48.1402, lng: 11.5586, x: 33, y: 48 },
-  { label: "Gärtnerplatz", lat: 48.1316, lng: 11.5754, x: 52, y: 64 },
-  { label: "Universität", lat: 48.1508, lng: 11.582, x: 57, y: 21 },
-  { label: "Ostbahnhof", lat: 48.1257, lng: 11.605, x: 78, y: 65 },
-  { label: "Westpark", lat: 48.1234, lng: 11.486, x: 14, y: 73 },
-];
 const MODE_LABELS: Record<Mode, string> = { transit: "Public transport", bike: "Bike", car: "Car" };
 const MODE_SHORT: Record<Mode, string> = { transit: "Transit", bike: "Bike", car: "Car" };
 const MODE_ICONS: Record<Mode, string> = { transit: "↔", bike: "⌁", car: "▱" };
@@ -45,8 +37,8 @@ function initialParticipant(id: string, name: string, location: LocationChoice |
 }
 
 const INITIAL_PARTICIPANTS = [
-  initialParticipant("participant-1", "Alex", LOCATIONS[0], "transit"),
-  initialParticipant("participant-2", "Sam", LOCATIONS[5], "bike"),
+  initialParticipant("participant-1", "Alex", null, "transit"),
+  initialParticipant("participant-2", "Sam", null, "bike"),
 ];
 
 function initialParticipantsFor(capability: PlannerCapability) {
@@ -86,6 +78,28 @@ function caveatLabel(response: MeetingCalculationResponse) {
   return response.metadata.approximation || "Sample-grid approximation; returned cells were checked at their center and four vertices.";
 }
 
+function isRouteCandidateResponse(response: MeetingCalculationResponse): response is Extract<MeetingCalculationResponse, { status: "ok" }> & { candidates: NonNullable<Extract<MeetingCalculationResponse, { status: "ok" }>["candidates"]> } {
+  return response.status === "ok" && response.corridor.properties.kind === "route-candidate-search-area" && Array.isArray(response.candidates);
+}
+
+function meetingAreaHeading(response: Extract<MeetingCalculationResponse, { status: "ok" }>) {
+  return isRouteCandidateResponse(response) ? "Verified candidate centers" : "Sample-grid meeting cells";
+}
+
+function CandidateSummary({ response }: { response: Extract<MeetingCalculationResponse, { status: "ok" }> }) {
+  if (!isRouteCandidateResponse(response)) return null;
+  const selected = response.candidates[0];
+  return <div className="mb-4 rounded-xl border border-[#cbd7cd] bg-[#f1f7f2] p-3 text-xs leading-5 text-[#315e4d]">
+    <p className="font-semibold text-[#202522]">Routed verified candidate centers</p>
+    <p className="mt-1">{response.candidates.length} candidate centers passed the selected ±{response.requestSnapshot.tolerancePercent}% travel-time check.</p>
+    <p className="mt-2 font-semibold text-[#165b47]">Best candidate center: {selected.label}</p>
+    <ul className="mt-1 space-y-0.5 text-[#526057]">
+      {response.candidates.map((candidate) => <li key={candidate.id}>{candidate.label}{candidate.id === selected.id ? " · selected" : ""}</li>)}
+    </ul>
+    <p className="mt-2 text-[#526057]">The map shows limited nearby-venue search buffers around these centers, not equal-time-proven areas.</p>
+  </div>;
+}
+
 function formatDeparture(iso: string) {
   return new Intl.DateTimeFormat("en-GB", { timeZone: "Europe/Berlin", dateStyle: "medium", timeStyle: "short" }).format(new Date(iso));
 }
@@ -105,22 +119,90 @@ function rangeLabel(range: MeetingCalculationResponse extends never ? never : Ex
 
 function MapCanvas({ calculation, participants: currentParticipants, selectedPoiId, onPoiSelect }: { calculation: CalculationState | null; participants: readonly Participant[]; selectedPoiId: string | null; onPoiSelect: (id: string) => void }) {
   const response = calculation?.response;
+  const resultState: MapResultState = response?.status === "no-corridor" ? "no-candidate" : response?.status === "ok" ? "ok" : "initial";
   const snapshotParticipants = response?.requestSnapshot.participants;
   const participants: MapParticipant[] = (snapshotParticipants ?? currentParticipants.flatMap((participant) => participant.location ? [{ id: participant.id, location: { label: participant.location.label, latitude: participant.location.lat, longitude: participant.location.lng }, mode: participant.mode }] : [])).map((requestParticipant, index) => {
     const submitted = calculation?.submittedParticipants.find((participant) => participant.id === requestParticipant.id);
     return { id: requestParticipant.id, number: index + 1, label: submitted?.name || `Participant ${index + 1}`, mode: MODE_SHORT[requestParticipant.mode], latitude: requestParticipant.location.latitude, longitude: requestParticipant.location.longitude, color: COLORS[index] };
   });
   const pois: MapPoi[] = response?.status === "ok" ? response.pois.map((poi, index) => ({ ...poi, number: index + 1 })) : [];
-  return <MapLibreCanvas corridor={response?.status === "ok" ? response.corridor : undefined} participants={participants} pois={pois} selectedPoiId={selectedPoiId} onPoiSelect={onPoiSelect} />;
+  return <MapLibreCanvas corridor={response?.status === "ok" ? response.corridor : undefined} participants={participants} pois={pois} selectedPoiId={selectedPoiId} onPoiSelect={onPoiSelect} resultState={resultState} />;
 }
 
-function ParticipantRow({ participant, index, locationError, locationRef, onChange, onRemove, canRemove, disabled, supportedModes }: { participant: Participant; index: number; locationError?: string; locationRef: (element: HTMLSelectElement | null) => void; onChange: (next: Participant) => void; onRemove: () => void; canRemove: boolean; disabled: boolean; supportedModes: readonly Mode[] }) {
+function ParticipantRow({ participant, index, locationError, locationRef, onChange, onRemove, canRemove, disabled, supportedModes }: { participant: Participant; index: number; locationError?: string; locationRef: (element: HTMLInputElement | null) => void; onChange: (next: Participant) => void; onRemove: () => void; canRemove: boolean; disabled: boolean; supportedModes: readonly Mode[] }) {
   const modeName = `mode-${participant.id}`;
+  const [query, setQuery] = useState(participant.location?.label ?? "");
+  const [results, setResults] = useState<LocationSearchResult[]>([]);
+  const [searchState, setSearchState] = useState<"idle" | "loading" | "error">("idle");
+  const [activeResult, setActiveResult] = useState(-1);
+  const searchRequestRef = useRef(0);
+  const searchControllerRef = useRef<AbortController | null>(null);
+
+  useEffect(() => {
+    const requestId = ++searchRequestRef.current;
+    searchControllerRef.current?.abort();
+    searchControllerRef.current = null;
+    const trimmedQuery = query.trim();
+    if (disabled || !trimmedQuery || trimmedQuery === participant.location?.label) {
+      return;
+    }
+    const controller = new AbortController();
+    searchControllerRef.current = controller;
+    const timer = window.setTimeout(() => {
+      setSearchState("loading");
+      void fetch(`/api/locations/search?q=${encodeURIComponent(trimmedQuery)}`, { signal: controller.signal })
+        .then(async (response) => {
+          const payload: unknown = await response.json().catch(() => null);
+          if (!response.ok || !isRecord(payload) || !Array.isArray(payload.locations)) throw new Error("Search unavailable");
+          return payload.locations.filter((location): location is LocationSearchResult => isRecord(location) && typeof location.label === "string" && typeof location.latitude === "number" && typeof location.longitude === "number");
+        })
+        .then((nextResults) => { if (requestId === searchRequestRef.current) { setResults(nextResults); setActiveResult(-1); setSearchState("idle"); } })
+        .catch((error) => { if (!(error instanceof DOMException && error.name === "AbortError") && requestId === searchRequestRef.current) { setResults([]); setSearchState("error"); } });
+    }, 250);
+    return () => {
+      window.clearTimeout(timer);
+      controller.abort();
+      if (searchControllerRef.current === controller) searchControllerRef.current = null;
+    };
+  }, [query, disabled, participant.location?.label]);
+
+  function setQueryAndReset(nextQuery: string) {
+    searchRequestRef.current += 1;
+    searchControllerRef.current?.abort();
+    searchControllerRef.current = null;
+    setQuery(nextQuery);
+    setResults([]);
+    setActiveResult(-1);
+    setSearchState("idle");
+  }
+
+  function selectLocation(result: LocationSearchResult) {
+    searchRequestRef.current += 1;
+    searchControllerRef.current?.abort();
+    searchControllerRef.current = null;
+    setQueryAndReset(result.label);
+    onChange({ ...participant, location: { label: result.label, lat: result.latitude, lng: result.longitude } });
+  }
+
+  function handleLocationKeyDown(event: KeyboardEvent<HTMLInputElement>) {
+    if (event.key === "ArrowDown" && results.length) { event.preventDefault(); setActiveResult((current) => (current + 1) % results.length); }
+    if (event.key === "ArrowUp" && results.length) { event.preventDefault(); setActiveResult((current) => (current <= 0 ? results.length - 1 : current - 1)); }
+    if (event.key === "Enter" && activeResult >= 0 && activeResult < results.length) {
+      const result = results[activeResult];
+      if (result) { event.preventDefault(); selectLocation(result); }
+    }
+    if (event.key === "Escape") {
+      searchRequestRef.current += 1;
+      searchControllerRef.current?.abort();
+      searchControllerRef.current = null;
+      setResults([]); setActiveResult(-1); setSearchState("idle");
+    }
+  }
   return <fieldset className="rounded-2xl border border-[#e4e2d9] bg-[#fffdf8] p-4 shadow-[0_4px_16px_rgba(45,52,42,.04)]">
     <legend className="sr-only">Participant {index + 1}</legend>
     <div className="mb-3 flex items-center justify-between"><div className="flex items-center gap-2"><span style={{ backgroundColor: COLORS[index], color: PARTICIPANT_NUMBER_TEXT[index] }} className="flex h-7 w-7 items-center justify-center rounded-full text-xs font-bold">{index + 1}</span><span className="text-xs font-semibold uppercase tracking-[.15em] text-[#6b716b]">Participant {index + 1}</span></div>{canRemove && <button type="button" disabled={disabled} onClick={onRemove} className="rounded-lg p-1.5 text-[#526057] hover:bg-[#f4eee7] hover:text-[#202522] disabled:cursor-not-allowed disabled:opacity-50" aria-label={`Remove participant ${index + 1}`}><Icon name="close" size={16} /></button>}</div>
     <label className="mb-3 block"><span className="mb-1.5 block text-xs font-medium text-[#6b716b]">Label</span><input value={participant.name} onChange={(event) => onChange({ ...participant, name: event.target.value })} className="h-10 w-full rounded-xl border border-[#d9d8cf] bg-[#fffdf8] px-3 text-sm text-[#202522] placeholder:text-[#9da19a]" placeholder={`Participant ${index + 1}`} /></label>
-    <label className="mb-3 block"><span className="mb-1.5 block text-xs font-medium text-[#6b716b]">Munich starting point</span><select ref={locationRef} value={participant.location?.label ?? ""} onChange={(event) => onChange({ ...participant, location: LOCATIONS.find((choice) => choice.label === event.target.value) ?? null })} aria-invalid={Boolean(locationError)} aria-describedby={locationError ? `location-error-${participant.id}` : undefined} className={`h-11 w-full rounded-xl border bg-[#fffdf8] px-3 text-sm text-[#202522] ${locationError ? "border-[#a64e39]" : "border-[#d9d8cf]"}`}><option value="">Choose a preset location</option>{LOCATIONS.map((choice) => <option key={choice.label} value={choice.label}>{choice.label}</option>)}</select>{locationError && <span id={`location-error-${participant.id}`} className="mt-1.5 block text-xs font-medium text-[#a64e39]">{locationError}</span>}</label>
+    <div className="relative mb-3"><label className="block"><span className="mb-1.5 block text-xs font-medium text-[#6b716b]">Munich starting point</span><input ref={locationRef} value={query} disabled={disabled} onChange={(event) => { setQueryAndReset(event.target.value); setResults([]); if (participant.location) onChange({ ...participant, location: null }); }} onKeyDown={handleLocationKeyDown} role="combobox" aria-autocomplete="list" aria-expanded={results.length > 0} aria-controls={`location-results-${participant.id}`} aria-activedescendant={activeResult >= 0 ? `location-result-${participant.id}-${activeResult}` : undefined} aria-invalid={Boolean(locationError)} aria-describedby={locationError ? `location-error-${participant.id}` : `location-help-${participant.id}`} className={`h-11 w-full rounded-xl border bg-[#fffdf8] px-3 text-sm text-[#202522] placeholder:text-[#9da19a] disabled:cursor-not-allowed disabled:opacity-60 ${locationError ? "border-[#a64e39]" : "border-[#d9d8cf]"}`} placeholder="Search a street, station, or place" autoComplete="off" />{participant.location && <span className="mt-1.5 flex items-center gap-1.5 text-xs font-semibold text-[#1e7258]" id={`location-help-${participant.id}`}><Icon name="pin" size={13} />Selected: {participant.location.label}</span>}{searchState === "loading" && <span className="mt-1.5 block text-xs text-[#6b716b]">Searching Munich…</span>}{searchState === "error" && <span className="mt-1.5 block text-xs text-[#a64e39]">Search is unavailable. Try again.</span>}</label>{results.length > 0 && <ul id={`location-results-${participant.id}`} role="listbox" className="absolute z-20 mt-1 max-h-52 w-full overflow-auto rounded-xl border border-[#cbd7cd] bg-[#fffdf8] p-1 shadow-[0_10px_25px_rgba(45,52,42,.16)]">{results.map((result, resultIndex) => <li key={`${result.label}-${result.latitude}-${result.longitude}`} id={`location-result-${participant.id}-${resultIndex}`} role="option" aria-selected={activeResult === resultIndex}><button type="button" onMouseDown={(event) => event.preventDefault()} onClick={() => selectLocation(result)} className={`w-full rounded-lg px-3 py-2.5 text-left text-sm text-[#202522] ${activeResult === resultIndex ? "bg-[#e3f1e8]" : "hover:bg-[#f0f5ef]"}`}>{result.label}</button></li>)}</ul>}{locationError && <span id={`location-error-${participant.id}`} className="mt-1.5 block text-xs font-medium text-[#a64e39]">{locationError}</span>}</div>
     <fieldset><legend className="mb-1.5 block text-xs font-medium text-[#6b716b]">Preferred mode</legend><div className="grid grid-cols-3 gap-1.5">{supportedModes.map((mode) => <label key={mode} className={`relative flex min-h-10 cursor-pointer flex-col items-center justify-center rounded-xl border px-1 text-[11px] font-semibold transition ${participant.mode === mode ? "border-[#1e7258] bg-[#e3f1e8] text-[#165b47]" : "border-[#b8beb7] text-[#526057] hover:border-[#276e66]"}`}><input className="peer sr-only" type="radio" name={modeName} value={mode} checked={participant.mode === mode} onChange={() => onChange({ ...participant, mode })} /><span className="text-base leading-4" aria-hidden="true">{MODE_ICONS[mode]}</span>{MODE_LABELS[mode]}<span className="pointer-events-none absolute inset-0 rounded-xl ring-[#215f93] peer-focus-visible:ring-2" /></label>)}</div></fieldset>
   </fieldset>;
 }
@@ -137,7 +219,7 @@ export default function MeetPlanner({ capability }: { capability: PlannerCapabil
   const [locationErrors, setLocationErrors] = useState<Record<string, string>>({});
   const abortRef = useRef<AbortController | null>(null);
   const requestIdRef = useRef(0);
-  const locationRefs = useRef<Record<string, HTMLSelectElement | null>>({});
+  const locationRefs = useRef<Record<string, HTMLInputElement | null>>({});
   const stale = Boolean(calculation && status !== "success" && status !== "empty");
   const successfulResponse = calculation?.response.status === "ok" ? calculation.response : null;
   const successfulCalculation = calculation?.response.status === "ok" ? calculation : null;
@@ -222,7 +304,7 @@ export default function MeetPlanner({ capability }: { capability: PlannerCapabil
       </form></section>
       <section className="order-1 min-h-[480px] lg:order-2 lg:min-h-[calc(100vh-105px)]"><MapCanvas calculation={calculation} participants={participants} selectedPoiId={selectedPoi} onPoiSelect={setSelectedPoi} /><div className="relative z-30 -mt-5 mx-3 rounded-[1.5rem] border border-[#e4e2d9] bg-[#fffdf8] p-4 shadow-[0_12px_35px_rgba(45,52,42,.14)] lg:absolute lg:bottom-8 lg:right-8 lg:top-8 lg:mt-0 lg:ml-auto lg:w-[340px] lg:overflow-y-auto">
         {stale && calculation && <div className="mb-3 flex items-center justify-between rounded-xl border border-[#ead5ae] bg-[#fff8e8] px-3 py-2 text-xs text-[#765f2b]"><span>Previous response — inputs changed.</span><button type="button" disabled={status === "loading"} onClick={() => void calculate()} className="font-bold underline disabled:cursor-not-allowed disabled:opacity-50">Update</button></div>}
-        {calculation?.response.status === "no-corridor" ? <><div className="mb-3 rounded-xl border border-[#ead5ae] bg-[#fff8e8] p-3 text-xs leading-5 text-[#765f2b]"><p className="font-bold">{stale ? "Previous response: no equal-time corridor" : "No equal-time corridor"}</p><p className="mt-1">{calculation.response.reason.message}</p></div><div className="mb-3 rounded-xl border border-[#d7e3da] bg-[#eef6f0] px-3 py-2 text-xs text-[#315e4d]">{resultSourceLabel(calculation.response)}{isFixture(calculation.response) && <span className="mt-1 block text-[#526057]">No MVG/MVV timetable or realtime data is used.</span>}</div><SnapshotSummary calculation={calculation} /></> : successfulCalculation ? <><div className="mb-3 flex items-center justify-between rounded-xl border border-[#d7e3da] bg-[#eef6f0] px-3 py-2 text-xs text-[#315e4d]"><span>{resultSourceLabel(successfulResponse!)}</span><span>{successfulResponse!.requestSnapshot.timeZone}</span></div>{isFixture(successfulResponse!) && <p className="mb-4 text-xs leading-5 text-[#6b716b]">No MVG/MVV timetable or realtime data is used.</p>}<div className="mb-4"><div className="flex items-start justify-between"><div><p className="text-xs font-bold uppercase tracking-[.16em] text-[#1e7258]">{stale ? "Previous meeting area" : "Meeting area ready"}</p><h2 className="mt-1 text-xl font-semibold tracking-[-.04em]">The shared middle</h2></div><span className="rounded-full bg-[#e3f1e8] px-2 py-1 text-[10px] font-bold uppercase tracking-wider text-[#165b47]">±{successfulResponse!.requestSnapshot.tolerancePercent}%</span></div><p className="mt-2 text-xs leading-5 text-[#6b716b]">{estimateLabel(successfulResponse!)} for {successfulCalculation.submittedParticipants.length} people · {rangeLabel(successfulResponse!.travelTimeRange)}.</p></div><SnapshotSummary calculation={successfulCalculation} /><div className="mb-3 flex items-center justify-between"><h3 className="text-sm font-semibold">Places inside the corridor</h3><span className="text-xs text-[#777c74]">{successfulResponse!.pois.length} found</span></div>{successfulResponse!.pois.length ? <div className="space-y-2" aria-label="Food and drink demo venues">{successfulResponse!.pois.map((poi, index) => <button type="button" key={poi.id} onClick={() => setSelectedPoi(poi.id)} className={`w-full rounded-xl border p-3 text-left transition ${selectedPoi === poi.id ? "border-[#d8b74e] bg-[#fff8df]" : "border-[#e4e2d9] hover:border-[#aab7ad]"}`} aria-pressed={selectedPoi === poi.id}><div className="flex gap-3"><span className="grid h-7 w-7 shrink-0 place-items-center rounded-full bg-[#f5d873] text-xs font-bold">{index + 1}</span><span><span className="block text-sm font-semibold">{poi.name}</span><span className="mt-0.5 block text-xs text-[#777c74]">{poi.category}{poi.address ? ` · ${poi.address}` : ""}</span></span></div></button>)}</div> : <div className="rounded-xl border border-dashed border-[#cfd5ce] px-4 py-5 text-center text-xs leading-5 text-[#777c74]">No static demo venues were returned.</div>}{selected && <div className="mt-3 rounded-xl bg-[#e8f2eb] p-3 text-xs"><p className="font-bold text-[#165b47]">Selected demo venue</p><p className="mt-1 font-semibold">{selected.name}</p><p className="mt-0.5 text-[#526057]">{selected.address || selected.category}</p></div>}<button type="button" disabled={status === "loading"} onClick={() => { setCalculation(null); setStatus("idle"); setMessage(""); setSelectedPoi(null); }} className="mt-4 flex w-full items-center justify-center gap-2 rounded-xl border border-[#d9d8cf] py-2.5 text-xs font-bold text-[#526057] hover:bg-[#f4f1eb] disabled:opacity-60"><Icon name="refresh" size={15} /> Adjust participants</button></> : <div className="flex min-h-[165px] flex-col justify-center"><div className="mb-3 flex h-10 w-10 items-center justify-center rounded-full bg-[#e3f1e8] text-[#1e7258]"><Icon name="pin" size={20} /></div><h2 className="text-lg font-semibold tracking-[-.04em]">Your shared map</h2><p className="mt-1 max-w-[280px] text-xs leading-5 text-[#777c74]">Choose a starting point for each person, then compare local demonstration estimates.</p>{status === "error" && <div className="mt-4 rounded-xl border border-[#efc7bd] bg-[#fff0e9] p-3 text-xs leading-5 text-[#a64e39]">{message}</div>}</div>}
+        {calculation?.response.status === "no-corridor" ? <><div className="mb-3 rounded-xl border border-[#ead5ae] bg-[#fff8e8] p-3 text-xs leading-5 text-[#765f2b]"><p className="font-bold">{stale ? "Previous response: no comparable meeting area" : "No comparable meeting area"}</p><p className="mt-1">{calculation.response.reason.message}</p></div><div className="mb-3 rounded-xl border border-[#d7e3da] bg-[#eef6f0] px-3 py-2 text-xs text-[#315e4d]">{resultSourceLabel(calculation.response)}{isFixture(calculation.response) && <span className="mt-1 block text-[#526057]">No MVG/MVV timetable or realtime data is used.</span>}</div><SnapshotSummary calculation={calculation} /></> : successfulCalculation ? <><div className="mb-3 flex items-center justify-between rounded-xl border border-[#d7e3da] bg-[#eef6f0] px-3 py-2 text-xs text-[#315e4d]"><span>{resultSourceLabel(successfulResponse!)}</span><span>{successfulResponse!.requestSnapshot.timeZone}</span></div>{isFixture(successfulResponse!) && <p className="mb-4 text-xs leading-5 text-[#6b716b]">No MVG/MVV timetable or realtime data is used.</p>}<div className="mb-4"><div className="flex items-start justify-between"><div><p className="text-xs font-bold uppercase tracking-[.16em] text-[#1e7258]">{stale ? "Previous meeting area" : "Meeting area ready"}</p><h2 className="mt-1 text-xl font-semibold tracking-[-.04em]">{meetingAreaHeading(successfulResponse!)}</h2></div><span className="rounded-full bg-[#e3f1e8] px-2 py-1 text-[10px] font-bold uppercase tracking-wider text-[#165b47]">±{successfulResponse!.requestSnapshot.tolerancePercent}%</span></div><p className="mt-2 text-xs leading-5 text-[#6b716b]">{estimateLabel(successfulResponse!)} for {successfulCalculation.submittedParticipants.length} people · {rangeLabel(successfulResponse!.travelTimeRange)}.</p></div><SnapshotSummary calculation={successfulCalculation} /><CandidateSummary response={successfulResponse!} /><div className="mb-3 flex items-center justify-between"><h3 className="text-sm font-semibold">Nearby venues</h3><span className="text-xs text-[#777c74]">{successfulResponse!.pois.length} found</span></div>{successfulResponse!.pois.length ? <div className="space-y-2" aria-label="Food and drink demo venues">{successfulResponse!.pois.map((poi, index) => <button type="button" key={poi.id} onClick={() => setSelectedPoi(poi.id)} className={`w-full rounded-xl border p-3 text-left transition ${selectedPoi === poi.id ? "border-[#d8b74e] bg-[#fff8df]" : "border-[#e4e2d9] hover:border-[#aab7ad]"}`} aria-pressed={selectedPoi === poi.id}><div className="flex gap-3"><span className="grid h-7 w-7 shrink-0 place-items-center rounded-full bg-[#f5d873] text-xs font-bold">{index + 1}</span><span><span className="block text-sm font-semibold">{poi.name}</span><span className="mt-0.5 block text-xs text-[#777c74]">{poi.category}{poi.address ? ` · ${poi.address}` : ""}</span></span></div></button>)}</div> : <div className="rounded-xl border border-dashed border-[#cfd5ce] px-4 py-5 text-center text-xs leading-5 text-[#777c74]">No static demo venues were returned.</div>}{selected && <div className="mt-3 rounded-xl bg-[#e8f2eb] p-3 text-xs"><p className="font-bold text-[#165b47]">Selected demo venue</p><p className="mt-1 font-semibold">{selected.name}</p><p className="mt-0.5 text-[#526057]">{selected.address || selected.category}</p></div>}<button type="button" disabled={status === "loading"} onClick={() => { setCalculation(null); setStatus("idle"); setMessage(""); setSelectedPoi(null); }} className="mt-4 flex w-full items-center justify-center gap-2 rounded-xl border border-[#d9d8cf] py-2.5 text-xs font-bold text-[#526057] hover:bg-[#f4f1eb] disabled:opacity-60"><Icon name="refresh" size={15} /> Adjust participants</button></> : <div className="flex min-h-[165px] flex-col justify-center"><div className="mb-3 flex h-10 w-10 items-center justify-center rounded-full bg-[#e3f1e8] text-[#1e7258]"><Icon name="pin" size={20} /></div><h2 className="text-lg font-semibold tracking-[-.04em]">Your shared map</h2><p className="mt-1 max-w-[280px] text-xs leading-5 text-[#777c74]">Choose a starting point for each person, then compare local demonstration estimates.</p>{status === "error" && <div className="mt-4 rounded-xl border border-[#efc7bd] bg-[#fff0e9] p-3 text-xs leading-5 text-[#a64e39]">{message}</div>}</div>}
       </div></section>
     </div>
   </div></main>;
