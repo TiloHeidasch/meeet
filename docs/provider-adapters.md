@@ -11,15 +11,20 @@ environment variables and are never `NEXT_PUBLIC_*` values.
 
 | Variable | Meaning |
 | --- | --- |
-| `MEEET_PROVIDER_MODE` | `fixture`, `configured`, or `mvg-direct-transit`; defaults to `mvg-direct-transit` when no provider endpoint is present |
+| `MEEET_PROVIDER_MODE` | `fixture`, `configured`, `mvg-direct-transit`, or `self-hosted-routing`; defaults to `mvg-direct-transit` when no provider endpoint is present |
 | `MEEET_PROVIDER_DEPLOYMENT` | `fixture`, `self-hosted`, `managed`, or `unknown` metadata; direct mode requires this to be omitted or `unknown` |
 | `MEEET_PROVIDER_TIMEOUT_MS` | HTTP timeout, bounded to 250–10,000 ms |
 | `MEEET_PROVIDER_MAX_RESPONSE_BYTES` | Response limit, bounded to 16 KiB–2 MiB |
 | `MEEET_ALLOW_HTTP_PROVIDER_ENDPOINTS` | Trusted local HTTP exception only; must remain false in production |
 | `MEEET_ROUTING_GATEWAY_URL` / `_TOKEN` | Server-only routing gateway endpoint and optional bearer token |
-| `MEEET_ROUTING_MVG_*` / `_MVV_*` | Required source URL, licence name/URL, attribution, version, and ISO retrieval date when routing is configured |
+| `MEEET_ROUTING_MVG_*` / `_MVV_*` | Required source URL, licence name/URL, attribution, version, and ISO retrieval date for the existing configured gateway only; self-hosted routing rejects these operator claims |
 | `MEEET_GEOCODING_ENDPOINT` / `_TOKEN` | Server-only geocoding adapter endpoint and optional bearer token |
 | `MEEET_POI_ENDPOINT` / `_TOKEN` | Server-only food/drink POI endpoint and optional bearer token |
+| `MEEET_OTP_GRAPHQL_URL` / `_TOKEN` | Required fixed self-hosted OTP 2.6 GTFS GraphQL endpoint ending in `/otp/gtfs/v1` and optional bearer token |
+| `MEEET_OTP_PROFILE` | Required explicit OTP mode/profile string; there is no default |
+| `MEEET_GRAPHHOPPER_URL` / `_TOKEN` | Required fixed self-hosted GraphHopper endpoint ending in `/route` and optional bearer token |
+| `MEEET_GRAPHHOPPER_BIKE_PROFILE` / `_CAR_PROFILE` | Required explicit GraphHopper profiles; there are no unpinned defaults |
+| `MEEET_ROUTING_MANIFEST_PATH` | Required server-only path to the generated immutable routing manifest; provenance is never entered as unrelated environment claims |
 
 Configured geocoding and POI endpoints additionally require their role-specific
 `MEEET_GEOCODING_*` or `MEEET_POI_*` source name, HTTPS source URL, licence
@@ -34,8 +39,21 @@ endpoints intentionally return `PROVIDER_NOT_CONFIGURED`; there is no
 public-service fallback. Invalid configuration returns
 `PROVIDER_CONFIGURATION_INVALID`. Configured network, timeout, response-size,
 or shape failures return `PROVIDER_UNAVAILABLE`.
+
+`self-hosted-routing` is an explicit route-first adapter mode. It requires
+`MEEET_PROVIDER_DEPLOYMENT=self-hosted`, a generated manifest loaded from
+`MEEET_ROUTING_MANIFEST_PATH`, pinned OTP and GraphHopper endpoint paths, and
+profiles matching the manifest. The manifest binds MVV as the authoritative
+schedule feed, MVG as metadata enrichment, OSM, engine image digests, graph /
+config / input hashes, official-boundary and 15 km access-envelope artifacts,
+and frozen realtime state. HTTPS remains mandatory except for the explicit
+development-only loopback HTTP switch. The current meeting calculation is
+deliberately not migrated: the factory exposes a typed configured foundation
+with `calculationAvailable: false`, zero supported matrix modes, and no live
+claim rather than silently installing a generic unconfigured matrix provider.
 Configured URLs are fixed server-side allowlist entries; clients cannot submit
-provider URLs. HTTPS is required by default and redirects are rejected.
+provider URLs. HTTPS is required by default and redirects are rejected. The
+development HTTP exception accepts only `localhost`, `127.0.0.1`, or `::1`.
 
 In `mvg-direct-transit`, the mode-specific configuration checks reject any
 deployment value other than omitted or `unknown`, and reject any non-empty
@@ -142,6 +160,93 @@ coordinate buckets as disclosed to MVG. The application does not establish the
 MVG operator's logging or retention policy; that policy is uncertain. The
 application retains only the validated cached DTOs described above, subject to
 their cache lifecycle, and cannot guarantee what the upstream retains.
+
+## Route-first self-hosted adapters
+
+The route-first adapters are server-only and are currently exposed through
+`createSelfHostedRoutingAdapters`; they are not used by the existing meeting
+calculation or any API route. Both adapters use the injected `fetch`
+implementation in tests and the shared `HttpJsonClient` timeout, bearer-token,
+redirect, JSON, and response-size protections in production.
+
+### OTP GraphQL
+
+`MEEET_OTP_GRAPHQL_URL` is the complete fixed OTP 2.6 GTFS GraphQL endpoint,
+`/otp/gtfs/v1`. The adapter sends a bounded Relay-style POST containing the
+isolated `planConnection` query, exact origin/destination, one departure
+instant, the configured OTP profile, `first`, and `after` cursor variables. It
+follows a bounded number of `edges` pages and validates `pageInfo` and
+`routingErrors`; it never claims the result is exhaustive. A successful HTTP
+response must also contain no top-level or connection-level GraphQL errors and
+a strictly shaped itinerary/leg payload. RFC3339 `OffsetDateTime` timestamps, integer durations,
+coordinates, transit line identities, walk/transit steps, required per-leg
+geometry, ordered timing including waiting gaps, and geometry continuity are validated before the
+route-first DTO is returned. Point-to-point requests require a canonical UTC
+departure instant (`YYYY-MM-DDTHH:mm:ss[.SSS]Z`). OTP itinerary and leg timestamps are
+RFC3339 `OffsetDateTime` values and its documented `duration` value is an integer number of
+seconds; the DTO keeps both units explicitly and performs no display rounding. GraphHopper's
+`time` and instruction `time` values remain integer milliseconds.
+
+`planConnection` is a planning query, not a health endpoint. OTP readiness is
+the separately documented `/otp/actuators/health` endpoint; the adapter does
+not call it during route requests. An HTTP 2xx response containing GraphQL
+errors is still a provider failure.
+
+Release evidence must run the focused external gate with
+`MEEET_ROUTING_INTEGRATION_OTP_URL` pointed at the pinned OTP 2.6 service and
+`MEEET_ROUTING_INTEGRATION_REQUIRED=true`. The gate introspects the live schema,
+checks the documented argument types, and executes the same paginated query
+against an imported fixture graph. A local run may skip only when the endpoint
+is absent; a required run fails if it would skip.
+
+### GraphHopper
+
+`MEEET_GRAPHHOPPER_URL` is the complete fixed `/route` endpoint. The adapter
+sends a bounded GET with two `point` parameters, the explicitly selected bike
+or car profile, `points_encoded=false`, `instructions=true`, and
+`calc_points=true`. The first returned `paths` entry is validated for bounded
+time, distance, LineString geometry, and instruction intervals. Its timing and
+geometry are projected into one point-to-point route; an empty `paths` array is
+an explicit no-route result.
+
+`/route` is not a GraphHopper health endpoint. The separately documented
+`/health` endpoint is the readiness signal; the adapter does not call it during
+route requests. A valid route response is the only request-level success
+signal. The adapter returns `exhaustive: false`: GraphHopper's first path is
+not a complete alternative enumeration.
+
+### Snapshot and enumeration boundary
+
+Every route-first result carries `meeet-routing-manifest/v1`. The loaded
+manifest contains OTP and GraphHopper image references/digests, bound profiles,
+immutable MVV authoritative-schedule and MVG metadata-enrichment feed
+IDs/hashes plus source/licence attribution and retrieval/as-of timestamps, the
+OSM dataset ID/hash and attribution, graph/config/input hashes, official
+boundary and 15 km access-envelope artifact hashes, and a frozen
+scheduled/live/unknown realtime artifact/state. `validateRoutingSnapshot`
+rejects unknown fields, missing roles, malformed hashes/digests,
+non-canonical timestamps, invalid bounds, and inconsistent realtime states.
+
+The application consumes the generator's exact top-level manifest shape. Its
+adjacent generated `deployment-attestation.json` is also required at runtime:
+the loader checks the manifest hash, all six transformation states, the
+attested `EPSG:25832` Polygon/MultiPolygon artifact hash, and transforms that
+artifact to WGS84 before accepting route geometry. Bounding-box metadata is not
+used for geometry acceptance. Each route result carries an engine-scoped
+snapshot: OTP results bind the attested OTP graph artifact and GraphHopper
+results bind the attested GraphHopper artifact, while both retain the shared
+manifest and immutable input identity.
+
+Run `npm run build:verify-trace` for the deterministic production build and
+post-build NFT assertion. It starts from a clean `.next` directory and rejects
+routing data, graph artifacts, deployment/verification scripts, docs, tests,
+Python caches, and generated manifests in every runtime trace.
+
+OTP's bounded `planConnection` output and GraphHopper's single selected path
+must not be used as proof that every possible route has been found. A custom
+bounded enumerator remains required before route-first equal-time candidate
+search can claim alternate coverage or replace the existing calculation
+algorithm.
 
 ## Routing gateway
 

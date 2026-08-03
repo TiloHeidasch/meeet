@@ -1,0 +1,3 @@
+input-inventory.json
+versions/*
+!versions/.gitkeep

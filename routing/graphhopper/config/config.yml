@@ -1,0 +1,38 @@
+graphhopper:
+  # Replace the filename only when the immutable OSM manifest uses another
+  # explicitly recorded extract.  The directory is a read-only bind mount.
+  datareader.file: /data/input/osm/munich.osm.pbf
+  graph.location: /data/artifacts/graphhopper-10.2
+
+  # These profiles intentionally cover only the modes needed by the local
+  # routing foundation.  The custom models are versioned beside this file.
+  profiles:
+    - name: car
+      custom_model_files:
+        - /etc/graphhopper/car.json
+    - name: bike
+      custom_model_files:
+        - /etc/graphhopper/bike.json
+
+  profiles_ch:
+    - profile: car
+    - profile: bike
+
+  # Keep this list synchronized with the custom-model expressions.  The
+  # deployment validator rejects a model that requires an omitted value.
+  graph.encoded_values: road_class, road_environment, max_speed
+
+server:
+  application_connectors:
+    - type: http
+      port: 8989
+      bind_host: 0.0.0.0
+
+logging:
+  level: INFO
+  appenders:
+    - type: console
+    - type: file
+      currentLogFilename: /data/logs/graphhopper.log
+      archivedLogFilenamePattern: /data/logs/graphhopper-%d.log.gz
+      archivedFileCount: 14

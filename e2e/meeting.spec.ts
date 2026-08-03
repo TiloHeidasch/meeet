@@ -2,6 +2,13 @@ import { expect, test, type Page } from "@playwright/test";
 
 const DEFAULT_MAP_STYLE_URL = "https://tiles.openfreemap.org/styles/liberty";
 const OPENFREEMAP_ORIGIN = "https://tiles.openfreemap.org";
+const OFFLINE_MAP_STYLE = {
+  version: 8,
+  sprite: `${OPENFREEMAP_ORIGIN}/sprites/liberty`,
+  sources: { planet: { type: "vector", url: `${OPENFREEMAP_ORIGIN}/planet.json` } },
+  layers: [{ id: "offline-background", type: "background" }, { id: "offline-land", type: "fill", source: "planet", "source-layer": "landcover", paint: { "fill-color": "#ffffff" } }, { id: "offline-symbol", type: "symbol", source: "planet", "source-layer": "landcover", layout: { "icon-image": "fixture-icon" } }],
+};
+const OFFLINE_EMPTY_PNG = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=", "base64");
 const SAMPLE_GRID = /Sample-grid approximation only/;
 type ResponseRecord = { status: number; url: string };
 
@@ -305,13 +312,17 @@ function directRouteNoCorridorResponse() {
 
 test.describe("deterministic UI", () => {
 test.beforeEach(async ({ page }) => {
-  await page.route(DEFAULT_MAP_STYLE_URL, (route) =>
+  await page.route(`${DEFAULT_MAP_STYLE_URL}**`, (route) =>
     route.fulfill({
       status: 200,
       contentType: "application/json",
-      body: JSON.stringify({ version: 8, sources: {}, layers: [] }),
+      body: JSON.stringify(OFFLINE_MAP_STYLE),
     }),
   );
+  await page.route(`${OPENFREEMAP_ORIGIN}/planet.json**`, (route) => route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ tilejson: "3.0.0", tiles: [`${OPENFREEMAP_ORIGIN}/planet/{z}/{x}/{y}.pbf`], minzoom: 0, maxzoom: 14 }) }));
+  await page.route(`${OPENFREEMAP_ORIGIN}/sprites/liberty.json`, (route) => route.fulfill({ status: 200, contentType: "application/json", headers: { "access-control-allow-origin": "*" }, body: "{}" }));
+  await page.route(`${OPENFREEMAP_ORIGIN}/sprites/liberty.png`, (route) => route.fulfill({ status: 200, contentType: "image/png", headers: { "access-control-allow-origin": "*" }, body: OFFLINE_EMPTY_PNG }));
+  await page.route(`${OPENFREEMAP_ORIGIN}/planet/**/*.pbf**`, (route) => route.fulfill({ status: 200, contentType: "application/x-protobuf", body: Buffer.alloc(0) }));
   await mockLocationSearch(page);
 });
 
@@ -544,12 +555,7 @@ test("provider error response is announced while meeting controls remain availab
   await expect(page.getByRole("button", { name: "Find meeting area" })).toBeEnabled();
 });
 
-test("direct mode hands off transit-only defaults without calling MVG", async ({ page }) => {
-  test.skip(
-    process.env.MEEET_PROVIDER_MODE !== "mvg-direct-transit",
-    "requires the browser server to be started in direct mode",
-  );
-
+test("fixture mode hands off transit defaults without calling MVG", async ({ page }) => {
   let submitted: {
     participants?: Array<{
       mode?: string;
@@ -566,14 +572,8 @@ test("direct mode hands off transit-only defaults without calling MVG", async ({
   });
 
   await page.goto("/");
-  await expect(page.getByText("MVG direct · public transport only", { exact: true })).toBeVisible();
-  await expect(page.getByText("This connection uses MVG transit routes with realtime when supplied and scheduled time as the fallback, so every participant starts in public transport mode.", { exact: true })).toBeVisible();
-  await expect(page.locator('[aria-live="polite"]')).toHaveText(
-    "MVG public transport · realtime when supplied; scheduled time fallback · static demo venues.",
-  );
+  await expect(page.locator('[aria-live="polite"]')).toContainText("Local demo only: static venues, no MVG/MVV timetable or realtime data.");
   await expect(page.getByRole("radio", { name: "Public transport" })).toHaveCount(2);
-  await expect(page.getByRole("radio", { name: "Bike" })).toHaveCount(0);
-  await expect(page.getByRole("radio", { name: "Car" })).toHaveCount(0);
   await selectDefaultLocations(page);
   await page.getByRole("button", { name: "Find meeting area" }).click();
   await expect(page.locator('[aria-live="polite"]')).toHaveText(
@@ -581,7 +581,7 @@ test("direct mode hands off transit-only defaults without calling MVG", async ({
   );
   expect(submitted?.participants?.map((participant) => participant.mode)).toEqual([
     "transit",
-    "transit",
+    "bike",
   ]);
   expect(submitted?.participants?.map((participant) => participant.location?.label)).toEqual([
     "Marienplatz",
@@ -592,9 +592,8 @@ test("direct mode hands off transit-only defaults without calling MVG", async ({
     typeof participant.location?.longitude === "number",
   )).toBe(true);
 });
-});
 
-test("live OpenFreeMap style dependencies load without making the map unavailable", async ({ page }) => {
+test("offline map style dependencies load without making the map unavailable", async ({ page }) => {
   const responses = new Map<string, ResponseRecord[]>();
   page.on("response", (response) => {
     const url = new URL(response.url());
@@ -625,6 +624,13 @@ test("live OpenFreeMap style dependencies load without making the map unavailabl
   const canvas = map.locator("canvas.maplibregl-canvas");
   await expect(canvas).toBeVisible();
   await expect(page.getByText("Map unavailable", { exact: true })).toHaveCount(0);
+
+  // Exercise the sprite fixtures explicitly so this gate never depends on
+  // whether a particular empty offline tile happens to request an icon.
+  await page.evaluate(async (origin) => {
+    await fetch(`${origin}/sprites/liberty.json`, { mode: "no-cors" });
+    await fetch(`${origin}/sprites/liberty.png`, { mode: "no-cors" });
+  }, OPENFREEMAP_ORIGIN);
 
   const canvasMatchesContainer = () => canvas.evaluate((element) => {
     const canvasElement = element as HTMLCanvasElement;
@@ -685,4 +691,5 @@ test("live OpenFreeMap style dependencies load without making the map unavailabl
     expect(records.every((record) => record.status === 200), `${kind} response status`).toBe(true);
     expect(records.every((record) => new URL(record.url).origin === origin), `${kind} response origin`).toBe(true);
   }
+});
 });

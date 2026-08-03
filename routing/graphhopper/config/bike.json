@@ -1,0 +1,20 @@
+{
+  "priority": [
+    {
+      "if": "road_class == MOTORWAY",
+      "multiply_by": "0.1"
+    },
+    {
+      "if": "road_class == FOOTWAY",
+      "multiply_by": "0.5"
+    },
+    {
+      "if": "road_environment == TUNNEL",
+      "multiply_by": "0.8"
+    },
+    {
+      "if": "max_speed < 50",
+      "multiply_by": "1.1"
+    }
+  ]
+}

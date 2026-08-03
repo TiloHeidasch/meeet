@@ -378,3 +378,18 @@ function createGenericProvenance(
     feeds: null,
   };
 }
+
+export {
+  GraphHopperPointToPointProvider,
+  GraphHopperRoutingProvider,
+  OtpGraphqlRoutingProvider,
+  OtpGraphqlTransitProvider,
+} from "./self-hosted-routing.ts";
+export type {
+  PointToPointRoute,
+  PointToPointRouteStep,
+  PointToPointRoutingRequest,
+  PointToPointRoutingResult,
+  PointToPointStepMode,
+  SelfHostedRoutingAdapterDescriptor,
+} from "./self-hosted-routing.ts";

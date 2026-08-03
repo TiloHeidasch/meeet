@@ -1,0 +1,6 @@
+.git
+.gitignore
+data
+versions.env
+versions.env.example
+config

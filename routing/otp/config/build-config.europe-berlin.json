@@ -1,0 +1,14 @@
+{
+  "osm": [
+    {
+      "source": "/var/opentripplanner/input/osm/munich.osm.pbf"
+    }
+  ],
+  "transitFeeds": [
+    {
+      "type": "gtfs",
+      "source": "/var/opentripplanner/input/feeds/mvv.zip",
+      "feedId": "mvv"
+    }
+  ]
+}

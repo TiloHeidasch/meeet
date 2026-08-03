@@ -1,0 +1,74 @@
+{
+  "inputVersion": "REPLACE_WITH_IMMUTABLE_INPUT_VERSION",
+  "inputRoot": "routing/inputs/versions/REPLACE_WITH_IMMUTABLE_INPUT_VERSION",
+  "mvv": {
+    "path": "routing/inputs/versions/REPLACE_WITH_IMMUTABLE_INPUT_VERSION/feeds/mvv.zip",
+    "sourceUrl": "REPLACE_WITH_HTTPS_MVV_SOURCE_URL",
+    "license": {
+      "name": "REPLACE_WITH_MVV_LICENSE_NAME",
+      "url": "REPLACE_WITH_HTTPS_MVV_LICENSE_URL"
+    },
+    "attribution": "REPLACE_WITH_MVV_ATTRIBUTION",
+    "version": "REPLACE_WITH_MVV_FEED_VERSION",
+    "feedId": "mvv",
+    "applied": true,
+    "retrievedAt": "REPLACE_WITH_UTC_TIMESTAMP",
+    "asOf": "REPLACE_WITH_UTC_TIMESTAMP"
+  },
+  "mvg": {
+    "path": "routing/inputs/versions/REPLACE_WITH_IMMUTABLE_INPUT_VERSION/metadata/mvg.json",
+    "sourceUrl": "REPLACE_WITH_HTTPS_MVG_SOURCE_URL",
+    "license": {
+      "name": "REPLACE_WITH_MVG_LICENSE_NAME",
+      "url": "REPLACE_WITH_HTTPS_MVG_LICENSE_URL"
+    },
+    "attribution": "REPLACE_WITH_MVG_ATTRIBUTION",
+    "version": "REPLACE_WITH_MVG_METADATA_VERSION",
+    "feedId": "mvg",
+    "applied": false,
+    "retrievedAt": "REPLACE_WITH_UTC_TIMESTAMP",
+    "asOf": "REPLACE_WITH_UTC_TIMESTAMP"
+  },
+  "realtime": {
+    "path": "routing/inputs/versions/REPLACE_WITH_IMMUTABLE_INPUT_VERSION/realtime/realtime.json",
+    "state": "scheduled",
+    "applied": false,
+    "timestamp": null
+  },
+  "osm": {
+    "path": "routing/inputs/versions/REPLACE_WITH_IMMUTABLE_INPUT_VERSION/osm/munich.osm.pbf",
+    "id": "REPLACE_WITH_OSM_EXTRACT_ID",
+    "sourceUrl": "REPLACE_WITH_HTTPS_OSM_SOURCE_URL",
+    "license": {
+      "name": "ODbL",
+      "url": "REPLACE_WITH_HTTPS_OSM_LICENSE_URL"
+    },
+    "attribution": "OpenStreetMap contributors",
+    "version": "REPLACE_WITH_OSM_EXTRACT_VERSION",
+    "retrievedAt": "REPLACE_WITH_UTC_TIMESTAMP",
+    "asOf": "REPLACE_WITH_UTC_TIMESTAMP"
+  },
+  "boundary": {
+    "path": "data/official/munich-districts.json",
+    "id": "official-munich-application-boundary"
+  },
+  "accessEnvelope": {
+    "path": "routing/inputs/versions/REPLACE_WITH_IMMUTABLE_INPUT_VERSION/munich-access-envelope-15km.geojson",
+    "id": "munich-access-envelope-15km"
+  },
+  "config": [
+    "docker-compose.routing.yml",
+    "routing/otp/config/build-config.europe-berlin.json",
+    "routing/otp/config/router-config.europe-berlin.json",
+    "routing/otp/config/logback.xml",
+    "routing/graphhopper/config/config.yml",
+    "routing/graphhopper/config/car.json",
+    "routing/graphhopper/config/bike.json"
+  ],
+  "otpGraph": {
+    "path": "routing/otp/data/graphs/versions/europe-berlin-mvv-2.6.0"
+  },
+  "graphhopperArtifact": {
+    "path": "routing/graphhopper/data/artifacts/versions/graphhopper-10.2"
+  }
+}

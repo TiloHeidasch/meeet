@@ -1,0 +1,6 @@
+data/graphs/*
+!data/graphs/.gitkeep
+!data/graphs/versions/
+!data/graphs/versions/.gitkeep
+data/logs/*
+!data/logs/.gitkeep

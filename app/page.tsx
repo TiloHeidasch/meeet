@@ -2,18 +2,31 @@ import { Suspense } from "react";
 import { connection } from "next/server";
 import MeetPlanner from "@/components/MeetPlanner";
 import { FULL_ROUTING_PROVIDER_CAPABILITIES } from "@/lib/domain/providers";
+import { createMeetingProviders } from "@/lib/providers/factory";
 import { readProviderConfig } from "@/lib/providers/config";
 import { MVG_DIRECT_CAPABILITIES } from "@/lib/providers/mvg-direct";
 
 async function HomeContent() {
   await connection();
   const providerConfig = readProviderConfig();
+  const meetingProviders = createMeetingProviders();
+  const routingFoundation = meetingProviders.routingFoundation;
   const routingCapabilities = providerConfig.mode === "mvg-direct-transit"
     ? MVG_DIRECT_CAPABILITIES
     : FULL_ROUTING_PROVIDER_CAPABILITIES;
 
   // Allow-list only UI capability data. URLs, tokens, and provenance stay server-side.
-  return <MeetPlanner capability={{ mode: providerConfig.mode, supportedModes: [...routingCapabilities.supportedModes] }} />;
+  return <MeetPlanner capability={{
+    mode: providerConfig.mode,
+    supportedModes: routingFoundation ? [...routingFoundation.supportedModes] : [...routingCapabilities.supportedModes],
+    ...(routingFoundation && {
+      routingFoundation: {
+        state: routingFoundation.state,
+        calculationAvailable: routingFoundation.calculationAvailable,
+        reason: routingFoundation.reason,
+      },
+    }),
+  }} />;
 }
 
 function HomeLoading() {

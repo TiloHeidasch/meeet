@@ -1,0 +1,17 @@
+{
+  "routingDefaults": {
+    "walk": {
+      "speed": 1.33
+    },
+    "bike": {
+      "speed": 4.17
+    },
+    "car": {
+      "speed": 13.89
+    },
+    "transferSlack": "PT60S"
+  },
+  "transit": {
+    "maxNumberOfTransfers": 4
+  }
+}

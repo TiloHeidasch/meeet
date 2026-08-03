@@ -1,0 +1,113 @@
+{
+  "accessEnvelope": {
+    "artifact": {
+      "contentHash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "id": "munich-access-envelope-15km"
+    },
+    "bounds": {
+      "maxLatitude": 48.3,
+      "maxLongitude": 11.8,
+      "minLatitude": 48.0,
+      "minLongitude": 11.3
+    },
+    "extentKm": 15
+  },
+  "artifacts": {
+    "graph": {
+      "contentHash": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "id": "otp-graph"
+    },
+    "input": {
+      "contentHash": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "id": "routing-inputs/example"
+    }
+  },
+  "config": {
+    "asOf": "2026-08-01T00:00:00Z",
+    "contentHash": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+    "id": "otp-graphhopper-config-europe-berlin-mvv"
+  },
+  "contractVersion": "meeet-routing-manifest/v1",
+  "engine": "otp-graphhopper",
+  "engines": {
+    "graphhopper": {
+      "contentHash": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+      "digest": "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+      "id": "graphhopper-image",
+      "image": "registry.example/meeet-graphhopper@sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+      "version": "10.2"
+    },
+    "otp": {
+      "contentHash": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+      "digest": "sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+      "id": "otp-image",
+      "image": "registry.example/otp@sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+      "version": "2.6.0"
+    }
+  },
+  "feeds": [
+    {
+      "asOf": "2026-08-01T00:00:00Z",
+      "attribution": "MVV",
+      "contentHash": "1111111111111111111111111111111111111111111111111111111111111111",
+      "feedId": "mvv",
+      "license": {
+        "name": "CC BY",
+        "url": "https://example.invalid/mvv-license"
+      },
+      "name": "MVV",
+      "retrievedAt": "2026-08-01T00:00:00Z",
+      "role": "authoritative-schedule",
+      "sourceUrl": "https://example.invalid/mvv",
+      "version": "example"
+    },
+    {
+      "asOf": "2026-08-01T00:00:00Z",
+      "attribution": "MVG",
+      "contentHash": "2222222222222222222222222222222222222222222222222222222222222222",
+      "feedId": "mvg",
+      "license": {
+        "name": "MVG terms",
+        "url": "https://example.invalid/mvg-license"
+      },
+      "name": "MVG",
+      "retrievedAt": "2026-08-01T00:00:00Z",
+      "role": "metadata-enrichment",
+      "sourceUrl": "https://example.invalid/mvg",
+      "version": "example"
+    }
+  ],
+  "generatedAt": "2026-08-01T00:00:00Z",
+  "manifestId": "example-manifest",
+  "officialBoundary": {
+    "contentHash": "3333333333333333333333333333333333333333333333333333333333333333",
+    "id": "official-munich-application-boundary"
+  },
+  "osm": {
+    "asOf": "2026-08-01T00:00:00Z",
+    "attribution": "OpenStreetMap contributors",
+    "contentHash": "4444444444444444444444444444444444444444444444444444444444444444",
+    "id": "munich-osm-example",
+    "license": {
+      "name": "ODbL",
+      "url": "https://example.invalid/odbl"
+    },
+    "retrievedAt": "2026-08-01T00:00:00Z",
+    "sourceUrl": "https://example.invalid/osm",
+    "version": "example"
+  },
+  "profiles": {
+    "bike": "bike",
+    "car": "car",
+    "otp": "TRANSIT,WALK"
+  },
+  "realtime": {
+    "artifact": {
+      "contentHash": "5555555555555555555555555555555555555555555555555555555555555555",
+      "id": "realtime"
+    },
+    "dataState": "scheduled",
+    "state": "frozen",
+    "timestamp": null
+  }
+}

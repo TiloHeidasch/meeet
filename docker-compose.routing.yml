@@ -1,0 +1,324 @@
+services:
+  # OTP graph construction is an explicit, one-shot operation.  It is never a
+  # dependency of the runtime service, so a normal start cannot replace a graph.
+  otp-graph-build:
+    image: ${OTP_IMAGE:?OTP_IMAGE must be a digest-qualified OTP 2.6 image}
+    profiles:
+      - otp-build
+    working_dir: /var/opentripplanner
+    command:
+      - --basePath
+      - /var/opentripplanner
+      - --abortOnUnknownConfig
+      - --build
+      - --save
+      - /var/opentripplanner/graphs/europe-berlin-mvv-2.6.0
+    environment:
+      JAVA_TOOL_OPTIONS: >-
+        -Xms${OTP_BUILD_JAVA_XMS:-2g}
+        -Xmx${OTP_BUILD_JAVA_XMX:-8g}
+        -Dlogback.configurationFile=/var/opentripplanner/logback.xml
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    tmpfs:
+      - /tmp
+    volumes:
+      - type: bind
+        source: ./routing/otp/config/build-config.europe-berlin.json
+        target: /var/opentripplanner/build-config.json
+        read_only: true
+      - type: bind
+        source: ./routing/otp/config/router-config.europe-berlin.json
+        target: /var/opentripplanner/router-config.json
+        read_only: true
+      - type: bind
+        source: ./routing/otp/config/logback.xml
+        target: /var/opentripplanner/logback.xml
+        read_only: true
+      - type: bind
+        source: ${ROUTING_INPUT_PATH:?ROUTING_INPUT_PATH must identify one immutable input version}
+        target: /var/opentripplanner/input
+        read_only: true
+      - type: bind
+        source: ${OTP_GRAPH_BUILD_PATH:?OTP_GRAPH_BUILD_PATH must identify the versioned OTP graph output}
+        target: /var/opentripplanner/graphs/europe-berlin-mvv-2.6.0
+      - type: bind
+        source: ./routing/otp/data/logs
+        target: /var/opentripplanner/logs
+
+  otp:
+    image: ${OTP_IMAGE:?OTP_IMAGE must be a digest-qualified OTP 2.6 image}
+    working_dir: /var/opentripplanner
+    entrypoint:
+      - /usr/local/bin/meeet-otp-entrypoint
+    depends_on:
+      routing-manifest-verify:
+        condition: service_completed_successfully
+    command:
+      - --basePath
+      - /var/opentripplanner
+      - --abortOnUnknownConfig
+      - --load
+      - /var/opentripplanner/graphs/europe-berlin-mvv-2.6.0
+    environment:
+      OTP_IMAGE_REF: ${OTP_IMAGE:?OTP_IMAGE must be a digest-qualified OTP 2.6 image}
+      OTP_IMAGE_DIGEST: ${OTP_IMAGE_DIGEST:-REPLACE_WITH_OTP_IMAGE_DIGEST}
+      ROUTING_MANIFEST_SHA256: ${ROUTING_MANIFEST_SHA256:?ROUTING_MANIFEST_SHA256 must come from the generated manifest}
+      ROUTING_ATTESTATION_SHA256: ${ROUTING_ATTESTATION_SHA256:-REPLACE_WITH_ATTESTATION_SHA256}
+      ROUTING_RUNTIME_IDENTITY_SHA256: ${ROUTING_RUNTIME_IDENTITY_SHA256:-REPLACE_WITH_RUNTIME_IDENTITY_SHA256}
+      OTP_RUNTIME_LOCK_SHA256: ${OTP_RUNTIME_LOCK_SHA256:-REPLACE_WITH_OTP_RUNTIME_LOCK_SHA256}
+      GRAPHHOPPER_RUNTIME_LOCK_SHA256: ${GRAPHHOPPER_RUNTIME_LOCK_SHA256:-REPLACE_WITH_GRAPHHOPPER_RUNTIME_LOCK_SHA256}
+      ROUTING_VERIFY_LOCK_SHA256: ${ROUTING_VERIFY_LOCK_SHA256:-REPLACE_WITH_VERIFY_LOCK_SHA256}
+      MEEET_ROUTING_VERIFY_LOCK: /run/meeet-routing/otp-runtime.files.sha256
+      JAVA_TOOL_OPTIONS: >-
+        -Xms${OTP_RUNTIME_JAVA_XMS:-1g}
+        -Xmx${OTP_RUNTIME_JAVA_XMX:-4g}
+        -Dlogback.configurationFile=/var/opentripplanner/logback.xml
+    ports:
+      - "127.0.0.1:8080:8080"
+    networks:
+      - routing-internal
+    labels:
+      meeet.readiness.endpoint: /otp/actuators/health
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    tmpfs:
+      - /tmp
+    volumes:
+      - type: bind
+        source: ./routing/otp/entrypoint.sh
+        target: /usr/local/bin/meeet-otp-entrypoint
+        read_only: true
+      - type: bind
+        source: ./routing/otp/config/router-config.europe-berlin.json
+        target: /var/opentripplanner/router-config.json
+        read_only: true
+      - type: bind
+        source: ./routing/otp/config/logback.xml
+        target: /var/opentripplanner/logback.xml
+        read_only: true
+      - type: bind
+        source: ${OTP_GRAPH_ARTIFACT_PATH:?OTP_GRAPH_ARTIFACT_PATH must identify the verified OTP graph artifact}
+        target: /var/opentripplanner/graphs/europe-berlin-mvv-2.6.0
+        read_only: true
+      - type: bind
+        source: ${ROUTING_MANIFEST_PATH:?ROUTING_MANIFEST_PATH must identify the immutable routing manifest}
+        target: /run/meeet-routing/manifest.json
+        read_only: true
+      - type: bind
+        source: ${ROUTING_ATTESTATION_PATH:-./routing/manifest/versions/REPLACE_WITH_MANIFEST_ID/deployment-attestation.json}
+        target: /run/meeet-routing/deployment-attestation.json
+        read_only: true
+      - type: bind
+        source: ${OTP_RUNTIME_LOCK_PATH:?OTP_RUNTIME_LOCK_PATH must identify the OTP runtime lock}
+        target: /run/meeet-routing/otp-runtime.files.sha256
+        read_only: true
+      - type: bind
+        source: ${ROUTING_RUNTIME_IDENTITY_PATH:-./routing/manifest/versions/REPLACE_WITH_MANIFEST_ID/runtime-identity.env}
+        target: /run/meeet-routing/runtime-identity.env
+        read_only: true
+      - type: bind
+        source: ./routing/otp/data/logs
+        target: /var/opentripplanner/logs
+
+  # This service is the project-owned, utility-independent artifact gate.  It
+  # verifies the manifest digest and every generated graph file before OTP or
+  # GraphHopper is allowed to start.
+  routing-manifest-verify:
+    image: ${GRAPHHOPPER_IMAGE:?GRAPHHOPPER_IMAGE must be a digest-qualified project-owned image}
+    command:
+      - verify-only
+    environment:
+      ROUTING_MANIFEST_SHA256: ${ROUTING_MANIFEST_SHA256:?ROUTING_MANIFEST_SHA256 must come from the generated manifest}
+      ROUTING_ATTESTATION_SHA256: ${ROUTING_ATTESTATION_SHA256:-REPLACE_WITH_ATTESTATION_SHA256}
+      ROUTING_RUNTIME_IDENTITY_SHA256: ${ROUTING_RUNTIME_IDENTITY_SHA256:-REPLACE_WITH_RUNTIME_IDENTITY_SHA256}
+      OTP_RUNTIME_LOCK_SHA256: ${OTP_RUNTIME_LOCK_SHA256:-REPLACE_WITH_OTP_RUNTIME_LOCK_SHA256}
+      GRAPHHOPPER_RUNTIME_LOCK_SHA256: ${ROUTING_VERIFY_LOCK_SHA256:-REPLACE_WITH_VERIFY_LOCK_SHA256}
+      ROUTING_VERIFY_LOCK_SHA256: ${ROUTING_VERIFY_LOCK_SHA256:-REPLACE_WITH_VERIFY_LOCK_SHA256}
+      GRAPHHOPPER_IMAGE_REF: ${GRAPHHOPPER_IMAGE:?GRAPHHOPPER_IMAGE must be a digest-qualified project-owned image}
+      GRAPHHOPPER_IMAGE_DIGEST: ${GRAPHHOPPER_IMAGE_DIGEST:?GRAPHHOPPER_IMAGE_DIGEST must come from the generated manifest}
+      MEEET_ROUTING_VERIFY_LOCK: /run/meeet-routing/verify-all.files.sha256
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    tmpfs:
+      - /tmp
+    volumes:
+      - type: bind
+        source: ${ROUTING_MANIFEST_PATH:?ROUTING_MANIFEST_PATH must identify the immutable routing manifest}
+        target: /run/meeet-routing/manifest.json
+        read_only: true
+      - type: bind
+        source: ${ROUTING_ATTESTATION_PATH:-./routing/manifest/versions/REPLACE_WITH_MANIFEST_ID/deployment-attestation.json}
+        target: /run/meeet-routing/deployment-attestation.json
+        read_only: true
+      - type: bind
+        source: ${ROUTING_VERIFY_LOCK_PATH:?ROUTING_VERIFY_LOCK_PATH must identify the generated verification lock}
+        target: /run/meeet-routing/verify-all.files.sha256
+        read_only: true
+      - type: bind
+        source: ${ROUTING_RUNTIME_IDENTITY_PATH:-./routing/manifest/versions/REPLACE_WITH_MANIFEST_ID/runtime-identity.env}
+        target: /run/meeet-routing/runtime-identity.env
+        read_only: true
+      - type: bind
+        source: ${OTP_GRAPH_ARTIFACT_PATH:?OTP_GRAPH_ARTIFACT_PATH must identify the verified OTP graph artifact}
+        target: /verify/otp-graph
+        read_only: true
+      - type: bind
+        source: ${GRAPHHOPPER_GRAPH_ARTIFACT_PATH:?GRAPHHOPPER_GRAPH_ARTIFACT_PATH must identify the verified GraphHopper artifact}
+        target: /verify/graphhopper
+        read_only: true
+      - type: bind
+        source: ./routing/otp/config/router-config.europe-berlin.json
+        target: /verify/config/otp-router-config.json
+        read_only: true
+      - type: bind
+        source: ./routing/otp/config/build-config.europe-berlin.json
+        target: /verify/config/otp-build-config.json
+        read_only: true
+      - type: bind
+        source: ./routing/otp/entrypoint.sh
+        target: /verify/config/otp-entrypoint.sh
+        read_only: true
+      - type: bind
+        source: ./routing/graphhopper/config/config.yml
+        target: /verify/config/graphhopper-config.yml
+        read_only: true
+      - type: bind
+        source: ./routing/graphhopper/config/car.json
+        target: /verify/config/car.json
+        read_only: true
+      - type: bind
+        source: ./routing/graphhopper/config/bike.json
+        target: /verify/config/bike.json
+        read_only: true
+      - type: bind
+        source: ./routing/graphhopper/entrypoint.sh
+        target: /verify/config/graphhopper-entrypoint.sh
+        read_only: true
+
+  # GraphHopper import is also explicit and one-shot.  Its output directory is
+  # versioned and is never mounted writable by the runtime service.
+  graphhopper-image-build:
+    image: ${GRAPHHOPPER_BUILD_OUTPUT_IMAGE:?GRAPHHOPPER_BUILD_OUTPUT_IMAGE is an intermediate build output only}
+    profiles:
+      - graphhopper-image-build
+    build:
+      context: ./routing/graphhopper
+      dockerfile: Dockerfile
+      no_cache: true
+      pull: true
+      args:
+        GRAPHOPPER_RELEASE: "10.2"
+        GRAPHOPPER_SOURCE_REPOSITORY: ${GRAPHOPPER_SOURCE_REPOSITORY:?set GRAPHOPPER_SOURCE_REPOSITORY in routing/graphhopper/versions.env}
+        GRAPHOPPER_SOURCE_COMMIT: ${GRAPHOPPER_SOURCE_COMMIT:?set GRAPHOPPER_SOURCE_COMMIT in routing/graphhopper/versions.env}
+        GRAPHOPPER_BUILD_IMAGE: ${GRAPHOPPER_BUILD_IMAGE:?set GRAPHOPPER_BUILD_IMAGE in routing/graphhopper/versions.env}
+        GRAPHOPPER_RUNTIME_IMAGE: ${GRAPHOPPER_RUNTIME_IMAGE:?set GRAPHOPPER_RUNTIME_IMAGE in routing/graphhopper/versions.env}
+
+  graphhopper-import:
+    image: ${GRAPHHOPPER_IMAGE:?GRAPHHOPPER_IMAGE must be a digest-qualified project-owned image}
+    profiles:
+      - graphhopper-build
+    command:
+      - import
+      - /etc/graphhopper/config.yml
+    environment:
+      JAVA_TOOL_OPTIONS: >-
+        -Xms${GRAPHOPPER_IMPORT_JAVA_XMS:-1g}
+        -Xmx${GRAPHOPPER_IMPORT_JAVA_XMX:-4g}
+        -XX:+ExitOnOutOfMemoryError
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    tmpfs:
+      - /tmp
+    volumes:
+      - type: bind
+        source: ./routing/graphhopper/config
+        target: /etc/graphhopper
+        read_only: true
+      - type: bind
+        source: ${ROUTING_INPUT_PATH:?ROUTING_INPUT_PATH must identify one immutable input version}
+        target: /data/input
+        read_only: true
+      - type: bind
+        source: ${GRAPHHOPPER_ARTIFACT_BUILD_PATH:?GRAPHHOPPER_ARTIFACT_BUILD_PATH must identify the versioned GraphHopper output}
+        target: /data/artifacts
+      - type: bind
+        source: ./routing/graphhopper/data/logs
+        target: /data/logs
+
+  graphhopper:
+    image: ${GRAPHHOPPER_IMAGE:?GRAPHHOPPER_IMAGE must be a digest-qualified project-owned image}
+    depends_on:
+      routing-manifest-verify:
+        condition: service_completed_successfully
+    environment:
+      ROUTING_MANIFEST_SHA256: ${ROUTING_MANIFEST_SHA256:?ROUTING_MANIFEST_SHA256 must come from the generated manifest}
+      ROUTING_ATTESTATION_SHA256: ${ROUTING_ATTESTATION_SHA256:-REPLACE_WITH_ATTESTATION_SHA256}
+      ROUTING_RUNTIME_IDENTITY_SHA256: ${ROUTING_RUNTIME_IDENTITY_SHA256:-REPLACE_WITH_RUNTIME_IDENTITY_SHA256}
+      OTP_RUNTIME_LOCK_SHA256: ${OTP_RUNTIME_LOCK_SHA256:-REPLACE_WITH_OTP_RUNTIME_LOCK_SHA256}
+      GRAPHHOPPER_RUNTIME_LOCK_SHA256: ${GRAPHHOPPER_RUNTIME_LOCK_SHA256:-REPLACE_WITH_GRAPHHOPPER_RUNTIME_LOCK_SHA256}
+      ROUTING_VERIFY_LOCK_SHA256: ${ROUTING_VERIFY_LOCK_SHA256:-REPLACE_WITH_VERIFY_LOCK_SHA256}
+      GRAPHHOPPER_IMAGE_REF: ${GRAPHHOPPER_IMAGE:?GRAPHHOPPER_IMAGE must be a digest-qualified project-owned image}
+      GRAPHHOPPER_IMAGE_DIGEST: ${GRAPHHOPPER_IMAGE_DIGEST:?GRAPHHOPPER_IMAGE_DIGEST must come from the generated manifest}
+      MEEET_ROUTING_VERIFY_LOCK: /run/meeet-routing/graphhopper-runtime.files.sha256
+      JAVA_TOOL_OPTIONS: >-
+        -Xms${GRAPHOPPER_JAVA_XMS:-512m}
+        -Xmx${GRAPHOPPER_JAVA_XMX:-2g}
+        -XX:+ExitOnOutOfMemoryError
+    ports:
+      - "127.0.0.1:8989:8989"
+    networks:
+      - routing-internal
+    labels:
+      meeet.readiness.endpoint: /health
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    tmpfs:
+      - /tmp
+    volumes:
+      - type: bind
+        source: ./routing/graphhopper/config
+        target: /etc/graphhopper
+        read_only: true
+      - type: bind
+        source: ${GRAPHHOPPER_GRAPH_ARTIFACT_PATH:?GRAPHHOPPER_GRAPH_ARTIFACT_PATH must identify the verified GraphHopper artifact}
+        target: /data/artifacts/graphhopper-10.2
+        read_only: true
+      - type: bind
+        source: ${ROUTING_MANIFEST_PATH:?ROUTING_MANIFEST_PATH must identify the immutable routing manifest}
+        target: /run/meeet-routing/manifest.json
+        read_only: true
+      - type: bind
+        source: ${ROUTING_ATTESTATION_PATH:-./routing/manifest/versions/REPLACE_WITH_MANIFEST_ID/deployment-attestation.json}
+        target: /run/meeet-routing/deployment-attestation.json
+        read_only: true
+      - type: bind
+        source: ${GRAPHHOPPER_RUNTIME_LOCK_PATH:?GRAPHHOPPER_RUNTIME_LOCK_PATH must identify the GraphHopper runtime lock}
+        target: /run/meeet-routing/graphhopper-runtime.files.sha256
+        read_only: true
+      - type: bind
+        source: ${ROUTING_RUNTIME_IDENTITY_PATH:-./routing/manifest/versions/REPLACE_WITH_MANIFEST_ID/runtime-identity.env}
+        target: /run/meeet-routing/runtime-identity.env
+        read_only: true
+      - type: bind
+        source: ./routing/graphhopper/data/logs
+        target: /data/logs
+
+networks:
+  routing-internal:
+    internal: true

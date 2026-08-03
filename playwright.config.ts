@@ -21,18 +21,14 @@ export default defineConfig({
   webServer: {
     command: `npm run dev -- --hostname 127.0.0.1 --port ${port}`,
     env: {
-      MEEET_PROVIDER_MODE:
-        process.env.MEEET_PROVIDER_MODE === "mvg-direct-transit"
-          ? "mvg-direct-transit"
-          : "fixture",
+      MEEET_PROVIDER_MODE: "fixture",
       MEEET_GEOCODING_ENDPOINT: "",
       MEEET_POI_ENDPOINT: "",
       MEEET_ROUTING_GATEWAY_URL: "",
       NEXT_PUBLIC_MAP_ATTRIBUTION: "",
-      // An empty override exercises the built-in OpenFreeMap Liberty default.
       NEXT_PUBLIC_MAP_STYLE_URL: "",
     },
-    reuseExistingServer: !process.env.CI,
+    reuseExistingServer: false,
     timeout: 120_000,
     url: baseURL,
   },

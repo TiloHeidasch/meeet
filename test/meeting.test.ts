@@ -409,10 +409,10 @@ test("configured HTTP rejects redirects/protocol violations and duplicate POIs",
   const developmentConfig = readProviderConfig({
     NODE_ENV: "development",
     MEEET_ALLOW_HTTP_PROVIDER_ENDPOINTS: "true",
-    MEEET_POI_ENDPOINT: "http://poi.example.test",
+    MEEET_POI_ENDPOINT: "http://127.0.0.1",
     ...sourceEnvironment("MEEET_POI"),
   });
-  assert.equal(developmentConfig.poiUrl, "http://poi.example.test/");
+  assert.equal(developmentConfig.poiUrl, "http://127.0.0.1/");
 
   const redirectClient = createHttpJsonClient(
     "https://gateway.example.test/matrix",

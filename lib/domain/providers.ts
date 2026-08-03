@@ -12,7 +12,13 @@ import type {
   RouteAlternativeDiscoveryResult,
   MapConfigurationProvenance,
   RoutingProviderCapabilities,
+  RoutingFoundationCapability,
+  RoutingSnapshot,
+  PointToPointRoutingRequest,
+  PointToPointRoutingResult,
+  SelfHostedRoutingAdapterDescriptor,
 } from "./types.ts";
+import type { RouteEnumerationInput, RouteEnumerationResult } from "./route-first/index.ts";
 import { TRAVEL_MODES } from "./types.ts";
 
 export const FULL_ROUTING_PROVIDER_CAPABILITIES: RoutingProviderCapabilities = {
@@ -20,6 +26,13 @@ export const FULL_ROUTING_PROVIDER_CAPABILITIES: RoutingProviderCapabilities = {
   maxParticipants: 4,
   maxDestinations: 400,
   maxMatrixEntries: 1600,
+};
+
+export const UNAVAILABLE_ROUTING_PROVIDER_CAPABILITIES: RoutingProviderCapabilities = {
+  supportedModes: [],
+  maxParticipants: 0,
+  maxDestinations: 0,
+  maxMatrixEntries: 0,
 };
 
 /** Server-only boundary for replacing fixture geocoding in Phase 2. */
@@ -46,6 +59,17 @@ export interface RouteAlternativeProvider {
   ): Promise<RouteAlternativeDiscoveryResult>;
 }
 
+/** Domain boundary for bounded route-first point-to-point adapters. */
+export interface PointToPointRoutingProvider {
+  readonly descriptor: SelfHostedRoutingAdapterDescriptor;
+  route(request: PointToPointRoutingRequest): Promise<PointToPointRoutingResult>;
+}
+
+/** Pure domain boundary for a complete or honestly incomplete route enumeration. */
+export interface RouteFirstEnumerationProvider {
+  enumerateRoutes(input: RouteEnumerationInput): RouteEnumerationResult;
+}
+
 /** Server-only boundary for replacing static demo POIs in Phase 2. */
 export interface PoiProvider {
   readonly descriptor: ProviderDescriptor;
@@ -59,5 +83,8 @@ export interface MeetingProviders {
   routing: RoutingProvider;
   poi: PoiProvider;
   routeAlternatives?: RouteAlternativeProvider;
+  /** Route-first snapshot identity; calculation does not consume it yet. */
+  routingSnapshot?: RoutingSnapshot;
+  routingFoundation?: RoutingFoundationCapability;
   mapConfiguration?: MapConfigurationProvenance;
 }

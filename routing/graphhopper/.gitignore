@@ -1,0 +1,7 @@
+versions.env
+data/artifacts/*
+!data/artifacts/.gitkeep
+!data/artifacts/versions/
+!data/artifacts/versions/.gitkeep
+data/logs/*
+!data/logs/.gitkeep

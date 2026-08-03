@@ -1,0 +1,3 @@
+# Keep this tool environment pinned by the deployment/CI image or lockfile.
+Shapely==2.0.6
+pyproj==3.7.1
