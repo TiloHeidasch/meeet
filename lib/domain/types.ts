@@ -134,6 +134,30 @@ export interface FairLocation {
   sourceRoutePatternIds: readonly string[];
 }
 
+export const MEETING_SEARCH_COVERAGE_METHOD = "midpoint-directed-local-minimum/v1" as const;
+
+export type MeetingSearchCoverageTermination =
+  | "local-minima-discovered"
+  | "no-transit-station-targets";
+
+export interface MeetingPatternSearchCoverage {
+  routePatternId: string;
+  eligibleStationOccurrenceCount: number;
+  startTransitStopIndex: number | null;
+  evaluatedTransitStopIndexes: readonly number[];
+  discoveredLocalMinimumTransitStopIndexes: readonly number[];
+  termination: MeetingSearchCoverageTermination;
+}
+
+export interface MeetingSearchCoverage {
+  method: typeof MEETING_SEARCH_COVERAGE_METHOD;
+  exhaustive: false;
+  evaluatedStationOccurrenceCount: number;
+  discoveredLocalMinimumOccurrenceCount: number;
+  termination: MeetingSearchCoverageTermination;
+  patterns: readonly MeetingPatternSearchCoverage[];
+}
+
 export type GeoJsonPosition = [number, number];
 
 /** A stop-sequence geometry returned for a detailed venue route. */
@@ -570,9 +594,22 @@ export interface MeetingCalculationOkResponse {
   sourceQueries: readonly MeetingSourceQueryProvenance[];
   requestSnapshot: MeetingRequestSnapshot;
   metadata: MeetingCalculationMetadata;
+  searchCoverage: MeetingSearchCoverage;
 }
 
-export type MeetingCalculationResponse = MeetingCalculationOkResponse;
+export interface MeetingCalculationNoResultResponse {
+  contractVersion: "meeet-meeting/v2";
+  status: "no-result";
+  reason: "no-transit-station-targets";
+  fairLocations: readonly [];
+  routePatterns: readonly RoutePattern[];
+  sourceQueries: readonly MeetingSourceQueryProvenance[];
+  requestSnapshot: MeetingRequestSnapshot;
+  metadata: MeetingCalculationMetadata;
+  searchCoverage: MeetingSearchCoverage;
+}
+
+export type MeetingCalculationResponse = MeetingCalculationOkResponse | MeetingCalculationNoResultResponse;
 
 export type {
   AccessibleTargetInterval,

@@ -1,4 +1,4 @@
-import { MEETING_TIME_ZONE, TOLERANCE_PERCENT_OPTIONS } from "./types.ts";
+import { MEETING_SEARCH_COVERAGE_METHOD, MEETING_TIME_ZONE, TOLERANCE_PERCENT_OPTIONS } from "./types.ts";
 import { isWithinOfficialMunichBoundary } from "./boundary.ts";
 import { haversineDistanceKm } from "./geo.ts";
 import type {
@@ -32,13 +32,20 @@ export function validateMeetingCalculationResponse(value: unknown): SafeMeetingR
   } catch {
     return invalid(issue([], "invalid_json", "Calculation response is not serializable JSON."));
   }
-  requireKeys(value, ["contractVersion", "status", "requestSnapshot", "fairLocations", "routePatterns", "sourceQueries", "metadata"], [], issues);
+  const status = value.status;
+  requireKeys(value, ["contractVersion", "status", "requestSnapshot", "fairLocations", "routePatterns", "sourceQueries", "metadata", "searchCoverage"], [], issues, status === "no-result" ? ["reason"] : []);
   if (value.contractVersion !== CONTRACT_VERSION) issues.push(issue(["contractVersion"], "invalid_value", "Unknown meeting calculation contract version."));
-  if (value.status !== "ok") issues.push(issue(["status"], "invalid_discriminator", "The canonical meeting response status must be ok."));
+  if (value.status !== "ok" && value.status !== "no-result") issues.push(issue(["status"], "invalid_discriminator", "The canonical meeting response status must be ok or no-result."));
+  if (value.status === "ok" && Object.hasOwn(value, "reason")) issues.push(issue(["reason"], "unknown_field", "ok responses must not contain a no-result reason."));
+  if (value.status === "no-result" && value.reason !== "no-transit-station-targets") issues.push(issue(["reason"], "invalid_value", "Unknown no-result reason."));
+  if (value.status === "no-result" && (!isRecord(value.searchCoverage) || value.searchCoverage.termination !== "no-transit-station-targets")) {
+    issues.push(issue(["searchCoverage", "termination"], "mismatched_status", "no-result responses must disclose no-transit-station-targets termination."));
+  }
   validateSnapshot(value.requestSnapshot, ["requestSnapshot"], issues);
-  validateRoutePatterns(value.routePatterns, ["routePatterns"], issues);
+  validateRoutePatterns(value.routePatterns, ["routePatterns"], issues, value.status === "no-result");
   validateSourceQueries(value.sourceQueries, value.requestSnapshot, ["sourceQueries"], issues);
-  validateFairLocations(value.fairLocations, value.requestSnapshot, value.routePatterns, ["fairLocations"], issues);
+  validateSearchCoverage(value.searchCoverage, value.requestSnapshot, value.routePatterns, ["searchCoverage"], issues);
+  validateFairLocations(value.fairLocations, value.requestSnapshot, value.routePatterns, value.searchCoverage, value.status === "no-result", ["fairLocations"], issues);
   validateMetadata(value.metadata, ["metadata"], issues);
   if (issues.length > 0) return { success: false, issues };
   if (!isCanonicalResponse(value)) return invalid(issue([], "invalid_discriminator", "Calculation response is not a canonical v2 response."));
@@ -100,9 +107,9 @@ function validateParticipant(value: unknown, path: Array<string | number>, issue
   return { id: value.id, location: { label: value.location.label, latitude: value.location.latitude, longitude: value.location.longitude }, mode: "transit" };
 }
 
-function validateRoutePatterns(value: unknown, path: Array<string | number>, issues: ResponseValidationIssue[]): void {
-  if (!Array.isArray(value) || value.length === 0) {
-    issues.push(issue(path, "invalid_length", "routePatterns must contain at least one normalized Route Pattern."));
+function validateRoutePatterns(value: unknown, path: Array<string | number>, issues: ResponseValidationIssue[], allowEmpty: boolean): void {
+  if (!Array.isArray(value) || (!allowEmpty && value.length === 0)) {
+    issues.push(issue(path, "invalid_length", "routePatterns must contain normalized Route Patterns."));
     return;
   }
   const ids = new Set<string>();
@@ -143,8 +150,11 @@ function validatePatternSequence(pattern: Record<string, unknown>, path: Array<s
   const transitParts = pattern.parts.filter((part): part is Record<string, unknown> => isRecord(part) && part.kind === "transit");
   const expectedStops = transitParts.flatMap((part) => [part.from, ...(Array.isArray(part.intermediateStops) ? part.intermediateStops : []), part.to]);
   const expectedLines = transitParts.map((part) => part.line);
-  if (expectedStops.length !== transitStops.length || expectedStops.some((stop, index) => !isRecord(stop) || !isRecord(transitStops[index]) || stop.stationGlobalId !== transitStops[index].stationGlobalId)) {
-    issues.push(issue(path.concat("transitStops"), "mismatched_sequence", "Route Pattern transitStops must preserve every ordered transit occurrence."));
+  if (expectedStops.length !== transitStops.length || expectedStops.some((stop, index) => {
+    const actual = transitStops[index];
+    return !isRecord(stop) || !isRecord(actual) || stop.stationGlobalId !== actual.stationGlobalId || !isCoordinateRecord(stop.coordinate) || !isCoordinateRecord(actual.coordinate) || stop.coordinate.latitude !== actual.coordinate.latitude || stop.coordinate.longitude !== actual.coordinate.longitude;
+  })) {
+    issues.push(issue(path.concat("transitStops"), "mismatched_sequence", "Route Pattern transitStops must preserve every ordered transit occurrence and its exact coordinate."));
   }
   if (expectedLines.length !== lines.length || expectedLines.some((line, index) => !isRecord(line) || !isRecord(lines[index]) || line.identity !== lines[index].identity || line.type !== lines[index].type)) {
     issues.push(issue(path.concat("lines"), "mismatched_sequence", "Route Pattern lines must preserve the ordered transit-part sequence."));
@@ -197,9 +207,129 @@ function validateSourceQueries(value: unknown, snapshot: unknown, path: Array<st
   });
 }
 
-function validateFairLocations(value: unknown, snapshot: unknown, patterns: unknown, path: Array<string | number>, issues: ResponseValidationIssue[]): void {
-  if (!Array.isArray(value) || value.length === 0) {
-    issues.push(issue(path, "invalid_length", "fairLocations must contain at least one location."));
+function validateSearchCoverage(value: unknown, snapshot: unknown, patterns: unknown, path: Array<string | number>, issues: ResponseValidationIssue[]): void {
+  if (!isRecord(value)) {
+    issues.push(issue(path, "invalid_type", "searchCoverage must be an object."));
+    return;
+  }
+  requireKeys(value, ["method", "exhaustive", "evaluatedStationOccurrenceCount", "discoveredLocalMinimumOccurrenceCount", "termination", "patterns"], path, issues);
+  if (value.method !== MEETING_SEARCH_COVERAGE_METHOD) issues.push(issue(path.concat("method"), "invalid_value", "Unknown search coverage method."));
+  if (value.exhaustive !== false) issues.push(issue(path.concat("exhaustive"), "invalid_value", "The local-minimum search must disclose exhaustive:false."));
+  validateFiniteInteger(value.evaluatedStationOccurrenceCount, path.concat("evaluatedStationOccurrenceCount"), issues, 0);
+  validateFiniteInteger(value.discoveredLocalMinimumOccurrenceCount, path.concat("discoveredLocalMinimumOccurrenceCount"), issues, 0);
+  if (value.termination !== "local-minima-discovered" && value.termination !== "no-transit-station-targets") issues.push(issue(path.concat("termination"), "invalid_value", "Unknown search coverage termination."));
+  const patternValues = Array.isArray(patterns) ? patterns : [];
+  if (!Array.isArray(value.patterns) || value.patterns.length !== patternValues.length) {
+    issues.push(issue(path.concat("patterns"), "mismatched_length", "Coverage must contain exactly one entry for every route pattern."));
+    return;
+  }
+  let evaluatedCount = 0;
+  let discoveredCount = 0;
+  let anyEligible = false;
+  value.patterns.forEach((coverage, index) => {
+    const coveragePath = path.concat("patterns", index);
+    const pattern = patternValues[index];
+    if (!isRecord(coverage)) {
+      issues.push(issue(coveragePath, "invalid_type", "Pattern coverage must be an object."));
+      return;
+    }
+    requireKeys(coverage, ["routePatternId", "eligibleStationOccurrenceCount", "startTransitStopIndex", "evaluatedTransitStopIndexes", "discoveredLocalMinimumTransitStopIndexes", "termination"], coveragePath, issues);
+    if (!isRecord(pattern) || coverage.routePatternId !== pattern.id) issues.push(issue(coveragePath.concat("routePatternId"), "mismatched_pattern", "Coverage must follow the route pattern order and ids."));
+    validateFiniteInteger(coverage.eligibleStationOccurrenceCount, coveragePath.concat("eligibleStationOccurrenceCount"), issues, 0);
+    if (coverage.termination !== "local-minima-discovered" && coverage.termination !== "no-transit-station-targets") issues.push(issue(coveragePath.concat("termination"), "invalid_value", "Unknown pattern coverage termination."));
+    const eligibleIndexes = isRecord(pattern) ? deriveEligibleTransitStopIndexes(pattern, snapshot) : [];
+    const eligibleCount = eligibleIndexes.length;
+    anyEligible ||= eligibleCount > 0;
+    if (coverage.eligibleStationOccurrenceCount !== eligibleCount) issues.push(issue(coveragePath.concat("eligibleStationOccurrenceCount"), "mismatched_count", "Coverage eligible count must match in-boundary station occurrences after consecutive collapse."));
+    const expectedStart = eligibleCount === 0 ? null : eligibleIndexes[Math.floor((eligibleCount - 1) / 2)];
+    if (coverage.startTransitStopIndex !== expectedStart) issues.push(issue(coveragePath.concat("startTransitStopIndex"), "mismatched_start", "Coverage start must be the arithmetic middle eligible occurrence."));
+    const evaluated = validateCoverageIndexes(coverage.evaluatedTransitStopIndexes, eligibleIndexes, coveragePath.concat("evaluatedTransitStopIndexes"), issues);
+    const discovered = validateCoverageIndexes(coverage.discoveredLocalMinimumTransitStopIndexes, eligibleIndexes, coveragePath.concat("discoveredLocalMinimumTransitStopIndexes"), issues);
+    if (eligibleCount > 0 && (evaluated.length === 0 || evaluated[0] !== expectedStart)) issues.push(issue(coveragePath.concat("evaluatedTransitStopIndexes"), "invalid_search_trace", "A non-empty search must evaluate its disclosed arithmetic-middle start first."));
+    validateContiguousTrace(evaluated, eligibleIndexes, coveragePath.concat("evaluatedTransitStopIndexes"), issues);
+    validateContiguousTrace(discovered, eligibleIndexes, coveragePath.concat("discoveredLocalMinimumTransitStopIndexes"), issues);
+    if (eligibleCount > 0 && discovered.length === 0) issues.push(issue(coveragePath.concat("discoveredLocalMinimumTransitStopIndexes"), "invalid_search_trace", "A pattern with eligible targets must disclose a local minimum."));
+    if (discovered.some((entry) => !evaluated.includes(entry))) issues.push(issue(coveragePath.concat("discoveredLocalMinimumTransitStopIndexes"), "not_evaluated", "Every discovered local minimum must have been evaluated."));
+    const expectedTermination = eligibleCount === 0 ? "no-transit-station-targets" : "local-minima-discovered";
+    if (coverage.termination !== expectedTermination) issues.push(issue(coveragePath.concat("termination"), "mismatched_termination", "Pattern termination does not match its eligible target set."));
+    evaluatedCount += evaluated.length;
+    discoveredCount += discovered.length;
+  });
+  if (value.evaluatedStationOccurrenceCount !== evaluatedCount) issues.push(issue(path.concat("evaluatedStationOccurrenceCount"), "mismatched_count", "Global evaluated count must equal the per-pattern sum."));
+  if (value.discoveredLocalMinimumOccurrenceCount !== discoveredCount) issues.push(issue(path.concat("discoveredLocalMinimumOccurrenceCount"), "mismatched_count", "Global discovered count must equal the per-pattern sum."));
+  const expectedTermination = anyEligible ? "local-minima-discovered" : "no-transit-station-targets";
+  if (value.termination !== expectedTermination) issues.push(issue(path.concat("termination"), "mismatched_termination", "Overall termination does not match the disclosed target coverage."));
+}
+
+function validateContiguousTrace(value: readonly number[], eligibleIndexes: readonly number[], path: Array<string | number>, issues: ResponseValidationIssue[]): void {
+  const ordinalByRawIndex = new Map(eligibleIndexes.map((rawIndex, ordinal) => [rawIndex, ordinal]));
+  const visited = new Set<number>();
+  const firstOrdinal = ordinalByRawIndex.get(value[0]!);
+  if (firstOrdinal !== undefined) visited.add(firstOrdinal);
+  for (let index = 1; index < value.length; index += 1) {
+    const previousOrdinal = ordinalByRawIndex.get(value[index - 1]!);
+    const currentOrdinal = ordinalByRawIndex.get(value[index]!);
+    const adjacentToVisited = currentOrdinal !== undefined && [...visited].some((ordinal) => Math.abs(currentOrdinal - ordinal) === 1);
+    if (previousOrdinal === undefined || currentOrdinal === undefined || !adjacentToVisited) {
+      issues.push(issue(path.concat(index), "non_contiguous_trace", "Search trace indexes must move to neighboring transit-stop occurrences."));
+    }
+    if (currentOrdinal !== undefined) visited.add(currentOrdinal);
+  }
+}
+
+function validateCoverageIndexes(value: unknown, eligibleIndexes: readonly number[], path: Array<string | number>, issues: ResponseValidationIssue[]): number[] {
+  if (!Array.isArray(value)) {
+    issues.push(issue(path, "invalid_type", "Coverage indexes must be an array."));
+    return [];
+  }
+  const seen = new Set<number>();
+  const eligible = new Set(eligibleIndexes);
+  const parsed: number[] = [];
+  value.forEach((entry, index) => {
+    if (typeof entry !== "number" || !Number.isInteger(entry) || entry < 0 || !eligible.has(entry)) {
+      issues.push(issue(path.concat(index), "invalid_index", "Coverage indexes must reference eligible transit-stop occurrences."));
+      return;
+    }
+    if (seen.has(entry)) issues.push(issue(path.concat(index), "duplicate", "Coverage indexes must be unique."));
+    seen.add(entry);
+    parsed.push(entry);
+  });
+  return parsed;
+}
+
+function deriveEligibleTransitStopIndexes(pattern: Record<string, unknown>, snapshot: unknown): number[] {
+  if (!Array.isArray(pattern.transitStops)) return [];
+  const indexes: number[] = [];
+  let index = 0;
+  while (index < pattern.transitStops.length) {
+    const current = pattern.transitStops[index];
+    const stationId = isRecord(current) ? current.stationGlobalId : undefined;
+    let end = index + 1;
+    while (end < pattern.transitStops.length && isRecord(pattern.transitStops[end]) && pattern.transitStops[end]!.stationGlobalId === stationId) end += 1;
+    for (let candidate = index; candidate < end; candidate += 1) {
+      const endpoint = pattern.transitStops[candidate];
+      const coordinate = isRecord(endpoint) && isCoordinateRecord(endpoint.coordinate) ? endpoint.coordinate : null;
+      if (typeof stationId === "string" && coordinate && isWithinOfficialMunichBoundary(coordinate)) {
+        indexes.push(candidate);
+        break;
+      }
+    }
+    index = end;
+  }
+  return indexes;
+}
+
+function coordinatesWithinBinding(first: { latitude: number; longitude: number }, second: { latitude: number; longitude: number }): boolean {
+  return haversineDistanceKm(first, second) * 1_000 <= 1;
+}
+
+function validateFairLocations(value: unknown, snapshot: unknown, patterns: unknown, coverage: unknown, allowEmpty: boolean, path: Array<string | number>, issues: ResponseValidationIssue[]): void {
+  if (!Array.isArray(value) || (!allowEmpty && value.length === 0)) {
+    issues.push(issue(path, "invalid_length", allowEmpty ? "no-result fairLocations must be empty." : "fairLocations must contain at least one location."));
+    return;
+  }
+  if (allowEmpty && value.length > 0) {
+    issues.push(issue(path, "invalid_length", "no-result fairLocations must be empty."));
     return;
   }
   const ids = new Set<string>();
@@ -224,7 +354,7 @@ function validateFairLocations(value: unknown, snapshot: unknown, patterns: unkn
       if (ids.has(location.id)) issues.push(issue(locationPath.concat("id"), "duplicate", "Fair Location ids must be unique."));
       ids.add(location.id);
     }
-    if (location.kind !== "station" && location.kind !== "walking-endpoint" && location.kind !== "origin") issues.push(issue(locationPath.concat("kind"), "invalid_value", "Unknown Fair Location kind."));
+    if (location.kind !== "station") issues.push(issue(locationPath.concat("kind"), "invalid_value", "Fair Locations must be transit stations."));
     validateCoordinate(location.coordinate, locationPath.concat("coordinate"), issues);
     if (isCoordinateRecord(location.coordinate) && !isWithinOfficialMunichBoundary(location.coordinate)) issues.push(issue(locationPath.concat("coordinate"), "outside_munich", "Fair Locations must be inside Munich."));
     validateSelectedTolerance(location.selectedTolerancePercent, locationPath.concat("selectedTolerancePercent"), issues);
@@ -232,6 +362,7 @@ function validateFairLocations(value: unknown, snapshot: unknown, patterns: unkn
     if (location.selectedTolerancePercent !== snapshotSelected) issues.push(issue(locationPath.concat("selectedTolerancePercent"), "mismatched_snapshot", "Fair Location selected tolerance must equal the request snapshot."));
     if (location.effectiveTolerancePercent !== snapshotEffective) issues.push(issue(locationPath.concat("effectiveTolerancePercent"), "mismatched_snapshot", "Fair Location effective tolerance must equal the request snapshot."));
     if (location.physicalIdentity !== location.id) issues.push(issue(locationPath.concat("physicalIdentity"), "mismatched_identity", "Fair Location id and physicalIdentity must agree."));
+    if (typeof location.physicalIdentity === "string" && (!location.physicalIdentity.startsWith("station:") || location.kind !== "station")) issues.push(issue(locationPath.concat("physicalIdentity"), "invalid_identity", "Fair Location identity must identify a transit station."));
     validateFiniteInteger(location.differenceMilliseconds, locationPath.concat("differenceMilliseconds"), issues, 0);
     if (!Array.isArray(location.journeys) || location.journeys.length !== 2) {
       issues.push(issue(locationPath.concat("journeys"), "invalid_length", "A Fair Location must contain two planned participant journeys."));
@@ -278,7 +409,7 @@ function validateFairLocations(value: unknown, snapshot: unknown, patterns: unkn
         }
       });
       const coordinate = isCoordinateRecord(location.coordinate) ? location.coordinate : null;
-      if (coordinate && Array.isArray(patterns) && !location.sourceRoutePatternIds.some((id) => typeof id === "string" && patterns.some((pattern) => isRecord(pattern) && pattern.id === id && patternSupportsCoordinate(pattern, coordinate)))) {
+      if (coordinate && !supportsDiscoveredMinimum(coordinate, location.physicalIdentity, location.sourceRoutePatternIds, patterns, coverage)) {
         issues.push(issue(locationPath.concat("sourceRoutePatternIds"), "unsupported_location", "Fair Location coordinate is not present in its source Route Patterns."));
       }
     }
@@ -289,12 +420,35 @@ function isFairPairInteger(first: number, second: number, tolerancePercent: numb
   return 100 * Math.abs(first - second) <= tolerancePercent * (first + second);
 }
 
-function patternSupportsCoordinate(pattern: Record<string, unknown>, coordinate: { latitude: number; longitude: number }): boolean {
-  const endpoints: unknown[] = [
-    ...(Array.isArray(pattern.transitStops) ? pattern.transitStops : []),
-    ...(Array.isArray(pattern.parts) ? pattern.parts.flatMap((part) => isRecord(part) ? [part.from, ...(Array.isArray(part.intermediateStops) ? part.intermediateStops : []), part.to] : []) : []),
-  ];
-  return endpoints.some((endpoint) => isRecord(endpoint) && isCoordinateRecord(endpoint.coordinate) && haversineDistanceKm(endpoint.coordinate, coordinate) * 1_000 <= 50);
+function supportsDiscoveredMinimum(
+  coordinate: { latitude: number; longitude: number },
+  physicalIdentity: unknown,
+  sourceIds: unknown,
+  patterns: unknown,
+  coverage: unknown,
+): boolean {
+  if (typeof physicalIdentity !== "string" || !physicalIdentity.startsWith("station:") || !Array.isArray(sourceIds) || !Array.isArray(patterns) || !isRecord(coverage) || !Array.isArray(coverage.patterns)) return false;
+  const stationId = physicalIdentity.slice("station:".length);
+  let displayedCoordinateSupported = false;
+  const allSourcesSupportStation = sourceIds.every((sourceId) => {
+    if (typeof sourceId !== "string") return false;
+    const pattern = patterns.find((candidate) => isRecord(candidate) && candidate.id === sourceId);
+    const coveragePatterns = coverage.patterns;
+    if (!Array.isArray(coveragePatterns) || !isRecord(pattern) || !Array.isArray(pattern.transitStops)) return false;
+    const patternCoverage = coveragePatterns.find((candidate: unknown) => isRecord(candidate) && candidate.routePatternId === sourceId);
+    if (!isRecord(patternCoverage) || !Array.isArray(patternCoverage.discoveredLocalMinimumTransitStopIndexes)) return false;
+    const transitStops = pattern.transitStops;
+    const matchingOccurrences = patternCoverage.discoveredLocalMinimumTransitStopIndexes.filter((index) => {
+      const endpoint = transitStops[index];
+      return isRecord(endpoint) && endpoint.stationGlobalId === stationId && isCoordinateRecord(endpoint.coordinate);
+    });
+    if (matchingOccurrences.some((index) => {
+      const endpoint = transitStops[index];
+      return isRecord(endpoint) && isCoordinateRecord(endpoint.coordinate) && coordinatesWithinBinding(endpoint.coordinate, coordinate);
+    })) displayedCoordinateSupported = true;
+    return matchingOccurrences.length > 0;
+  });
+  return allSourcesSupportStation && displayedCoordinateSupported;
 }
 
 function validateJourneyPart(value: unknown, path: Array<string | number>, issues: ResponseValidationIssue[]): void {
@@ -311,6 +465,13 @@ function validateJourneyPart(value: unknown, path: Array<string | number>, issue
   if (value.line === null) {
     if (value.kind === "transit") issues.push(issue(path.concat("line"), "invalid_value", "Transit parts must contain a line."));
   } else validateLine(value.line, path.concat("line"), issues);
+  if (value.kind === "transit") {
+    if (!isRecord(value.from) || typeof value.from.stationGlobalId !== "string" || !value.from.stationGlobalId) issues.push(issue(path.concat("from", "stationGlobalId"), "invalid_value", "Transit part endpoints must identify stations."));
+    if (!isRecord(value.to) || typeof value.to.stationGlobalId !== "string" || !value.to.stationGlobalId) issues.push(issue(path.concat("to", "stationGlobalId"), "invalid_value", "Transit part endpoints must identify stations."));
+    if (Array.isArray(value.intermediateStops)) value.intermediateStops.forEach((stop, index) => {
+      if (!isRecord(stop) || typeof stop.stationGlobalId !== "string" || !stop.stationGlobalId) issues.push(issue(path.concat("intermediateStops", index, "stationGlobalId"), "invalid_value", "Transit intermediate stops must identify stations."));
+    });
+  }
   if (value.kind === "walking" && value.line !== null) issues.push(issue(path.concat("line"), "invalid_value", "Walking parts must not contain a transit line."));
   validateIsoInstant(value.plannedDepartureAt, path.concat("plannedDepartureAt"), issues);
   validateIsoInstant(value.plannedArrivalAt, path.concat("plannedArrivalAt"), issues);
@@ -514,7 +675,7 @@ function isJourneyShape(value: unknown): value is { plannedDurationMilliseconds:
 }
 
 function isCanonicalResponse(value: unknown): value is MeetingCalculationResponse {
-  return isRecord(value) && value.contractVersion === CONTRACT_VERSION && value.status === "ok";
+  return isRecord(value) && value.contractVersion === CONTRACT_VERSION && (value.status === "ok" || value.status === "no-result");
 }
 
 function isCoordinateRecord(value: unknown): value is { latitude: number; longitude: number } {

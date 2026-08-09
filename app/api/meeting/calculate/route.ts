@@ -2,6 +2,8 @@ import { handleMeetingPost } from "../../../../lib/domain/meeting-api.ts";
 import { ProviderConfigurationError } from "../../../../lib/providers/config.ts";
 import { createMeetingProviders } from "../../../../lib/providers/factory.ts";
 
+export const maxDuration = 90;
+
 export async function POST(request: Request): Promise<Response> {
   try {
     return handleMeetingPost(request, createMeetingProviders());

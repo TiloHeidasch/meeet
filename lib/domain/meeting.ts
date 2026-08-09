@@ -15,22 +15,25 @@ import type {
   LocationCoordinate,
   MeetingCalculationInput,
   MeetingCalculationMetadata,
+  MeetingCalculationNoResultResponse,
   MeetingCalculationOkResponse,
   MeetingCalculationResponse,
   MeetingParticipant,
-  MeetingSourceQueryProvenance,
+  MeetingPatternSearchCoverage,
+  MeetingSearchCoverage,
+  MeetingSearchCoverageTermination,
   MeetingSearchDirection,
+  MeetingSourceQueryProvenance,
   OfficialBoundaryMetadata,
   PlannedParticipantJourney,
   ProviderDescriptor,
-  RouteCandidateKind,
   RoutePattern,
   RoutePatternProvenance,
   RoutePatternSearchKind,
   TolerancePercent,
   TransitLineReference,
 } from "./types.ts";
-import { MEETING_TIME_ZONE } from "./types.ts";
+import { MEETING_SEARCH_COVERAGE_METHOD, MEETING_TIME_ZONE } from "./types.ts";
 
 export const MVG_ANCHOR_STATIONS = [
   { id: "de:09162:6", label: "Hauptbahnhof" },
@@ -41,15 +44,17 @@ export const MVG_ANCHOR_STATIONS = [
   { id: "de:09162:350", label: "Olympiazentrum" },
 ] as const;
 
-const WALKING_ENDPOINT_MERGE_RADIUS_METRES = 50;
 const MAX_LOCATION_LABEL_LENGTH = 512;
 const MAX_PLANNED_JOURNEY_DURATION_MS = 24 * 60 * 60 * 1_000;
-export const MEETING_CALCULATION_DEADLINE_MS = 12_000;
+/** Full sampled-search runtime budget; this is not a short approximation or truncation deadline. */
+export const MEETING_CALCULATION_DEADLINE_MS = 90_000;
+/** Two pattern searches × two participant checks bounds normal verification concurrency at four calls. */
+export const MAX_PATTERN_SEARCH_CONCURRENCY = 2;
 export const MAX_CANDIDATE_VERIFICATION_REQUESTS = 1_000;
 export const COORDINATE_BINDING_TOLERANCE_METRES = 1;
 
 export interface MeetingCalculationOptions {
-  /** Test/deployment override; production uses the documented 12-second bound. */
+  /** Test/deployment override; production uses the documented 90-second full-search bound. */
   deadlineMs?: number;
   /** Exceeding this budget fails; work is never truncated. */
   maxCandidateVerificationRequests?: number;
@@ -95,6 +100,7 @@ export class ResolvedLocationOutsideMunichError extends Error {
   }
 }
 
+/** Retained for callers of the old domain seam; no-result is now a response. */
 export class NoFairLocationError extends Error {
   constructor() {
     super("MVG returned no qualifying Route-Derived Fair Location through the maximum tolerance.");
@@ -102,32 +108,44 @@ export class NoFairLocationError extends Error {
   }
 }
 
-interface RawCandidate {
-  kind: RouteCandidateKind;
-  label: string;
-  physicalStationId: string | null;
-  coordinate: LocationCoordinate;
-  sourceRoutePatternIds: readonly string[];
-  originParticipantId?: string;
-  order: number;
+interface PatternBuild {
+  pattern: RoutePattern;
+  representativeJourney: CoordinateJourney;
 }
 
-interface VerifiedCandidate extends RawCandidate {
+interface SourceRequest extends CoordinateJourneyRequest {
+  direction: MeetingSearchDirection;
+  searchKind: RoutePatternSearchKind;
+  anchorStationGlobalId: string | null;
+  originParticipantId: string;
+  destinationParticipantId: string;
+}
+
+interface TargetOccurrence {
+  transitStopIndex: number;
+  endpoint: JourneyEndpoint;
+}
+
+interface VerifiedOccurrence {
+  patternId: string;
+  transitStopIndex: number;
+  endpoint: JourneyEndpoint;
   journeys: readonly [PlannedParticipantJourney, PlannedParticipantJourney];
   differenceMilliseconds: number;
 }
 
-interface MutablePhysicalLocation {
-  kind: RouteCandidateKind;
-  physicalIdentity: string;
-  coordinate: LocationCoordinate;
-  sourceRoutePatternIds: Set<string>;
-  representative: VerifiedCandidate;
+interface PatternSearchResult {
+  pattern: RoutePattern;
+  eligible: readonly TargetOccurrence[];
+  evaluated: readonly VerifiedOccurrence[];
+  discovered: readonly VerifiedOccurrence[];
+  coverage: MeetingPatternSearchCoverage;
 }
 
 /**
- * Calculate the finite Route-Derived Fair Location Set. The service never
- * calls a matrix, geocoder, POI provider, or route-first subsystem.
+ * Calculate the Route-Guided Fair Location Search result. Source discovery is finite,
+ * while target verification is a directional local search rather than an
+ * exhaustive claim.
  */
 export async function calculateMeeting(
   input: MeetingCalculationInput,
@@ -173,129 +191,174 @@ async function calculateMeetingCore(
   const participants = input.participants;
   const arrivalAt = input.arrivalAt;
 
+  participants.forEach((participant) => {
+    if (!isWithinOfficialMunichBoundary(participant.location)) {
+      throw new ResolvedLocationOutsideMunichError();
+    }
+  });
+
   const sourceRequests = createSourceRequests(arrivalAt, participants, signal);
   const sourceResults = await Promise.all(
     sourceRequests.map((request) => invokeJourneyProvider(journeyProvider, toProviderRequest(request))),
   );
 
-  const patternMap = new Map<string, RoutePattern>();
-  const rawCandidates: RawCandidate[] = [];
-  let order = 0;
+  const patternMap = new Map<string, PatternBuild>();
   sourceResults.forEach((result, sourceIndex) => {
-    const source = sourceRequests[sourceIndex];
+    const source = sourceRequests[sourceIndex]!;
     result.journeys.forEach((rawJourney) => {
       const journey = normalizeJourneyCoordinates(rawJourney);
       validateJourney(journey, arrivalAt);
-      const shapeKey = structuralShape(journey, source.direction).key;
-      const isNewPattern = !patternMap.has(shapeKey);
-      const pattern = upsertRoutePattern(
+      upsertRoutePattern(
         patternMap,
         journey,
         source.direction,
         source.searchKind,
         source.anchorStationGlobalId,
       );
-      if (isNewPattern) {
-        const extractedCandidates = extractRawCandidates(journey, pattern.id, order);
-        rawCandidates.push(...extractedCandidates);
-        order += extractedCandidates.length;
-      }
     });
   });
 
-  for (const participant of participants) {
-    if (!isWithinOfficialMunichBoundary(participant.location)) {
-      throw new ResolvedLocationOutsideMunichError();
-    }
-    rawCandidates.push({
-      kind: "origin",
-      label: participant.location.label,
-      physicalStationId: null,
-      coordinate: coordinateOnly(participant.location),
-      sourceRoutePatternIds: [...patternMap.values()].map((pattern) => pattern.id),
-      originParticipantId: participant.id,
-      order: order++,
-    });
-  }
-
-  const munichCandidates = rawCandidates.filter((candidate) =>
-    isWithinOfficialMunichBoundary(candidate.coordinate),
-  );
-  if (munichCandidates.length === 0 || patternMap.size === 0) {
-    throw new NoFairLocationError();
-  }
-  const verificationRequests = munichCandidates.length * participants.length;
   const maxVerificationRequests = options.maxCandidateVerificationRequests ?? MAX_CANDIDATE_VERIFICATION_REQUESTS;
-  if (verificationRequests > maxVerificationRequests) {
-    throw new ProviderUnavailableError("routing");
+  const verificationCache = new Map<string, Promise<{ journeys: readonly CoordinateJourney[]; source: string }>>();
+  let issuedVerificationRequests = 0;
+
+  const getVerificationResult = (
+    participantIndex: 0 | 1,
+    coordinate: LocationCoordinate,
+  ): Promise<{ journeys: readonly CoordinateJourney[]; source: string }> => {
+    const key = verificationKey(participants[participantIndex].id, coordinate);
+    const existing = verificationCache.get(key);
+    if (existing) return existing;
+    if (issuedVerificationRequests >= maxVerificationRequests) {
+      throw new ProviderUnavailableError("routing");
+    }
+    issuedVerificationRequests += 1;
+    const promise = invokeJourneyProvider(journeyProvider, {
+      origin: coordinateOnly(participants[participantIndex].location),
+      destination: coordinateOnly(coordinate),
+      arrivalAt,
+      signal,
+    }).catch((error: unknown) => {
+      verificationCache.delete(key);
+      throw error;
+    });
+    verificationCache.set(key, promise);
+    return promise;
+  };
+
+  const verifyOccurrence = async (
+    pattern: RoutePattern,
+    occurrence: TargetOccurrence,
+  ): Promise<VerifiedOccurrence> => {
+    const keys = participants.map((participant) => verificationKey(participant.id, occurrence.endpoint.coordinate));
+    const missing = keys.filter((key) => !verificationCache.has(key)).length;
+    if (issuedVerificationRequests + missing > maxVerificationRequests) {
+      throw new ProviderUnavailableError("routing");
+    }
+    const results = await Promise.all([
+      getVerificationResult(0, occurrence.endpoint.coordinate),
+      getVerificationResult(1, occurrence.endpoint.coordinate),
+    ]);
+    const selected = results.map((result) => selectJourney(result.journeys, arrivalAt)) as [CoordinateJourney, CoordinateJourney];
+    const journeys: [PlannedParticipantJourney, PlannedParticipantJourney] = [
+      toParticipantJourney(participants[0], selected[0], results[0].source || journeyProvider.descriptor.name),
+      toParticipantJourney(participants[1], selected[1], results[1].source || journeyProvider.descriptor.name),
+    ];
+    return {
+      patternId: pattern.id,
+      transitStopIndex: occurrence.transitStopIndex,
+      endpoint: occurrence.endpoint,
+      journeys,
+      differenceMilliseconds: Math.abs(journeys[0].plannedDurationMilliseconds - journeys[1].plannedDurationMilliseconds),
+    };
+  };
+
+  const patternBuilds = [...patternMap.values()];
+  const searches: Array<PatternSearchResult | undefined> = new Array(patternBuilds.length);
+  let nextPatternIndex = 0;
+  const searchWorker = async (): Promise<void> => {
+    while (true) {
+      const patternIndex = nextPatternIndex;
+      nextPatternIndex += 1;
+      if (patternIndex >= patternBuilds.length) return;
+      const pattern = patternBuilds[patternIndex]!.pattern;
+      const eligible = eligibleStationOccurrences(pattern);
+      if (eligible.length === 0) {
+        searches[patternIndex] = {
+          pattern,
+          eligible,
+          evaluated: [],
+          discovered: [],
+          coverage: patternCoverage(pattern, eligible, [], [], "no-transit-station-targets"),
+        };
+        continue;
+      }
+      searches[patternIndex] = await searchPattern(pattern, eligible, verifyOccurrence);
+    }
+  };
+  const workerCount = Math.min(MAX_PATTERN_SEARCH_CONCURRENCY, patternBuilds.length);
+  await Promise.all(Array.from({ length: workerCount }, () => searchWorker()));
+  const orderedSearches = searches as PatternSearchResult[];
+
+  const searchCoverage = createSearchCoverage(orderedSearches);
+  const sourceQueries = sourceResults.map((result, index) => toSourceQueryProvenance(sourceRequests[index]!, result));
+  const metadata = createMetadata(journeyProvider.descriptor);
+  const effectiveBase: MeetingCalculationInput["tolerancePercent"] = input.tolerancePercent;
+  const common = {
+    contractVersion: "meeet-meeting/v2" as const,
+    requestSnapshot: {
+      participants,
+      arrivalAt,
+      selectedTolerancePercent: input.tolerancePercent,
+      effectiveTolerancePercent: effectiveBase,
+      timeZone: MEETING_TIME_ZONE,
+    },
+    routePatterns: [...patternMap.values()].map((entry) => entry.pattern),
+    sourceQueries,
+    metadata,
+    searchCoverage,
+  };
+
+  const allDiscovered = orderedSearches.flatMap((search) => search.discovered);
+  if (allDiscovered.length === 0 && orderedSearches.every((search) => search.eligible.length === 0)) {
+    const response: MeetingCalculationNoResultResponse = {
+      ...common,
+      status: "no-result",
+      reason: "no-transit-station-targets",
+      fairLocations: [],
+    };
+    return response;
   }
 
-  // This is intentionally before physical merging: two occurrences of the
-  // same station or endpoint are separate provider checks.
-  const verified = await Promise.all(
-    munichCandidates.map(async (candidate) => {
-      const journeys: [
-        Awaited<ReturnType<typeof invokeJourneyProvider>>,
-        Awaited<ReturnType<typeof invokeJourneyProvider>>,
-      ] = await Promise.all([
-        invokeJourneyProvider(journeyProvider, {
-          origin: participants[0].location,
-          destination: candidate.coordinate,
-          arrivalAt,
-          signal,
-        }),
-        invokeJourneyProvider(journeyProvider, {
-          origin: participants[1].location,
-          destination: candidate.coordinate,
-          arrivalAt,
-          signal,
-        }),
-      ]);
-      return verifyCandidate(candidate, participants, journeys, arrivalAt, journeyProvider.descriptor.name);
-    }),
-  );
-
-  let qualifying: VerifiedCandidate[] = [];
+  let qualifying: VerifiedOccurrence[] = [];
   let effectiveTolerancePercent = input.tolerancePercent;
   for (let tolerance = input.tolerancePercent; tolerance <= 100; tolerance += 5) {
-    const current = verified.filter((candidate) =>
-      isFairPair(
-        candidate.journeys[0].plannedDurationMilliseconds,
-        candidate.journeys[1].plannedDurationMilliseconds,
-        tolerance,
-      ),
-    );
+    const current = allDiscovered.filter((candidate) => isFairPair(
+      candidate.journeys[0].plannedDurationMilliseconds,
+      candidate.journeys[1].plannedDurationMilliseconds,
+      tolerance,
+    ));
     if (current.length > 0) {
       qualifying = current;
       effectiveTolerancePercent = tolerance;
       break;
     }
   }
-  if (qualifying.length === 0) throw new NoFairLocationError();
 
-  const fairLocations = mergeQualifiedCandidates(
-    qualifying,
-    input.tolerancePercent,
-    effectiveTolerancePercent,
-  );
-  const routing = journeyProvider.descriptor;
+  // Positive integer durations always qualify at 100%; this branch is kept
+  // defensive so an impossible malformed internal result never becomes DTO.
+  if (qualifying.length === 0) throw new ProviderUnavailableError("routing");
+
+  const fairLocations = mergeQualifiedOccurrences(qualifying, input.tolerancePercent, effectiveTolerancePercent);
   const response: MeetingCalculationOkResponse = {
-    contractVersion: "meeet-meeting/v2" as const,
-    status: "ok" as const,
+    ...common,
+    status: "ok",
     requestSnapshot: {
-      participants,
-      arrivalAt,
-      selectedTolerancePercent: input.tolerancePercent,
+      ...common.requestSnapshot,
       effectiveTolerancePercent,
-      timeZone: MEETING_TIME_ZONE,
     },
     fairLocations,
-    routePatterns: [...patternMap.values()],
-    sourceQueries: sourceResults.map((result, index) => toSourceQueryProvenance(sourceRequests[index], result)),
-    metadata: createMetadata(routing),
   };
-
-  // The public DTO intentionally has no corridor/POI/legacy approximate fields.
   return response;
 }
 
@@ -315,14 +378,6 @@ function validateCanonicalInput(input: MeetingCalculationInput): void {
 function resolveJourneyProvider(providers: MeetingProviders): CoordinateJourneyProvider {
   if (providers.journey) return providers.journey;
   throw new ProviderNotConfiguredError("routing");
-}
-
-interface SourceRequest extends CoordinateJourneyRequest {
-  direction: MeetingSearchDirection;
-  searchKind: RoutePatternSearchKind;
-  anchorStationGlobalId: string | null;
-  originParticipantId: string;
-  destinationParticipantId: string;
 }
 
 function createSourceRequests(
@@ -442,13 +497,11 @@ function validateJourney(journey: CoordinateJourney, arrivalAt: string): void {
       throw new ProviderUnavailableError("routing");
     }
     if (index > 0) {
-      const previous = journey.parts[index - 1];
-      if (previous.to.stationGlobalId !== null && part.from.stationGlobalId !== null && previous.to.stationGlobalId !== part.from.stationGlobalId) {
-        throw new ProviderUnavailableError("routing");
-      }
-      if (Date.parse(part.plannedDepartureAt) < Date.parse(previous.plannedArrivalAt)) {
-        throw new ProviderUnavailableError("routing");
-      }
+      const previous = journey.parts[index - 1]!;
+      const sameStation = previous.to.stationGlobalId !== null && part.from.stationGlobalId !== null && previous.to.stationGlobalId === part.from.stationGlobalId;
+      const sameCoordinate = coordinatesWithinMvgPrecision(previous.to.coordinate, part.from.coordinate);
+      if (!sameStation && !sameCoordinate) throw new ProviderUnavailableError("routing");
+      if (Date.parse(part.plannedDepartureAt) < Date.parse(previous.plannedArrivalAt)) throw new ProviderUnavailableError("routing");
     }
     if (part.kind === "transit" && (!part.line || typeof part.line.identity !== "string" || typeof part.line.type !== "string" || !part.from.stationGlobalId || !part.to.stationGlobalId)) {
       throw new ProviderUnavailableError("routing");
@@ -456,32 +509,35 @@ function validateJourney(journey: CoordinateJourney, arrivalAt: string): void {
     if (!Array.isArray(part.intermediateStops) || part.intermediateStops.some((stop: JourneyEndpoint) => !stop || typeof stop.stationGlobalId !== "string" || !stop.stationGlobalId || !isValidCoordinate(stop.coordinate))) {
       throw new ProviderUnavailableError("routing");
     }
-    if (part.kind === "walking" && part.line !== null) {
-      throw new ProviderUnavailableError("routing");
-    }
+    if (part.kind === "walking" && part.line !== null) throw new ProviderUnavailableError("routing");
   });
-  if (journey.parts[0].plannedDepartureAt !== journey.plannedDepartureAt || journey.parts.at(-1)!.plannedArrivalAt !== journey.plannedArrivalAt) {
-    throw new ProviderUnavailableError("routing");
-  }
+  if (journey.parts[0]!.plannedDepartureAt !== journey.plannedDepartureAt || journey.parts.at(-1)!.plannedArrivalAt !== journey.plannedArrivalAt) throw new ProviderUnavailableError("routing");
 }
 
 function upsertRoutePattern(
-  patterns: Map<string, RoutePattern>,
+  patterns: Map<string, PatternBuild>,
   journey: CoordinateJourney,
   direction: MeetingSearchDirection,
   searchKind: RoutePatternSearchKind,
   anchorStationGlobalId: string | null,
 ): RoutePattern {
   const shape = structuralShape(journey, direction);
-  const existing = patterns.get(shape.key);
   const provenance: RoutePatternProvenance = { direction, searchKind, anchorStationGlobalId };
+  const existing = patterns.get(shape.key);
   if (existing) {
-    if (!existing.provenance.some((item) => JSON.stringify(item) === JSON.stringify(provenance))) {
-      const updated = { ...existing, provenance: [...existing.provenance, provenance] };
-      patterns.set(shape.key, updated);
-      return updated;
-    }
-    return existing;
+    const provenanceAlreadyPresent = existing.pattern.provenance.some((item) => provenanceKey(item) === provenanceKey(provenance));
+    const representative = compareRepresentativeJourney(journey, existing.representativeJourney) < 0 ? journey : existing.representativeJourney;
+    const pattern = {
+      ...existing.pattern,
+      ...(representative === existing.representativeJourney ? {} : {
+        transitStops: structuralShape(representative, direction).transitStops,
+        lines: structuralShape(representative, direction).lines,
+        parts: representative.parts,
+      }),
+      provenance: provenanceAlreadyPresent ? existing.pattern.provenance : [...existing.pattern.provenance, provenance],
+    };
+    patterns.set(shape.key, { pattern, representativeJourney: representative });
+    return pattern;
   }
   const pattern: RoutePattern = {
     id: `route-pattern:${stableHash(shape.key)}`,
@@ -491,7 +547,7 @@ function upsertRoutePattern(
     parts: journey.parts,
     provenance: [provenance],
   };
-  patterns.set(shape.key, pattern);
+  patterns.set(shape.key, { pattern, representativeJourney: journey });
   return pattern;
 }
 
@@ -501,10 +557,9 @@ function structuralShape(journey: CoordinateJourney, direction: MeetingSearchDir
   transitStops: readonly JourneyEndpoint[];
   lines: readonly TransitLineReference[];
 } {
-  const parts = journey.parts;
-  const transitParts = parts.filter((part) => part.kind === "transit");
+  const transitParts = journey.parts.filter((part) => part.kind === "transit");
   if (transitParts.length === 0) {
-    const endpoints = parts.flatMap((part) => [part.from, part.to]);
+    const endpoints = journey.parts.flatMap((part) => [part.from, part.to]);
     const key = `walk-only:${JSON.stringify({ direction, endpoints: endpoints.map(endpointIdentity) })}`;
     return { key, kind: "walk-only", transitStops: [], lines: [] };
   }
@@ -514,49 +569,181 @@ function structuralShape(journey: CoordinateJourney, direction: MeetingSearchDir
     stops.push(part.from, ...part.intermediateStops, part.to);
     if (part.line) lines.push(part.line);
   }
-  const key = `transit:${JSON.stringify({ stops: stops.map((stop) => stop.stationGlobalId), lines: lines.map((line) => [line.identity, line.type]) })}`;
+  const key = `transit:${JSON.stringify({ direction, stops: stops.map((stop) => stop.stationGlobalId), lines: lines.map((line) => [line.identity, line.type]) })}`;
   return { key, kind: "transit", transitStops: stops, lines };
 }
 
-function extractRawCandidates(journey: CoordinateJourney, patternId: string, order: number): RawCandidate[] {
-  const candidates: RawCandidate[] = [];
-  let nextOrder = order;
-  for (const part of journey.parts) {
-    const endpoints = part.kind === "transit"
-      ? [part.from, ...part.intermediateStops, part.to]
-      : [part.from, part.to];
-    for (const endpoint of endpoints) {
-      if (!isWithinOfficialMunichBoundary(endpoint.coordinate)) continue;
-      candidates.push({
-        kind: endpoint.stationGlobalId ? "station" : "walking-endpoint",
-        label: endpoint.label ?? (endpoint.stationGlobalId ? `Transit stop ${endpoint.stationGlobalId}` : "Walking endpoint"),
-        physicalStationId: endpoint.stationGlobalId,
-        coordinate: endpoint.coordinate,
-        sourceRoutePatternIds: [patternId],
-        order: nextOrder++,
-      });
+function eligibleStationOccurrences(
+  pattern: RoutePattern,
+): TargetOccurrence[] {
+  const occurrences: TargetOccurrence[] = [];
+  let index = 0;
+  while (index < pattern.transitStops.length) {
+    const endpoint = pattern.transitStops[index]!;
+    const stationId = endpoint.stationGlobalId;
+    let end = index + 1;
+    while (end < pattern.transitStops.length && pattern.transitStops[end]!.stationGlobalId === stationId) end += 1;
+    if (typeof stationId === "string") {
+      for (let candidateIndex = index; candidateIndex < end; candidateIndex += 1) {
+        const candidate = pattern.transitStops[candidateIndex]!;
+        if (isWithinOfficialMunichBoundary(candidate.coordinate)) {
+          occurrences.push({ transitStopIndex: candidateIndex, endpoint: candidate });
+          break;
+        }
+      }
     }
+    index = end;
   }
-  return candidates;
+  return occurrences;
 }
 
-function verifyCandidate(
-  candidate: RawCandidate,
-  participants: readonly [MeetingParticipant, MeetingParticipant],
-  results: readonly [{ journeys: readonly CoordinateJourney[]; source: string }, { journeys: readonly CoordinateJourney[]; source: string }],
-  arrivalAt: string,
-  fallbackSource: string,
-): VerifiedCandidate {
-  const selected = results.map((result) => selectJourney(result.journeys, arrivalAt));
-  const journeys: [PlannedParticipantJourney, PlannedParticipantJourney] = [
-    toParticipantJourney(participants[0], selected[0], results[0].source || fallbackSource),
-    toParticipantJourney(participants[1], selected[1], results[1].source || fallbackSource),
-  ];
-  return {
-    ...candidate,
-    journeys,
-    differenceMilliseconds: Math.abs(journeys[0].plannedDurationMilliseconds - journeys[1].plannedDurationMilliseconds),
+async function searchPattern(
+  pattern: RoutePattern,
+  eligible: readonly TargetOccurrence[],
+  verify: (pattern: RoutePattern, occurrence: TargetOccurrence) => Promise<VerifiedOccurrence>,
+): Promise<PatternSearchResult> {
+  const evaluated = new Map<number, VerifiedOccurrence>();
+  const evaluate = async (ordinal: number): Promise<VerifiedOccurrence> => {
+    const occurrence = eligible[ordinal]!;
+    const existing = evaluated.get(occurrence.transitStopIndex);
+    if (existing) return existing;
+    const value = await verify(pattern, occurrence);
+    evaluated.set(occurrence.transitStopIndex, value);
+    return value;
   };
+  const startOrdinal = Math.floor((eligible.length - 1) / 2);
+  let currentOrdinal = startOrdinal;
+  let current = await evaluate(currentOrdinal);
+  const sourceParticipantIndex = pattern.provenance[0]?.direction === "participant-2-to-participant-1" ? 1 : 0;
+  const direction = current.journeys[sourceParticipantIndex].plannedDurationMilliseconds <= current.journeys[1 - sourceParticipantIndex].plannedDurationMilliseconds ? 1 : -1;
+  const scanBoundary = async (
+    ordinal: number,
+    scanDirection: 1 | -1,
+    difference: number,
+  ): Promise<{ equal: VerifiedOccurrence[]; boundary: VerifiedOccurrence | null }> => {
+    const equal: VerifiedOccurrence[] = [];
+    let nextOrdinal = ordinal + scanDirection;
+    while (nextOrdinal >= 0 && nextOrdinal < eligible.length) {
+      const next = await evaluate(nextOrdinal);
+      if (next.differenceMilliseconds === difference) {
+        equal.push(next);
+        nextOrdinal += scanDirection;
+        continue;
+      }
+      return { equal, boundary: next };
+    }
+    return { equal, boundary: null };
+  };
+
+  while (true) {
+    const difference = current.differenceMilliseconds;
+    const preferred = await scanBoundary(currentOrdinal, direction, difference);
+    if (preferred.boundary && preferred.boundary.differenceMilliseconds < difference) {
+      currentOrdinal = eligible.findIndex((occurrence) => occurrence.transitStopIndex === preferred.boundary!.transitStopIndex);
+      current = preferred.boundary;
+      continue;
+    }
+
+    // A rising preferred boundary, a preferred boundary, or an equal
+    // plateau must also be checked on the opposite side. Equal occurrences
+    // are collected on both sides, but only a strictly lower boundary moves
+    // the search.
+    const opposite = await scanBoundary(currentOrdinal, direction === 1 ? -1 : 1, difference);
+    if (opposite.boundary && opposite.boundary.differenceMilliseconds < difference) {
+      currentOrdinal = eligible.findIndex((occurrence) => occurrence.transitStopIndex === opposite.boundary!.transitStopIndex);
+      current = opposite.boundary;
+      continue;
+    }
+
+    const plateau = [current, ...preferred.equal, ...opposite.equal]
+      .sort((left, right) => left.transitStopIndex - right.transitStopIndex);
+    {
+      const discovered = plateau;
+      const evaluatedValues = [...evaluated.values()];
+      return {
+        pattern,
+        eligible,
+        evaluated: evaluatedValues,
+        discovered,
+        coverage: patternCoverage(pattern, eligible, evaluatedValues, discovered, "local-minima-discovered"),
+      };
+    }
+  }
+}
+
+function patternCoverage(
+  pattern: RoutePattern,
+  eligible: readonly TargetOccurrence[],
+  evaluated: readonly VerifiedOccurrence[],
+  discovered: readonly VerifiedOccurrence[],
+  termination: MeetingSearchCoverageTermination,
+): MeetingPatternSearchCoverage {
+  return {
+    routePatternId: pattern.id,
+    eligibleStationOccurrenceCount: eligible.length,
+    startTransitStopIndex: eligible.length === 0 ? null : eligible[Math.floor((eligible.length - 1) / 2)]!.transitStopIndex,
+    evaluatedTransitStopIndexes: evaluated.map((entry) => entry.transitStopIndex),
+    discoveredLocalMinimumTransitStopIndexes: discovered.map((entry) => entry.transitStopIndex),
+    termination,
+  };
+}
+
+function createSearchCoverage(searches: readonly PatternSearchResult[]): MeetingSearchCoverage {
+  const patterns = searches.map((search) => search.coverage);
+  const evaluatedStationOccurrenceCount = patterns.reduce((sum, pattern) => sum + pattern.evaluatedTransitStopIndexes.length, 0);
+  const discoveredLocalMinimumOccurrenceCount = patterns.reduce((sum, pattern) => sum + pattern.discoveredLocalMinimumTransitStopIndexes.length, 0);
+  const termination: MeetingSearchCoverageTermination = patterns.some((pattern) => pattern.eligibleStationOccurrenceCount > 0)
+    ? "local-minima-discovered"
+    : "no-transit-station-targets";
+  return {
+    method: MEETING_SEARCH_COVERAGE_METHOD,
+    exhaustive: false,
+    evaluatedStationOccurrenceCount,
+    discoveredLocalMinimumOccurrenceCount,
+    termination,
+    patterns,
+  };
+}
+
+function mergeQualifiedOccurrences(
+  occurrences: readonly VerifiedOccurrence[],
+  selectedTolerancePercent: TolerancePercent,
+  effectiveTolerancePercent: number,
+): FairLocation[] {
+  const merged = new Map<string, { representative: VerifiedOccurrence; sourceRoutePatternIds: Set<string> }>();
+  for (const occurrence of occurrences) {
+    const stationId = occurrence.endpoint.stationGlobalId!;
+    const existing = merged.get(stationId);
+    if (existing) {
+      existing.sourceRoutePatternIds.add(occurrence.patternId);
+      if (compareVerifiedOccurrence(occurrence, existing.representative) < 0) existing.representative = occurrence;
+      continue;
+    }
+    merged.set(stationId, { representative: occurrence, sourceRoutePatternIds: new Set([occurrence.patternId]) });
+  }
+  return [...merged.entries()].sort(([left], [right]) => left.localeCompare(right)).map(([stationId, value]) => {
+    const representative = value.representative;
+    return {
+      id: `station:${stationId}`,
+      label: representative.endpoint.label ?? `Transit stop ${stationId}`,
+      kind: "station",
+      physicalIdentity: `station:${stationId}`,
+      coordinate: representative.endpoint.coordinate,
+      journeys: representative.journeys,
+      differenceMilliseconds: representative.differenceMilliseconds,
+      selectedTolerancePercent,
+      effectiveTolerancePercent,
+      sourceRoutePatternIds: [...value.sourceRoutePatternIds].sort(),
+    };
+  });
+}
+
+function compareVerifiedOccurrence(left: VerifiedOccurrence, right: VerifiedOccurrence): number {
+  return left.patternId.localeCompare(right.patternId) || left.transitStopIndex - right.transitStopIndex;
+}
+
+function isFairPair(first: number, second: number, tolerancePercent: number): boolean {
+  return 100 * Math.abs(first - second) <= tolerancePercent * (first + second);
 }
 
 function selectJourney(journeys: readonly CoordinateJourney[], arrivalAt: string): CoordinateJourney {
@@ -565,10 +752,7 @@ function selectJourney(journeys: readonly CoordinateJourney[], arrivalAt: string
   return journeys.reduce((best, current) => {
     const bestDeparture = Date.parse(best.plannedDepartureAt);
     const currentDeparture = Date.parse(current.plannedDepartureAt);
-    return currentDeparture > bestDeparture ||
-      (currentDeparture === bestDeparture && Date.parse(current.plannedArrivalAt) > Date.parse(best.plannedArrivalAt))
-      ? current
-      : best;
+    return currentDeparture > bestDeparture || (currentDeparture === bestDeparture && Date.parse(current.plannedArrivalAt) > Date.parse(best.plannedArrivalAt)) ? current : best;
   });
 }
 
@@ -583,78 +767,12 @@ function toParticipantJourney(participant: MeetingParticipant, journey: Coordina
   };
 }
 
-function isFairPair(first: number, second: number, tolerancePercent: number): boolean {
-  return 100 * Math.abs(first - second) <= tolerancePercent * (first + second);
-}
-
-function mergeQualifiedCandidates(
-  candidates: readonly VerifiedCandidate[],
-  selectedTolerancePercent: TolerancePercent,
-  effectiveTolerancePercent: number,
-): FairLocation[] {
-  const merged: MutablePhysicalLocation[] = [];
-  const orderedCandidates = [...candidates].sort(compareCandidatePhysicalOrder);
-  for (const candidate of orderedCandidates) {
-    const existing = merged.find((location) => samePhysicalLocation(location, candidate));
-    if (existing) {
-      candidate.sourceRoutePatternIds.forEach((id) => existing.sourceRoutePatternIds.add(id));
-      continue;
-    }
-    const kind = candidate.kind;
-    const physicalIdentity = kind === "station"
-      ? `station:${candidate.physicalStationId}`
-      : kind === "origin"
-        ? `origin:${stableHash(`${candidate.coordinate.latitude}:${candidate.coordinate.longitude}`)}`
-        : `walking-endpoint:${stableHash(`${candidate.coordinate.latitude}:${candidate.coordinate.longitude}`)}`;
-    merged.push({
-      kind,
-      physicalIdentity,
-      coordinate: candidate.coordinate,
-      sourceRoutePatternIds: new Set(candidate.sourceRoutePatternIds),
-      representative: candidate,
-    });
-  }
-  return merged.map((location) => {
-    const representative = location.representative;
-    return {
-      id: location.physicalIdentity,
-      label: representative.label,
-      kind: location.kind,
-      physicalIdentity: location.physicalIdentity,
-      coordinate: location.coordinate,
-      journeys: representative.journeys,
-      differenceMilliseconds: representative.differenceMilliseconds,
-      selectedTolerancePercent,
-      effectiveTolerancePercent,
-      sourceRoutePatternIds: [...location.sourceRoutePatternIds],
-    };
-  });
-}
-
-function compareCandidatePhysicalOrder(left: VerifiedCandidate, right: VerifiedCandidate): number {
-  const kindOrder: Record<RouteCandidateKind, number> = { station: 0, origin: 1, "walking-endpoint": 2 };
-  return kindOrder[left.kind] - kindOrder[right.kind] ||
-    (left.physicalStationId ?? "").localeCompare(right.physicalStationId ?? "") ||
-    left.coordinate.latitude - right.coordinate.latitude ||
-    left.coordinate.longitude - right.coordinate.longitude ||
-    left.order - right.order;
-}
-
-function samePhysicalLocation(location: MutablePhysicalLocation, candidate: VerifiedCandidate): boolean {
-  if (location.kind === "station" && candidate.kind === "station") return location.physicalIdentity === `station:${candidate.physicalStationId}`;
-  if (location.kind === "station" || candidate.kind === "station") return false;
-  return haversineDistanceKm(location.coordinate, candidate.coordinate) * 1_000 <= WALKING_ENDPOINT_MERGE_RADIUS_METRES;
-}
-
 function createMetadata(routing: ProviderDescriptor): MeetingCalculationMetadata {
   const boundary = createBoundaryMetadata();
   return {
     routing,
     boundary,
-    provenance: {
-      routing: routing.provenance,
-      boundary,
-    },
+    provenance: { routing: routing.provenance, boundary },
   };
 }
 
@@ -699,8 +817,37 @@ function coordinateOnly(coordinate: LocationCoordinate): LocationCoordinate {
   return { latitude: coordinate.latitude, longitude: coordinate.longitude };
 }
 
+function verificationKey(participantId: string, coordinate: LocationCoordinate): string {
+  return `${participantId}\u0000${exactCoordinateKey(coordinate)}`;
+}
+
+function exactCoordinateKey(coordinate: LocationCoordinate): string {
+  return `${coordinate.latitude}\u0000${coordinate.longitude}`;
+}
+
 function endpointIdentity(endpoint: JourneyEndpoint): string {
   return JSON.stringify({ stationGlobalId: endpoint.stationGlobalId, coordinate: endpoint.coordinate });
+}
+
+function provenanceKey(provenance: RoutePatternProvenance): string {
+  return `${provenance.direction}|${provenance.searchKind}|${provenance.anchorStationGlobalId ?? "direct"}`;
+}
+
+function compareRepresentativeJourney(left: CoordinateJourney, right: CoordinateJourney): number {
+  return right.plannedDepartureAt.localeCompare(left.plannedDepartureAt) ||
+    right.plannedArrivalAt.localeCompare(left.plannedArrivalAt) ||
+    right.plannedDurationMilliseconds - left.plannedDurationMilliseconds ||
+    stableJourneySignature(left).localeCompare(stableJourneySignature(right));
+}
+
+function stableJourneySignature(journey: CoordinateJourney): string {
+  return JSON.stringify(journey.parts.map((part) => ({
+    kind: part.kind,
+    from: endpointIdentity(part.from),
+    to: endpointIdentity(part.to),
+    intermediateStops: part.intermediateStops.map(endpointIdentity),
+    line: part.line,
+  })));
 }
 
 function isValidCoordinate(value: LocationCoordinate): boolean {

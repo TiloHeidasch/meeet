@@ -5,7 +5,7 @@ The domain for helping a group choose a Munich meeting destination with comparab
 ## Language
 
 **Meeting Search**:
-A two-person, active-browser-session search for a Route-Derived Fair Location Set its Participants can reach in comparable travel time.
+A two-person, active-browser-session search for Route-Guided Fair Locations its Participants can reach in comparable travel time.
 _Avoid_: Match, query
 
 **Participant**:
@@ -21,7 +21,7 @@ The person who creates a Meeting Search and supplies its Participants.
 _Avoid_: Host, owner
 
 **Journey**:
-A Participant’s scheduled public-transport trip between their Participant Origin and a Route Candidate, including access and egress walking. A Journey may be wholly walking when no public-transport segment serves the location.
+A Participant’s planned public-transport trip between their Participant Origin and a transit station target, including access and egress walking.
 _Avoid_: Travel mode, route
 
 **Travel-Time Tolerance**:
@@ -29,7 +29,7 @@ The permitted percentage variation between each Participant’s travel time and 
 _Avoid_: Slack, buffer
 
 **Tolerance Escalation**:
-The automatic increase of a Meeting Search’s Travel-Time Tolerance in five-percentage-point steps until it contains at least one Route-Derived Fair Location.
+The automatic increase of a Meeting Search’s Travel-Time Tolerance in five-percentage-point steps when no discovered Pattern Local Minimum meets the current tolerance.
 _Avoid_: Empty result, failed search
 
 **Effective Travel-Time Tolerance**:
@@ -41,7 +41,7 @@ The complete time a Participant spends on a Journey, including walking, waiting,
 _Avoid_: Ride time, in-vehicle time
 
 **Arrival Time**:
-The single future time by which every Participant aims to reach a Route Candidate. Each Participant takes the latest feasible Journey arriving no later than this time. It initially defaults to one hour after a Meeting Search starts.
+The single future time by which every Participant aims to reach a transit station target. Each Participant takes the latest feasible Journey arriving no later than this time. It initially defaults to one hour after a Meeting Search starts.
 _Avoid_: Departure time, meeting time
 
 **Planning Window**:
@@ -57,25 +57,29 @@ The small, fixed collection of prominent Munich transit stations that can act as
 _Avoid_: All stations, user selection
 
 **Route Pattern**:
-The unique ordered sequence of transit stops and lines in a Journey, independent of its timetable-specific departure time.
+An ordered sequence of transit stops and lines sourced from a direct or Anchor-Station-constrained journey, considered in one Participant-to-Participant direction.
 _Avoid_: Route alternative, timetable variant
 
 **Route Candidate**:
-A Munich transit stop or public walking-leg endpoint, including a Participant Origin, extracted from a direct or Anchor-Station-constrained Route Pattern between the two Participant Origins. It is evaluated independently from both Participant Origins.
+A Munich transit station target discovered from a direct or Anchor-Station-constrained Route Pattern between the two Participant Origins. Walking endpoints and Participant Origins are not Route Candidates.
 _Avoid_: POI, suggestion
 
 **Route-Derived Fair Location**:
-A physical Route Candidate whose Door-to-Door Travel Times from both Participants fall within a Meeting Search’s Travel-Time Tolerance. One Fair Location merges all Route Patterns that support it.
+A discovered transit station at an accepted local minimum of the absolute difference between the Participants’ planned Door-to-Door Travel Times on a Route Pattern, when it meets the active Travel-Time Tolerance. A local minimum is an accepted trade-off, not an absolute or global proof.
 _Avoid_: Corridor, route midpoint
+
+**Route-Guided Fair Location Search**:
+A bounded, sampled/discovery search that examines direct and Anchor-Station-constrained Route Patterns in both directions and returns the union of discovered Route-Derived Fair Locations with source-pattern provenance and sampled coverage. It does not establish that skipped stations are unfair.
+_Avoid_: Complete set, exhaustive search
+
+**Pattern Local Minimum**:
+The accepted station on an ordered Route Pattern where the sampled absolute difference between the Participants’ planned Door-to-Door Travel Times is locally minimized.
+_Avoid_: Global optimum, proof of fairness
 
 **Physical Transit Location**:
 A station area identified as one physical location even when it appears in multiple Route Patterns or platform-level route parts.
 _Avoid_: Platform, route occurrence
 
-**Walking Endpoint Cluster**:
-A single physical Route Candidate formed by walking-leg endpoints within 50 metres of one another.
-_Avoid_: Duplicate endpoint, endpoint group
-
-**Route-Derived Fair Location Set**:
-The complete collection of unique Route-Derived Fair Locations a Meeting Search presents as individual map markers, with their source routes available for inspection and without identifying a single meeting destination. Each marker reveals the Participants’ planned Door-to-Door Travel Times, their difference, and the Effective Travel-Time Tolerance.
-_Avoid_: Corridor, recommendation
+**Sampled Coverage**:
+The disclosed set of Route Patterns and discovered station targets considered by a Route-Guided Fair Location Search. It describes what was sampled, not a completeness guarantee.
+_Avoid_: Complete coverage, unfair remainder

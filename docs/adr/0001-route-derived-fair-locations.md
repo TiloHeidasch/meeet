@@ -1,19 +1,24 @@
-# Route-Derived Fair Locations from MVG journeys
+# Route-Guided Fair Location Search from MVG journeys
 
-Status: accepted
+Status: accepted (revised)
 
-meeet will not claim a complete geographic equal-travel-time corridor from a point-to-point routing service. The MVP instead returns a Route-Derived Fair Location Set: a finite, independently verified set of locations sourced from direct and anchor-station-constrained MVG journeys. This preserves the core benefit—comparable two-person travel times—without pretending that sparse route calls establish every location in Munich.
+meeet uses Route-Guided Fair Location Search rather than promising a complete Route-Derived Fair Location Set. The result is a bounded, sampled/discovery union of transit station locations sourced from direct and Anchor-Station-constrained MVG Route Patterns. It must disclose the sampled coverage and must not imply that skipped stations are unfair. This preserves the core benefit—comparable two-person planned travel times—while making the incompleteness explicit.
 
-For the selected Arrival Time (initially one hour from search start), query the coordinate-to-coordinate MVG `GET https://www.mvg.de/api/bgw-pt/v3/routes` endpoint in both Participant-Origin directions for a direct journey and for journeys constrained through each fixed Anchor Station (`viaStationGlobalId`, `viaDwellTimeInMinutes=10`). Use arrive-by requests with every tested public transport type (`SCHIFF`, `UBAHN`, `TRAM`, `SBAHN`, `BUS`, `REGIONAL_BUS`, and `BAHN`), `routeType=LEAST_TIME`, and `changeSpeed=NORMAL`. Deduplicate returned journeys by their ordered transit-stop and line sequence, then extract only transit stops and public walking-leg endpoints, including Participant Origins, as Route Candidates; never treat arbitrary transit-polyline coordinates as meeting locations. Independently evaluate each raw candidate coordinate from both Participant Origins before merging qualifying locations. For every candidate, independently query each Participant Origin to that candidate with the same Arrival Time. Given unrounded planned journey times `a` and `b` and active tolerance `p`, retain the candidate exactly when `|a - b| <= p(a + b)`; this is equivalent to requiring each time to be within ±`p` of their mean.
+For the selected Arrival Time (initially one hour from search start), run every direct and Anchor-Station-constrained Route Pattern in both Participant-to-Participant directions. For each ordered pattern, consider transit stations only; walking endpoints and Participant Origins are not targets. Start at the pattern’s arithmetic middle station, compare the Participants’ planned Door-to-Door Travel Times independently, and move in the direction indicated by the time imbalance until reaching a local minimum of the absolute difference. That local minimum is an accepted trade-off for the pattern, not an absolute or global proof.
 
-The MVG journey response is authoritative for an individual Journey, including its access, egress, transfer, and walk-only legs. Fairness uses planned timetable times; live disruption information may appear only in individual route details. A displayed Fair Location is an individual marker with its source routes available for inspection; it is not connected to other markers in a way that implies an intervening area is also fair. POI discovery and selection remain outside the MVP.
+At the Organiser’s selected tolerance (±5%, ±10%, or ±15%), search all Route Pattern local minima. Escalate by five percentage points only when no discovered local minimum meets that tolerance. Return the union of discovered fair station locations, retaining source-pattern provenance and sampled coverage. Given unrounded planned journey times `a` and `b` and active tolerance `p`, pairwise fairness is `|a - b| <= p(a + b)`; planned times remain the fairness metric.
+
+A Route Pattern with no transit station contributes no target and is an explicit no-result case; it does not fall back to an origin or walking endpoint. Provider and malformed-data failures remain operational errors.
+
+The MVG journey response is authoritative for an individual Journey, including its access, egress, and transfers. Fairness uses planned timetable times; live disruption information may appear only in individual route details. A displayed Fair Location is an individual station marker with its source patterns and sampled coverage available for inspection; it is not connected to other markers in a way that implies an intervening area is also fair. POI discovery and selection remain outside the MVP.
 
 ## Consequences
 
 - The source catalogue is deliberately finite: direct routes plus routes constrained through Hauptbahnhof (`de:09162:6`), Sendlinger Tor (`de:09162:50`), Universität (`de:09162:70`), Silberhornstraße (`de:09162:1170`), Rotkreuzplatz (`de:09162:190`), and Olympiazentrum (`de:09162:350`).
-- Participant Origins and Route Candidates are within the City of Munich boundary. A Journey may leave that boundary when public transport requires it.
-- Repeated timetable variants with the same stop-and-line sequence do not add candidates.
-- A walk-only Route Pattern is identified by its ordered endpoints and direction.
-- Merge candidate station areas by their stable provider station identity and walking-leg endpoints within 50 metres; retain all supporting Route Patterns.
-- A Meeting Search starts at an Organiser-selected tolerance of ±5%, ±10% (default), or ±15%. If it contains no Fair Location, tolerance increases by five percentage points until one exists; finite walkable journeys ensure a solution by ±100%.
-- The selected Arrival Time must be from now through the end of the following calendar day. An empty result is not a normal product outcome; provider failures remain operational errors rather than evidence that no meeting location exists.
+- Participant Origins and discovered station targets are within the City of Munich boundary. A Journey may leave that boundary when public transport requires it.
+- Run direct and Anchor-Station-constrained Route Patterns in both directions and retain their provenance in the sampled coverage.
+- A Route Pattern with no transit station contributes no target; there is no origin or walking-endpoint fallback.
+- Merge repeated appearances of the same physical transit station while retaining all supporting Route Patterns.
+- A Meeting Search starts at an Organiser-selected tolerance of ±5%, ±10% (default), or ±15%. Search all pattern local minima at that tolerance, then increase by five percentage points only if no discovered local minimum meets it.
+- The search is bounded and sampled: it does not claim completeness, a continuous corridor, a global optimum, or that skipped stations are unfair.
+- The selected Arrival Time must be from now through the end of the following calendar day. No discovered target is an explicit no-result case; provider and malformed-data failures remain operational errors rather than evidence that skipped stations are unfair.

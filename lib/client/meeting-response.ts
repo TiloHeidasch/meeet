@@ -12,5 +12,8 @@ export type {
   RoutePatternProvenance,
   MeetingSourceQueryProvenance,
   MeetingCalculationOkResponse,
+  MeetingCalculationNoResultResponse,
   MeetingCalculationResponse,
+  MeetingSearchCoverage,
+  MeetingPatternSearchCoverage,
 } from "../domain/types.ts";

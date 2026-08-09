@@ -5,8 +5,8 @@
 - Keep the intentional `meeet` spelling. Build mobile-first; add desktop adaptations second.
 - The MVP is Munich-only and must use MVG data. Do not imply broader geographic or transit-data coverage.
 - The core flow supports exactly two participants placed on a map and calculates their public-transport travel times.
-- Show a Route-Derived Fair Location Set generated from direct and anchor-station-constrained routes, with a configurable travel-time tolerance (default ±10%). POI discovery is out of scope for this MVP.
-- Start with a selected tolerance of ±5%, ±10%, or ±15%; if no fair location exists, increase it by 5 percentage points until a location is found rather than returning an empty result.
+- Use Route-Guided Fair Location Search: sample local planned-time minima at transit stations from direct and anchor-station-constrained routes, disclose sampled/local coverage, and never imply a complete set or fair corridor. The default travel-time tolerance is ±10%; POI discovery is out of scope for this MVP.
+- Start with a selected tolerance of ±5%, ±10%, or ±15%; if no discovered local minimum qualifies, increase it by 5 percentage points until one does. A search with no transit-station target is an explicit no-result.
 
 ## Current codebase
 

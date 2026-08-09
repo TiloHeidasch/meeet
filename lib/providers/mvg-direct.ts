@@ -77,6 +77,8 @@ export const MVG_DIRECT_MAX_ROUTE_RESULTS = 100;
 export const MVG_DIRECT_MAX_ROUTE_PARTS = 100;
 export const MVG_DIRECT_MAX_ROUTE_ALTERNATIVES = 20;
 export const MVG_DIRECT_MAX_LABEL_LENGTH = 512;
+export const MVG_DIRECT_MAX_WALKING_TRANSIT_HANDOFF_OVERLAP_MS = 60_000;
+export const MVG_DIRECT_MAX_SAME_STATION_ENDPOINT_DISPLACEMENT_METRES = 100;
 export const MVG_DIRECT_MAX_RADIUS_METERS = 1_500;
 export const MVG_DIRECT_COORDINATE_BINDING_TOLERANCE_METRES = 1;
 export const MVG_DIRECT_WALKING_METERS_PER_MINUTE = 75;
@@ -835,6 +837,21 @@ const MVG_DIRECT_WALKING_TYPES = new Set([
   "TRANSFER",
 ]);
 
+type MvgTemporalInvalidReason =
+  | "disallowed-inter-part-overlap"
+  | "part-arrival-before-departure"
+  | "itinerary-arrival-before-departure"
+  | "itinerary-duration-exceeded"
+  | "arrives-after-arrivalAt";
+
+type MvgCoordinateJourneyParseOutcome =
+  | { category: "valid"; journey: CoordinateJourney }
+  | {
+      category: "temporally-infeasible";
+      journey: CoordinateJourney;
+      reason: MvgTemporalInvalidReason;
+    };
+
 /** Parse the coordinate-to-coordinate response used by the canonical search. */
 export function parseMvgCoordinateJourneys(
   value: unknown,
@@ -844,34 +861,48 @@ export function parseMvgCoordinateJourneys(
     throw new Error("MVG coordinate journey response must be a bounded array.");
   }
   const arrivalLimit = Date.parse(request.arrivalAt);
-  const journeys = value.map((entry) => parseMvgCoordinateJourney(entry, arrivalLimit, request));
-  if (request.viaStationGlobalId && journeys.some((journey) => !journey.parts.some((part) => part.kind === "transit" && (
+  if (!Number.isFinite(arrivalLimit)) {
+    throw new Error("MVG coordinate journey request has an invalid arrivalAt.");
+  }
+  const parsedJourneys = value.map((entry) => parseMvgCoordinateJourney(entry, request, arrivalLimit));
+  if (request.viaStationGlobalId && parsedJourneys.some((outcome) => !outcome.journey.parts.some((part) => part.kind === "transit" && (
     part.from.stationGlobalId === request.viaStationGlobalId ||
     part.to.stationGlobalId === request.viaStationGlobalId ||
     part.intermediateStops.some((stop) => stop.stationGlobalId === request.viaStationGlobalId)
   )))) {
     throw new Error("MVG via journey does not traverse the requested anchor station.");
   }
-  return journeys;
+  const validJourneys = parsedJourneys
+    .filter((outcome): outcome is Extract<MvgCoordinateJourneyParseOutcome, { category: "valid" }> => outcome.category === "valid")
+    .map((outcome) => outcome.journey);
+  if (value.length > 0 && validJourneys.length === 0) {
+    throw new Error("MVG coordinate journey response contains no temporally feasible journey.");
+  }
+  return validJourneys;
 }
 
-function parseMvgCoordinateJourney(value: unknown, arrivalLimit: number, request: CoordinateJourneyRequest): CoordinateJourney {
+function parseMvgCoordinateJourney(
+  value: unknown,
+  request: CoordinateJourneyRequest,
+  arrivalLimit: number,
+): MvgCoordinateJourneyParseOutcome {
   if (!isRecord(value) || !Array.isArray(value.parts) || value.parts.length === 0 || value.parts.length > MVG_DIRECT_MAX_ROUTE_PARTS) {
     throw new Error("MVG coordinate journey must contain a bounded parts array.");
   }
   const parts: CoordinateJourneyPart[] = [];
   let previousArrival: number | null = null;
+  let temporalInvalidReason: MvgTemporalInvalidReason | null = null;
+  const markTemporalInvalid = (reason: MvgTemporalInvalidReason): void => {
+    temporalInvalidReason ??= reason;
+  };
   for (const [index, rawPart] of value.parts.entries()) {
     if (!isRecord(rawPart) || !isRecord(rawPart.from) || !isRecord(rawPart.to)) {
       throw new Error("MVG coordinate journey parts must contain from and to endpoints.");
     }
-    const from = parseCoordinateJourneyEndpoint(rawPart.from);
-    const to = parseCoordinateJourneyEndpoint(rawPart.to);
-    if (index > 0 && previousArrival === null) throw new Error("MVG coordinate journey has no previous arrival.");
-    if (index > 0 && from.stationGlobalId !== null && parts[index - 1].to.stationGlobalId !== null && from.stationGlobalId !== parts[index - 1].to.stationGlobalId) {
-      throw new Error("MVG coordinate journey parts are not continuous.");
-    }
     const line = parseCoordinateJourneyLine(rawPart.line);
+    const from = parseCoordinateJourneyEndpoint(rawPart.from, line.kind === "walking");
+    const to = parseCoordinateJourneyEndpoint(rawPart.to, line.kind === "walking");
+    if (index > 0 && previousArrival === null) throw new Error("MVG coordinate journey has no previous arrival.");
     const intermediateStops = "intermediateStops" in rawPart
       ? (() => {
           if (!Array.isArray(rawPart.intermediateStops)) throw new Error("MVG coordinate journey part intermediateStops must be an array.");
@@ -883,13 +914,30 @@ function parseMvgCoordinateJourney(value: unknown, arrivalLimit: number, request
     if (plannedDeparture === null || plannedDeparture === undefined || plannedArrival === null || plannedArrival === undefined) {
       throw new Error("MVG coordinate journey part is missing planned timestamps.");
     }
-    const departure = parseProviderTimestamp(plannedDeparture, "departure");
+    let departure = parseProviderTimestamp(plannedDeparture, "departure");
     const arrival = parseProviderTimestamp(plannedArrival, "arrival");
-    if (arrival < departure || (previousArrival !== null && departure < previousArrival)) {
-      throw new Error("MVG coordinate journey contains reversed or overlapping planned timestamps.");
+    if (index > 0) {
+      const previous = parts[index - 1]!;
+      const hasStationIdentities = previous.to.stationGlobalId !== null && from.stationGlobalId !== null;
+      const sameStation = hasStationIdentities && previous.to.stationGlobalId === from.stationGlobalId;
+      const sameCoordinate = coordinatesWithinMvgPrecision(previous.to.coordinate, from.coordinate);
+      if (!sameStation && !sameCoordinate) {
+        throw new Error("MVG coordinate journey parts are not continuous.");
+      }
+      if (previousArrival !== null && departure < previousArrival) {
+        const overlap = previousArrival - departure;
+        const walkingTransitHandoff = (previous.kind === "walking" && line.kind === "transit") ||
+          (previous.kind === "transit" && line.kind === "walking");
+        const validHandoff = walkingTransitHandoff && (sameStation || sameCoordinate) && overlap === MVG_DIRECT_MAX_WALKING_TRANSIT_HANDOFF_OVERLAP_MS;
+        if (!validHandoff) {
+          markTemporalInvalid("disallowed-inter-part-overlap");
+        } else {
+          departure = previousArrival;
+        }
+      }
     }
-    if (!Number.isFinite(arrivalLimit) || arrival > arrivalLimit) {
-      throw new Error("MVG selected arrive-by journey arrives after arrivalAt.");
+    if (arrival < departure) {
+      markTemporalInvalid("part-arrival-before-departure");
     }
     if (line.kind === "transit" && (from.stationGlobalId === null || to.stationGlobalId === null)) {
       throw new Error("MVG transit parts must retain both station identities.");
@@ -909,38 +957,58 @@ function parseMvgCoordinateJourney(value: unknown, arrivalLimit: number, request
   const plannedArrivalAt = parts.at(-1)!.plannedArrivalAt;
   const departure = Date.parse(plannedDepartureAt);
   const arrival = Date.parse(plannedArrivalAt);
-  if (arrival < departure || arrival - departure > MVG_DIRECT_MAX_ITINERARY_DURATION_MS) {
-    throw new Error("MVG coordinate journey contains an invalid planned duration.");
+  if (arrival < departure) {
+    markTemporalInvalid("itinerary-arrival-before-departure");
+  }
+  if (arrival - departure > MVG_DIRECT_MAX_ITINERARY_DURATION_MS) {
+    markTemporalInvalid("itinerary-duration-exceeded");
+  }
+  if (parts[0]!.kind === "walking" && parts[0]!.from.stationGlobalId === null) {
+    parts[0]!.from.coordinate = request.origin;
+  }
+  if (parts.at(-1)!.kind === "walking" && parts.at(-1)!.to.stationGlobalId === null) {
+    parts.at(-1)!.to.coordinate = request.destination;
   }
   if (!coordinatesWithinMvgPrecision(parts[0].from.coordinate, request.origin) || !coordinatesWithinMvgPrecision(parts.at(-1)!.to.coordinate, request.destination)) {
     throw new Error("MVG coordinate journey is not bound to its requested origin and destination.");
   }
+  if (arrival > arrivalLimit) {
+    markTemporalInvalid("arrives-after-arrivalAt");
+  }
   const transitStops = parts
     .filter((part) => part.kind === "transit")
     .flatMap((part) => [part.from, ...part.intermediateStops, part.to]);
-  return {
+  const journey = {
     transitStops,
     parts,
     plannedDepartureAt,
     plannedArrivalAt,
     plannedDurationMilliseconds: arrival - departure,
   };
+  return temporalInvalidReason === null
+    ? { category: "valid", journey }
+    : { category: "temporally-infeasible", journey, reason: temporalInvalidReason };
 }
 
 function parseTransitStop(value: unknown): JourneyEndpoint {
   if (!isRecord(value)) throw new Error("MVG intermediate stop is malformed.");
-  const endpoint = parseCoordinateJourneyEndpoint(value);
+  const endpoint = parseCoordinateJourneyEndpoint(value, false);
   if (!endpoint.stationGlobalId) throw new Error("MVG intermediate stop lacks a station identity.");
   return endpoint;
 }
 
-function parseCoordinateJourneyEndpoint(value: Record<string, unknown>): JourneyEndpoint {
+function parseCoordinateJourneyEndpoint(value: Record<string, unknown>, allowBlankStationIdentity = false): JourneyEndpoint {
   const identityKeys = ["stationGlobalId", "stationGlobalID", "globalId", "globalID", "id"];
   const hasIdentity = identityKeys.some((key) => key in value);
   let stationGlobalId: string | null = null;
   if (hasIdentity) {
     stationGlobalId = firstString(value, identityKeys);
-    if (!stationGlobalId) throw new Error("MVG coordinate endpoint has an invalid station identity.");
+    if (!stationGlobalId) {
+      const blankIdentity = identityKeys.some((key) => key in value) && identityKeys
+        .filter((key) => key in value)
+        .every((key) => typeof value[key] === "string" && value[key].trim().length === 0);
+      if (!allowBlankStationIdentity || !blankIdentity) throw new Error("MVG coordinate endpoint has an invalid station identity.");
+    }
   }
   const coordinate = parseCoordinateValue(value);
   if (!coordinate) throw new Error("MVG coordinate endpoint has no valid WGS84 coordinate.");
