@@ -6,7 +6,11 @@ export {
   validateMeetingCalculationResponse,
 } from "../domain/response.ts";
 export type {
-  MeetingCalculationNoCorridorResponse,
+  FairLocation,
+  PlannedParticipantJourney,
+  RoutePattern,
+  RoutePatternProvenance,
+  MeetingSourceQueryProvenance,
   MeetingCalculationOkResponse,
   MeetingCalculationResponse,
 } from "../domain/types.ts";

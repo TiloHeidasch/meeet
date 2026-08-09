@@ -29,6 +29,7 @@ export function createMeetingProviders(
       {
         geocoding: fixtureProviders.geocoding,
         routing: direct,
+        journey: direct,
         routeAlternatives: direct,
         poi: fixtureProviders.poi,
       },

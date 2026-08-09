@@ -8,7 +8,6 @@ import {
   routeStructuralPathIdentity,
   selectRouteMidpointCandidate,
 } from "../lib/domain/route-candidates.ts";
-import { getMunichHubCandidates } from "../lib/domain/munich-hubs.ts";
 import type { FetchImplementation } from "../lib/providers/http.ts";
 import {
   MVG_DIRECT_MAX_ROUTE_ALTERNATIVES,
@@ -281,19 +280,6 @@ test("midpoint candidates use actual endpoint coordinates and skip missing midpo
   )[0];
   assert.equal(selectRouteMidpointCandidate(missingMidpoint), null);
   assert.equal(deriveRouteCandidates([alternative, alternative]).length, 1);
-});
-
-test("fixed Munich hubs are explicit coordinate-only candidates", () => {
-  const hubs = getMunichHubCandidates();
-  assert.deepEqual(hubs.map((hub) => hub.label), [
-    "Marienplatz",
-    "Odeonsplatz",
-    "Sendlinger Tor",
-  ]);
-  assert.ok(hubs.every((hub) => hub.kind === "fixed-hub" && hub.station === null));
-  assert.ok(hubs.every((hub) =>
-    Number.isFinite(hub.coordinate.latitude) && Number.isFinite(hub.coordinate.longitude),
-  ));
 });
 
 test("direct alternative discovery looks up both endpoints and keeps routes uncached", async () => {

@@ -9,11 +9,16 @@ import type {
   RoutingMatrixRequest,
   RoutingMatrixResponse,
   TravelMode,
+  CoordinateJourney,
+  CoordinateJourneyRequest,
+  CoordinateJourneyResult,
+  JourneyEndpoint,
 } from "../domain/types.ts";
 import type {
   GeocodingProvider,
   MeetingProviders,
   PoiProvider,
+  CoordinateJourneyProvider,
   RoutingProvider,
 } from "../domain/providers.ts";
 import { FULL_ROUTING_PROVIDER_CAPABILITIES } from "../domain/providers.ts";
@@ -69,9 +74,75 @@ export class FixtureGeocodingProvider implements GeocodingProvider {
   }
 }
 
-export class FixtureRoutingProvider implements RoutingProvider {
+export class FixtureRoutingProvider implements RoutingProvider, CoordinateJourneyProvider {
   readonly descriptor = createDescriptor("local-demo-fixture-routing", "routing");
   readonly capabilities = FULL_ROUTING_PROVIDER_CAPABILITIES;
+
+  async getCoordinateJourneys(
+    request: CoordinateJourneyRequest,
+  ): Promise<CoordinateJourneyResult> {
+    const arrivalTimestamp = Date.parse(request.arrivalAt);
+    if (!Number.isFinite(arrivalTimestamp)) throw new Error("Fixture journey requires a valid arrivalAt.");
+    const viaCoordinate = request.viaStationGlobalId
+      ? fixtureAnchorCoordinate(request.viaStationGlobalId)
+      : null;
+    const originStation: JourneyEndpoint = {
+      stationGlobalId: `fixture:origin:${request.origin.latitude}:${request.origin.longitude}`,
+      coordinate: request.origin,
+    };
+    const destinationStation: JourneyEndpoint = {
+      stationGlobalId: `fixture:destination:${request.destination.latitude}:${request.destination.longitude}`,
+      coordinate: request.destination,
+    };
+    const totalMilliseconds = Math.max(
+      180_000,
+      Math.round((5 + haversineDistanceKm(request.origin, request.destination) * 60 + (viaCoordinate ? 2 : 0)) * 60_000),
+    );
+    const departureTimestamp = arrivalTimestamp - totalMilliseconds;
+    const walkMilliseconds = 60_000;
+    const transitStart = departureTimestamp + walkMilliseconds;
+    const transitEnd = arrivalTimestamp - walkMilliseconds;
+    const transitStops = viaCoordinate
+      ? [originStation, { stationGlobalId: request.viaStationGlobalId!, coordinate: viaCoordinate }, destinationStation]
+      : [originStation, destinationStation];
+    const parts = transitStops.slice(0, -1).map((from, index) => ({
+      kind: "transit" as const,
+      from,
+      to: transitStops[index + 1],
+      intermediateStops: [],
+      line: { identity: "fixture-bus", type: "BUS" },
+      plannedDepartureAt: new Date(transitStart + ((transitEnd - transitStart) * index) / (transitStops.length - 1)).toISOString(),
+      plannedArrivalAt: new Date(transitStart + ((transitEnd - transitStart) * (index + 1)) / (transitStops.length - 1)).toISOString(),
+    }));
+    const journey: CoordinateJourney = {
+      transitStops,
+      parts: [
+        {
+          kind: "walking",
+          from: { stationGlobalId: null, coordinate: request.origin },
+          to: originStation,
+          intermediateStops: [],
+          line: null,
+          plannedDepartureAt: new Date(departureTimestamp).toISOString(),
+          plannedArrivalAt: new Date(transitStart).toISOString(),
+        },
+        ...parts,
+        {
+          kind: "walking",
+          from: destinationStation,
+          to: { stationGlobalId: null, coordinate: request.destination },
+          intermediateStops: [],
+          line: null,
+          plannedDepartureAt: new Date(transitEnd).toISOString(),
+          plannedArrivalAt: new Date(arrivalTimestamp).toISOString(),
+        },
+      ],
+      plannedDepartureAt: new Date(departureTimestamp).toISOString(),
+      plannedArrivalAt: new Date(arrivalTimestamp).toISOString(),
+      plannedDurationMilliseconds: totalMilliseconds,
+    };
+    return { journeys: [journey], source: this.descriptor.name };
+  }
 
   async getTravelTimeMatrix(
     request: RoutingMatrixRequest,
@@ -105,6 +176,18 @@ export class FixtureRoutingProvider implements RoutingProvider {
   }
 }
 
+function fixtureAnchorCoordinate(id: string): { latitude: number; longitude: number } {
+  const coordinates: Record<string, { latitude: number; longitude: number }> = {
+    "de:09162:6": { latitude: 48.1402, longitude: 11.5586 },
+    "de:09162:50": { latitude: 48.1346, longitude: 11.5683 },
+    "de:09162:70": { latitude: 48.1509, longitude: 11.5814 },
+    "de:09162:1170": { latitude: 48.1186, longitude: 11.5894 },
+    "de:09162:190": { latitude: 48.1533, longitude: 11.5386 },
+    "de:09162:350": { latitude: 48.1734, longitude: 11.5461 },
+  };
+  return coordinates[id] ?? { latitude: 48.1374, longitude: 11.5755 };
+}
+
 export class FixturePoiProvider implements PoiProvider {
   readonly descriptor = createDescriptor("demo-static-food-and-drink-entries", "poi");
 
@@ -117,8 +200,11 @@ export class FixturePoiProvider implements PoiProvider {
   }
 }
 
+const fixtureRouting = new FixtureRoutingProvider();
+
 export const fixtureProviders: MeetingProviders = {
   geocoding: new FixtureGeocodingProvider(),
-  routing: new FixtureRoutingProvider(),
+  routing: fixtureRouting,
+  journey: fixtureRouting,
   poi: new FixturePoiProvider(),
 };

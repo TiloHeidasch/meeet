@@ -2,8 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import { calculateMeeting } from "../lib/domain/meeting.ts";
-import { createBoundedMunichGrid, DIRECT_MVG_GRID_PROFILE } from "../lib/domain/grid.ts";
-import type { MeetingProviders, RoutingProvider } from "../lib/domain/providers.ts";
+import type { MeetingProviders } from "../lib/domain/providers.ts";
 import type { FetchImplementation } from "../lib/providers/http.ts";
 import { HttpProviderError } from "../lib/providers/http.ts";
 import { fixtureProviders } from "../lib/fixtures/providers.ts";
@@ -66,6 +65,7 @@ test("direct mode composes fixtures with capped transit routing and rejects endp
   assert.strictEqual(providers.geocoding, fixtureProviders.geocoding);
   assert.strictEqual(providers.poi, fixtureProviders.poi);
   assert.notStrictEqual(providers.routing, fixtureProviders.routing);
+  assert.strictEqual(providers.journey, providers.routing);
   assert.strictEqual(providers.routeAlternatives, providers.routing);
   assert.deepEqual(providers.routing.capabilities, {
     supportedModes: ["transit"],
@@ -552,101 +552,19 @@ test("incoming caller abort cancels active MVG fetches and queued matrix work", 
   assert.equal(activeFetches, 0);
 });
 
-test("direct mode exposes accepted provenance while retaining the sample-grid fallback", async () => {
-  const direct = new MvgDirectRoutingProvider(async () => Response.json({ stations: [] }));
-  const routing: RoutingProvider = {
-    descriptor: direct.descriptor,
-    capabilities: direct.capabilities,
-    getTravelTimeMatrix: async (request) => ({
-      ...(await fixtureProviders.routing.getTravelTimeMatrix(request)),
-      timing: { dataKind: "scheduled" as const, liveData: false },
-    }),
-  };
-  const providers: MeetingProviders = { ...fixtureProviders, routing };
-  const result = await calculateMeeting(
-    {
-      departureAt: DEPARTURE,
-      tolerancePercent: 10,
-      participants: [participant("one", "transit"), participant("two", "transit")],
-    },
-    providers,
-  );
+test("canonical fixture results preserve demo attribution without legacy area fields", async () => {
+  const result = await calculateMeeting({
+    arrivalAt: DEPARTURE,
+    tolerancePercent: 10,
+    participants: [participant("one", "transit"), participant("two", "transit")],
+  }, fixtureProviders);
   assert.equal(result.status, "ok");
   if (result.status !== "ok") return;
-  assert.equal(result.corridor.properties.gridColumns, 2);
-  assert.equal(result.corridor.properties.gridRows, 2);
-  assert.equal(result.metadata.source.label, "Unofficial MVG routing with candidate centers + fixture coordinate resolution/static POIs");
-  assert.equal(result.metadata.source.dataKind, "scheduled");
-  assert.equal(result.metadata.source.liveData, false);
-  assert.equal(result.metadata.providers.routing.dataKind, "scheduled");
-  assert.equal(result.metadata.provenance.routing.dataKind, "scheduled");
-  assert.equal(result.metadata.provenance.routing.feeds, null);
+  assert.equal(result.metadata.routing.dataKind, "demo-static");
+  assert.equal(result.metadata.routing.liveData, false);
   assert.equal(validateMeetingCalculationResponse(result).success, true);
-  const mutated = JSON.parse(JSON.stringify(result)) as {
-    metadata: {
-      providers: { routing: { dataKind: string; liveData: boolean } };
-      provenance: {
-        routing: {
-          dataKind: string;
-          liveData: boolean;
-          sourceUrl: string;
-          license: unknown;
-          feeds: unknown;
-          retrievedAt: string;
-        };
-      };
-    };
-  };
-  mutated.metadata.providers.routing.dataKind = "live";
-  mutated.metadata.providers.routing.liveData = true;
-  mutated.metadata.provenance.routing.dataKind = "live";
-  mutated.metadata.provenance.routing.liveData = true;
-  mutated.metadata.provenance.routing.sourceUrl = "https://example.test/fake";
-  mutated.metadata.provenance.routing.license = { name: "Fake", url: "https://example.test/license" };
-  mutated.metadata.provenance.routing.feeds = {};
-  mutated.metadata.provenance.routing.retrievedAt = "request-time";
-  assert.equal(validateMeetingCalculationResponse(mutated).success, false);
-  assert.equal(createBoundedMunichGrid(DIRECT_MVG_GRID_PROFILE).destinations.length, 19);
-});
-
-test("meeting metadata reflects live matrix timing without mutating the provider descriptor", async () => {
-  const direct = new MvgDirectRoutingProvider(async () => Response.json({ stations: [] }));
-  const routing: RoutingProvider = {
-    descriptor: direct.descriptor,
-    capabilities: direct.capabilities,
-    getTravelTimeMatrix: async (request) => ({
-      ...(await fixtureProviders.routing.getTravelTimeMatrix(request)),
-      timing: { dataKind: "live" as const, liveData: true },
-    }),
-  };
-  const result = await calculateMeeting(
-    {
-      departureAt: DEPARTURE,
-      tolerancePercent: 10,
-      participants: [participant("one", "transit"), participant("two", "transit")],
-    },
-    { ...fixtureProviders, routing },
-  );
-  assert.equal(result.metadata.source.dataKind, "live");
-  assert.equal(result.metadata.source.liveData, true);
-  assert.equal(result.metadata.providers.routing.dataKind, "live");
-  assert.equal(result.metadata.providers.routing.liveData, true);
-  assert.equal(result.metadata.provenance.routing.dataKind, "live");
-  assert.equal(result.metadata.provenance.routing.liveData, true);
-  assert.equal(validateMeetingCalculationResponse(result).success, true);
-
-  const mismatched = JSON.parse(JSON.stringify(result)) as {
-    metadata: {
-      providers: { routing: { dataKind: string; liveData: boolean } };
-      provenance: { routing: { dataKind: string; liveData: boolean } };
-    };
-  };
-  mismatched.metadata.providers.routing.liveData = false;
-  mismatched.metadata.provenance.routing.liveData = false;
-  assert.equal(validateMeetingCalculationResponse(mismatched).success, false);
-
-  assert.equal(direct.descriptor.dataKind, "scheduled");
-  assert.equal(direct.descriptor.liveData, false);
+  assert.equal(Object.hasOwn(result, "corridor"), false);
+  assert.equal(Object.hasOwn(result, "pois"), false);
 });
 
 function participant(id: string, mode: "transit" | "bike" | "car") {

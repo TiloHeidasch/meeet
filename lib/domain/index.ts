@@ -5,12 +5,12 @@ export * from "./meeting.ts";
 export * from "./response.ts";
 export * from "./routing-snapshot.ts";
 export * from "./route-first/index.ts";
-export * from "./selected-venue-response.ts";
 export * from "./types.ts";
 export type {
   GeocodingProvider,
   MeetingProviders,
   PoiProvider,
+  CoordinateJourneyProvider,
   PointToPointRoutingProvider,
   RouteFirstEnumerationProvider,
   RoutingProvider,

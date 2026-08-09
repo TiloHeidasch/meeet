@@ -1,21 +1,15 @@
-import {
-  MEETING_TIME_ZONE,
-  TOLERANCE_PERCENT_OPTIONS,
-  TRAVEL_MODES,
-} from "./types.ts";
+import { MEETING_TIME_ZONE, TOLERANCE_PERCENT_OPTIONS } from "./types.ts";
+import { isWithinOfficialMunichBoundary } from "./boundary.ts";
+import { haversineDistanceKm } from "./geo.ts";
 import type {
-  GeoJsonGeometry,
   MeetingCalculationResponse,
   MeetingParticipant,
+  ProviderDeploymentKind,
 } from "./types.ts";
 
 export const MAX_CALCULATION_RESPONSE_BYTES = 2 * 1024 * 1024;
-export const MAX_CORRIDOR_POLYGONS = 256;
-export const MAX_CORRIDOR_POSITIONS = 20_000;
-export const MAX_POIS = 100;
-export const MAX_STRING_LENGTH = 512;
-const DIRECT_MVG_PROVIDER = "mvg-direct-routing";
-const DIRECT_MVG_SOURCE_URL = "https://www.mvg.de/api/bgw-pt/v3";
+const MAX_STRING_LENGTH = 512;
+const CONTRACT_VERSION = "meeet-meeting/v2";
 
 export interface ResponseValidationIssue {
   path: Array<string | number>;
@@ -27,163 +21,67 @@ export type SafeMeetingResponse =
   | { success: true; data: MeetingCalculationResponse }
   | { success: false; issues: readonly ResponseValidationIssue[] };
 
-export function validateMeetingCalculationResponse(
-  value: unknown,
-): SafeMeetingResponse {
+export function validateMeetingCalculationResponse(value: unknown): SafeMeetingResponse {
   const issues: ResponseValidationIssue[] = [];
-  if (!isRecord(value)) {
-    return invalid(issue([], "invalid_type", "Calculation response must be an object."));
-  }
+  if (!isRecord(value)) return invalid(issue([], "invalid_type", "Calculation response must be an object."));
   try {
     const serialized = JSON.stringify(value);
     if (!serialized || new TextEncoder().encode(serialized).byteLength > MAX_CALCULATION_RESPONSE_BYTES) {
-      issues.push(
-        issue([], "too_large", "Calculation response exceeds the client response-size limit."),
-      );
-      return { success: false, issues };
+      return invalid(issue([], "too_large", "Calculation response exceeds the client response-size limit."));
     }
   } catch {
     return invalid(issue([], "invalid_json", "Calculation response is not serializable JSON."));
   }
-
-  if (value.status === "ok") {
-    validateOkResponse(value, issues);
-  } else if (value.status === "no-corridor") {
-    validateNoCorridorResponse(value, issues);
-  } else {
-    issues.push(issue(["status"], "invalid_discriminator", "status must be ok or no-corridor."));
-  }
-  return issues.length > 0
-    ? { success: false, issues }
-    : { success: true, data: value as unknown as MeetingCalculationResponse };
+  requireKeys(value, ["contractVersion", "status", "requestSnapshot", "fairLocations", "routePatterns", "sourceQueries", "metadata"], [], issues);
+  if (value.contractVersion !== CONTRACT_VERSION) issues.push(issue(["contractVersion"], "invalid_value", "Unknown meeting calculation contract version."));
+  if (value.status !== "ok") issues.push(issue(["status"], "invalid_discriminator", "The canonical meeting response status must be ok."));
+  validateSnapshot(value.requestSnapshot, ["requestSnapshot"], issues);
+  validateRoutePatterns(value.routePatterns, ["routePatterns"], issues);
+  validateSourceQueries(value.sourceQueries, value.requestSnapshot, ["sourceQueries"], issues);
+  validateFairLocations(value.fairLocations, value.requestSnapshot, value.routePatterns, ["fairLocations"], issues);
+  validateMetadata(value.metadata, ["metadata"], issues);
+  if (issues.length > 0) return { success: false, issues };
+  if (!isCanonicalResponse(value)) return invalid(issue([], "invalid_discriminator", "Calculation response is not a canonical v2 response."));
+  return { success: true, data: value };
 }
 
-export function parseMeetingCalculationResponse(
-  value: unknown,
-): MeetingCalculationResponse | null {
+export function parseMeetingCalculationResponse(value: unknown): MeetingCalculationResponse | null {
   const result = validateMeetingCalculationResponse(value);
   return result.success ? result.data : null;
 }
 
-export function assertMeetingCalculationResponse(
-  value: unknown,
-): MeetingCalculationResponse {
+export function assertMeetingCalculationResponse(value: unknown): MeetingCalculationResponse {
   const result = validateMeetingCalculationResponse(value);
-  if (!result.success) {
-    throw new Error("The calculation response failed its DTO validation.");
-  }
+  if (!result.success) throw new Error("The calculation response failed its DTO validation.");
   return result.data;
 }
 
-function validateOkResponse(
-  value: Record<string, unknown>,
-  issues: ResponseValidationIssue[],
-): void {
-  requireKeys(
-    value,
-    [
-      "status",
-      "meetingPoint",
-      "corridor",
-      "travelTimeRange",
-      "travelTimes",
-      "pois",
-      "requestSnapshot",
-      "metadata",
-    ],
-    [],
-    issues,
-    ["candidates"],
-  );
-  validateCoordinate(value.meetingPoint, ["meetingPoint"], issues);
-  validateCorridor(value.corridor, ["corridor"], issues);
-  validateTravelTimeRange(value.travelTimeRange, ["travelTimeRange"], issues);
-  validateTravelTimes(value.travelTimes, value.requestSnapshot, issues);
-  validatePois(value.pois, ["pois"], issues);
-  const routeCandidateCorridor = isRouteCandidateCorridor(value.corridor);
-  if (routeCandidateCorridor && !("candidates" in value)) {
-    issues.push(issue(["candidates"], "missing_field", "Route-candidate responses must expose verified candidates."));
-  } else if ("candidates" in value) {
-    validateCandidates(value.candidates, value.requestSnapshot, issues);
-    if (
-      routeCandidateCorridor &&
-      isRecord(value.corridor) &&
-      isRecord(value.corridor.properties) &&
-      Array.isArray(value.candidates) &&
-      value.candidates.length !== value.corridor.properties.candidateCount
-    ) {
-      issues.push(issue(["candidates"], "mismatched_count", "Candidates must match the corridor candidate count."));
-    }
-    if (routeCandidateCorridor) {
-      validateRouteCandidateResponseCoherence(value, issues);
-    }
-  }
-  validateSnapshot(value.requestSnapshot, ["requestSnapshot"], issues);
-  validateMetadata(value.metadata, ["metadata"], issues, routeCandidateCorridor);
-}
-
-function validateNoCorridorResponse(
-  value: Record<string, unknown>,
-  issues: ResponseValidationIssue[],
-): void {
-  requireKeys(value, ["status", "reason", "requestSnapshot", "metadata"], [], issues);
-  if (!isRecord(value.reason)) {
-    issues.push(issue(["reason"], "invalid_type", "reason must be an object."));
-  } else {
-    requireKeys(value.reason, ["code", "message"], ["reason"], issues);
-    if (
-      value.reason.code !== "NO_COMPARABLE_GRID_CELL" &&
-      value.reason.code !== "NO_COMPARABLE_ROUTE_CANDIDATE"
-    ) {
-      issues.push(issue(["reason", "code"], "invalid_value", "Unknown no-corridor reason."));
-    }
-    validateString(value.reason.message, ["reason", "message"], issues, 1);
-  }
-  validateSnapshot(value.requestSnapshot, ["requestSnapshot"], issues);
-  validateMetadata(
-    value.metadata,
-    ["metadata"],
-    issues,
-    isRecord(value.reason) && value.reason.code === "NO_COMPARABLE_ROUTE_CANDIDATE",
-  );
-}
-
-function validateSnapshot(
-  value: unknown,
-  path: Array<string | number>,
-  issues: ResponseValidationIssue[],
-): void {
+function validateSnapshot(value: unknown, path: Array<string | number>, issues: ResponseValidationIssue[]): void {
   if (!isRecord(value)) {
     issues.push(issue(path, "invalid_type", "requestSnapshot must be an object."));
     return;
   }
-  requireKeys(value, ["participants", "tolerancePercent", "departureAt", "timeZone"], path, issues);
-  if (!Array.isArray(value.participants) || value.participants.length < 2 || value.participants.length > 4) {
-    issues.push(issue(path.concat("participants"), "invalid_length", "Snapshot must contain 2 to 4 participants."));
+  requireKeys(value, ["participants", "arrivalAt", "selectedTolerancePercent", "effectiveTolerancePercent", "timeZone"], path, issues);
+  if (!Array.isArray(value.participants) || value.participants.length !== 2) {
+    issues.push(issue(path.concat("participants"), "invalid_length", "Snapshot must contain exactly two participants."));
   } else {
     const ids = new Set<string>();
     value.participants.forEach((participant, index) => {
       const parsed = validateParticipant(participant, path.concat("participants", index), issues);
       if (parsed) {
-        if (ids.has(parsed.id)) {
-          issues.push(issue(path.concat("participants", index, "id"), "duplicate", "Participant ids must be unique."));
-        }
+        if (!isWithinOfficialMunichBoundary(parsed.location)) issues.push(issue(path.concat("participants", index, "location"), "outside_munich", "Participant origins must be inside Munich."));
+        if (ids.has(parsed.id)) issues.push(issue(path.concat("participants", index, "id"), "duplicate", "Participant ids must be unique."));
         ids.add(parsed.id);
       }
     });
   }
-  validateTolerance(value.tolerancePercent, path.concat("tolerancePercent"), issues);
-  validateIsoInstant(value.departureAt, path.concat("departureAt"), issues);
-  if (value.timeZone !== MEETING_TIME_ZONE) {
-    issues.push(issue(path.concat("timeZone"), "invalid_value", "Only Europe/Berlin is supported."));
-  }
+  validateIsoInstant(value.arrivalAt, path.concat("arrivalAt"), issues);
+  validateSelectedTolerance(value.selectedTolerancePercent, path.concat("selectedTolerancePercent"), issues);
+  validateEffectiveTolerance(value.effectiveTolerancePercent, value.selectedTolerancePercent, path.concat("effectiveTolerancePercent"), issues);
+  if (value.timeZone !== MEETING_TIME_ZONE) issues.push(issue(path.concat("timeZone"), "invalid_value", "Only Europe/Berlin is supported."));
 }
 
-function validateParticipant(
-  value: unknown,
-  path: Array<string | number>,
-  issues: ResponseValidationIssue[],
-): MeetingParticipant | null {
+function validateParticipant(value: unknown, path: Array<string | number>, issues: ResponseValidationIssue[]): MeetingParticipant | null {
   if (!isRecord(value)) {
     issues.push(issue(path, "invalid_type", "Participant must be an object."));
     return null;
@@ -197,599 +95,344 @@ function validateParticipant(
     validateString(value.location.label, path.concat("location", "label"), issues, 1);
     validateWgs84(value.location.latitude, value.location.longitude, path.concat("location"), issues);
   }
-  if (!isTravelMode(value.mode)) {
-    issues.push(issue(path.concat("mode"), "invalid_value", "Unknown travel mode."));
-  }
-  if (
-    typeof value.id !== "string" ||
-    !isRecord(value.location) ||
-    typeof value.location.label !== "string" ||
-    typeof value.location.latitude !== "number" ||
-    typeof value.location.longitude !== "number" ||
-    !isTravelMode(value.mode)
-  ) {
-    return null;
-  }
-  return {
-    id: value.id,
-    location: {
-      label: value.location.label,
-      latitude: value.location.latitude,
-      longitude: value.location.longitude,
-    },
-    mode: value.mode,
-  };
+  if (value.mode !== "transit") issues.push(issue(path.concat("mode"), "invalid_value", "Only transit participants are supported."));
+  if (typeof value.id !== "string" || !isRecord(value.location) || typeof value.location.label !== "string" || typeof value.location.latitude !== "number" || typeof value.location.longitude !== "number" || value.mode !== "transit") return null;
+  return { id: value.id, location: { label: value.location.label, latitude: value.location.latitude, longitude: value.location.longitude }, mode: "transit" };
 }
 
-function validateCorridor(
-  value: unknown,
-  path: Array<string | number>,
-  issues: ResponseValidationIssue[],
-): void {
-  if (!isRecord(value)) {
-    issues.push(issue(path, "invalid_type", "corridor must be a GeoJSON Feature."));
+function validateRoutePatterns(value: unknown, path: Array<string | number>, issues: ResponseValidationIssue[]): void {
+  if (!Array.isArray(value) || value.length === 0) {
+    issues.push(issue(path, "invalid_length", "routePatterns must contain at least one normalized Route Pattern."));
     return;
   }
-  requireKeys(value, ["type", "properties", "geometry"], path, issues);
-  if (value.type !== "Feature") {
-    issues.push(issue(path.concat("type"), "invalid_value", "corridor must be a Feature."));
-  }
-  if (!isRecord(value.properties)) {
-    issues.push(issue(path.concat("properties"), "invalid_type", "corridor properties are required."));
-  } else {
-    const propertiesPath = path.concat("properties");
-    if (value.properties.kind === "sample-grid-corridor") {
-      requireKeys(
-        value.properties,
-        [
-          "kind",
-          "approximation",
-          "verification",
-          "tolerancePercent",
-          "cellCount",
-          "gridColumns",
-          "gridRows",
-          "boundaryName",
-          "geometryGuarantee",
-        ],
-        propertiesPath,
-        issues,
-      );
-      if (value.properties.approximation !== "sample-grid") {
-        issues.push(issue(propertiesPath.concat("approximation"), "invalid_value", "Corridor must declare sample-grid approximation."));
-      }
-      if (value.properties.verification !== "center-and-clipped-vertices") {
-        issues.push(issue(propertiesPath.concat("verification"), "invalid_value", "Corridor sample verification metadata is missing."));
-      }
-      validateTolerance(value.properties.tolerancePercent, propertiesPath.concat("tolerancePercent"), issues);
-      validateBoundedInteger(value.properties.cellCount, propertiesPath.concat("cellCount"), issues, 1, MAX_CORRIDOR_POLYGONS);
-      validateBoundedInteger(value.properties.gridColumns, propertiesPath.concat("gridColumns"), issues, 1, 64);
-      validateBoundedInteger(value.properties.gridRows, propertiesPath.concat("gridRows"), issues, 1, 64);
-      validateString(value.properties.boundaryName, propertiesPath.concat("boundaryName"), issues, 1);
-      validateString(value.properties.geometryGuarantee, propertiesPath.concat("geometryGuarantee"), issues, 1);
-      if (!String(value.properties.geometryGuarantee).includes("not independently routed")) {
-        issues.push(issue(propertiesPath.concat("geometryGuarantee"), "missing_caveat", "Corridor must declare the unverified-interior caveat."));
-      }
-    } else if (value.properties.kind === "route-candidate-search-area") {
-      requireKeys(
-        value.properties,
-        [
-          "kind",
-          "approximation",
-          "verification",
-          "tolerancePercent",
-          "cellCount",
-          "candidateCount",
-          "bufferRadiusMeters",
-          "boundaryName",
-          "geometryGuarantee",
-        ],
-        propertiesPath,
-        issues,
-      );
-      if (value.properties.approximation !== "route-candidate-search") {
-        issues.push(issue(propertiesPath.concat("approximation"), "invalid_value", "Corridor must declare route-candidate search approximation."));
-      }
-      if (value.properties.verification !== "candidate-centers-routed") {
-        issues.push(issue(propertiesPath.concat("verification"), "invalid_value", "Corridor must declare routed candidate-center verification."));
-      }
-      validateTolerance(value.properties.tolerancePercent, propertiesPath.concat("tolerancePercent"), issues);
-      validateBoundedInteger(value.properties.cellCount, propertiesPath.concat("cellCount"), issues, 1, MAX_CORRIDOR_POLYGONS);
-      validateBoundedInteger(value.properties.candidateCount, propertiesPath.concat("candidateCount"), issues, 1, MAX_ROUTE_CANDIDATES);
-      if (
-        typeof value.properties.cellCount === "number" &&
-        typeof value.properties.candidateCount === "number" &&
-        value.properties.cellCount !== value.properties.candidateCount
-      ) {
-        issues.push(issue(propertiesPath.concat("candidateCount"), "mismatched_count", "Route-candidate counts must agree."));
-      }
-      validateFiniteBoundedNumber(value.properties.bufferRadiusMeters, propertiesPath.concat("bufferRadiusMeters"), issues, 300, 400);
-      validateString(value.properties.boundaryName, propertiesPath.concat("boundaryName"), issues, 1);
-      validateString(value.properties.geometryGuarantee, propertiesPath.concat("geometryGuarantee"), issues, 1);
-      if (!String(value.properties.geometryGuarantee).includes("not independently routed") ||
-        !String(value.properties.geometryGuarantee).includes("350m")) {
-        issues.push(issue(propertiesPath.concat("geometryGuarantee"), "missing_caveat", "Route-candidate buffers must declare their limited unverified area."));
-      }
+  const ids = new Set<string>();
+  value.forEach((pattern, index) => {
+    const patternPath = path.concat(index);
+    if (!isRecord(pattern)) {
+      issues.push(issue(patternPath, "invalid_type", "Route Pattern must be an object."));
+      return;
+    }
+    requireKeys(pattern, ["id", "kind", "transitStops", "lines", "parts", "provenance"], patternPath, issues);
+    validateString(pattern.id, patternPath.concat("id"), issues, 1);
+    if (typeof pattern.id === "string") {
+      if (ids.has(pattern.id)) issues.push(issue(patternPath.concat("id"), "duplicate", "Route Pattern ids must be unique."));
+      ids.add(pattern.id);
+    }
+    if (pattern.kind !== "transit" && pattern.kind !== "walk-only") issues.push(issue(patternPath.concat("kind"), "invalid_value", "Unknown Route Pattern kind."));
+    if (!Array.isArray(pattern.transitStops)) issues.push(issue(patternPath.concat("transitStops"), "invalid_type", "transitStops must be an array."));
+    else pattern.transitStops.forEach((stop, stopIndex) => validateEndpoint(stop, patternPath.concat("transitStops", stopIndex), issues, true));
+    if (!Array.isArray(pattern.lines)) issues.push(issue(patternPath.concat("lines"), "invalid_type", "lines must be an array."));
+    else pattern.lines.forEach((line, lineIndex) => validateLine(line, patternPath.concat("lines", lineIndex), issues));
+    if (!Array.isArray(pattern.parts) || pattern.parts.length === 0) issues.push(issue(patternPath.concat("parts"), "invalid_length", "A Route Pattern must contain parts."));
+    else pattern.parts.forEach((part, partIndex) => validateJourneyPart(part, patternPath.concat("parts", partIndex), issues));
+    if (!Array.isArray(pattern.provenance) || pattern.provenance.length === 0) {
+      issues.push(issue(patternPath.concat("provenance"), "invalid_length", "Route Pattern provenance is required."));
     } else {
-      issues.push(issue(propertiesPath.concat("kind"), "invalid_value", "Unsupported corridor kind."));
+      pattern.provenance.forEach((provenance, provenanceIndex) => validateProvenance(provenance, patternPath.concat("provenance", provenanceIndex), issues));
     }
+    if (pattern.kind === "walk-only" && Array.isArray(pattern.lines) && pattern.lines.length !== 0) issues.push(issue(patternPath.concat("lines"), "invalid_value", "Walk-only patterns cannot contain transit lines."));
+    if (pattern.kind === "transit" && Array.isArray(pattern.lines) && pattern.lines.length === 0) issues.push(issue(patternPath.concat("lines"), "invalid_value", "Transit patterns must contain a line."));
+    validatePatternSequence(pattern, patternPath, issues);
+  });
+}
+
+function validatePatternSequence(pattern: Record<string, unknown>, path: Array<string | number>, issues: ResponseValidationIssue[]): void {
+  if (!Array.isArray(pattern.parts) || !Array.isArray(pattern.transitStops) || !Array.isArray(pattern.lines)) return;
+  const transitStops = pattern.transitStops;
+  const lines = pattern.lines;
+  const transitParts = pattern.parts.filter((part): part is Record<string, unknown> => isRecord(part) && part.kind === "transit");
+  const expectedStops = transitParts.flatMap((part) => [part.from, ...(Array.isArray(part.intermediateStops) ? part.intermediateStops : []), part.to]);
+  const expectedLines = transitParts.map((part) => part.line);
+  if (expectedStops.length !== transitStops.length || expectedStops.some((stop, index) => !isRecord(stop) || !isRecord(transitStops[index]) || stop.stationGlobalId !== transitStops[index].stationGlobalId)) {
+    issues.push(issue(path.concat("transitStops"), "mismatched_sequence", "Route Pattern transitStops must preserve every ordered transit occurrence."));
   }
-  const geometry = validateGeometry(value.geometry, path.concat("geometry"), issues);
-  if (!geometry || geometry.type !== "MultiPolygon") {
-    issues.push(issue(path.concat("geometry"), "invalid_value", "Corridor geometry must be a non-empty MultiPolygon."));
+  if (expectedLines.length !== lines.length || expectedLines.some((line, index) => !isRecord(line) || !isRecord(lines[index]) || line.identity !== lines[index].identity || line.type !== lines[index].type)) {
+    issues.push(issue(path.concat("lines"), "mismatched_sequence", "Route Pattern lines must preserve the ordered transit-part sequence."));
   }
 }
 
-const MAX_ROUTE_CANDIDATES = 10;
-
-function isRouteCandidateCorridor(value: unknown): boolean {
-  return isRecord(value) &&
-    isRecord(value.properties) &&
-    value.properties.kind === "route-candidate-search-area";
-}
-
-function validateGeometry(
-  value: unknown,
-  path: Array<string | number>,
-  issues: ResponseValidationIssue[],
-): GeoJsonGeometry | null {
-  if (!isRecord(value) || (value.type !== "Polygon" && value.type !== "MultiPolygon")) {
-    issues.push(issue(path, "invalid_geometry", "Geometry must be Polygon or MultiPolygon."));
-    return null;
+function validateSourceQueries(value: unknown, snapshot: unknown, path: Array<string | number>, issues: ResponseValidationIssue[]): void {
+  const anchors = ["de:09162:6", "de:09162:50", "de:09162:70", "de:09162:1170", "de:09162:190", "de:09162:350"] as const;
+  const participants = isRecord(snapshot) && Array.isArray(snapshot.participants) ? snapshot.participants : [];
+  const participantIds = participants.flatMap((participant) => isRecord(participant) && typeof participant.id === "string" ? [participant.id] : []);
+  const arrivalAt = isRecord(snapshot) && typeof snapshot.arrivalAt === "string" ? snapshot.arrivalAt : null;
+  if (!Array.isArray(value) || value.length !== 14) {
+    issues.push(issue(path, "invalid_length", "sourceQueries must contain exactly fourteen direct and anchor queries."));
+    return;
   }
-  const polygons = value.type === "Polygon" ? [value.coordinates] : value.coordinates;
-  if (!Array.isArray(polygons) || polygons.length === 0 || polygons.length > MAX_CORRIDOR_POLYGONS) {
-    issues.push(issue(path.concat("coordinates"), "invalid_length", "Geometry has an invalid polygon count."));
-    return null;
-  }
-  let positionCount = 0;
-  polygons.forEach((polygon, polygonIndex) => {
-    if (!Array.isArray(polygon) || polygon.length === 0) {
-      issues.push(issue(path.concat("coordinates", polygonIndex), "invalid_geometry", "Polygon must contain rings."));
+  const expected = [
+    { direction: "participant-1-to-participant-2", origin: participantIds[0], destination: participantIds[1] },
+    { direction: "participant-2-to-participant-1", origin: participantIds[1], destination: participantIds[0] },
+  ].flatMap(({ direction, origin, destination }) => [
+    { direction, origin, destination, searchKind: "direct", anchor: null },
+    ...anchors.map((anchor) => ({ direction, origin, destination, searchKind: "anchor", anchor })),
+  ]);
+  const seen = new Set<string>();
+  value.forEach((query, index) => {
+    const queryPath = path.concat(index);
+    if (!isRecord(query)) {
+      issues.push(issue(queryPath, "invalid_type", "Source query provenance must be an object."));
       return;
     }
-    polygon.forEach((ring, ringIndex) => {
-      if (!Array.isArray(ring) || ring.length < 4 || !closedRing(ring)) {
-        issues.push(issue(path.concat("coordinates", polygonIndex, ringIndex), "invalid_ring", "Rings must be closed and contain at least four positions."));
-        return;
-      }
-      positionCount += ring.length;
-      if (positionCount > MAX_CORRIDOR_POSITIONS) {
-        issues.push(issue(path.concat("coordinates"), "too_large", "Geometry contains too many positions."));
-      }
-      ring.forEach((position, positionIndex) => validatePosition(position, path.concat("coordinates", polygonIndex, ringIndex, positionIndex), issues));
-      if (ringArea(ring) <= 1e-12) {
-        issues.push(issue(path.concat("coordinates", polygonIndex, ringIndex), "degenerate_ring", "Ring must have non-zero area."));
-      }
-    });
+    requireKeys(query, ["direction", "searchKind", "originParticipantId", "destinationParticipantId", "anchorStationGlobalId", "viaDwellTimeInMinutes", "arrivalAt", "journeyCount", "source"], queryPath, issues);
+    if (query.direction !== "participant-1-to-participant-2" && query.direction !== "participant-2-to-participant-1") issues.push(issue(queryPath.concat("direction"), "invalid_value", "Unknown source query direction."));
+    if (query.searchKind !== "direct" && query.searchKind !== "anchor") issues.push(issue(queryPath.concat("searchKind"), "invalid_value", "Unknown source query kind."));
+    validateString(query.originParticipantId, queryPath.concat("originParticipantId"), issues, 1);
+    validateString(query.destinationParticipantId, queryPath.concat("destinationParticipantId"), issues, 1);
+    validateIsoInstant(query.arrivalAt, queryPath.concat("arrivalAt"), issues);
+    validateFiniteInteger(query.journeyCount, queryPath.concat("journeyCount"), issues, 0);
+    validateString(query.source, queryPath.concat("source"), issues, 1);
+    if (query.anchorStationGlobalId !== null) validateString(query.anchorStationGlobalId, queryPath.concat("anchorStationGlobalId"), issues, 1);
+    if (query.viaDwellTimeInMinutes !== null && query.viaDwellTimeInMinutes !== 10) issues.push(issue(queryPath.concat("viaDwellTimeInMinutes"), "invalid_value", "Anchor source queries must use a ten-minute dwell."));
+    if (query.searchKind === "direct" && (query.anchorStationGlobalId !== null || query.viaDwellTimeInMinutes !== null)) issues.push(issue(queryPath, "invalid_value", "Direct source queries must not contain anchor settings."));
+    if (query.searchKind === "anchor" && (typeof query.anchorStationGlobalId !== "string" || !anchors.includes(query.anchorStationGlobalId as typeof anchors[number]) || query.viaDwellTimeInMinutes !== 10)) issues.push(issue(queryPath, "invalid_value", "Anchor source queries must name one exact anchor and use a ten-minute dwell."));
+    if (query.arrivalAt !== arrivalAt) issues.push(issue(queryPath.concat("arrivalAt"), "mismatched_snapshot", "Source query arrivalAt must match the request snapshot."));
+    const key = `${query.direction}|${query.searchKind}|${query.anchorStationGlobalId ?? "direct"}|${query.originParticipantId}|${query.destinationParticipantId}`;
+    if (seen.has(key)) issues.push(issue(queryPath, "duplicate", "Source query provenance entries must be unique."));
+    seen.add(key);
   });
-  return value as unknown as GeoJsonGeometry;
+  const expectedKeys = expected.map((query) => `${query.direction}|${query.searchKind}|${query.anchor ?? "direct"}|${query.origin}|${query.destination}`);
+  expectedKeys.forEach((key, index) => {
+    if (!seen.has(key)) issues.push(issue(path, "missing_query", `Missing expected source query ${index}.`));
+  });
 }
 
-function validatePosition(value: unknown, path: Array<string | number>, issues: ResponseValidationIssue[]): void {
-  if (!Array.isArray(value) || value.length !== 2 || !Number.isFinite(value[0]) || !Number.isFinite(value[1]) || value[0] < -180 || value[0] > 180 || value[1] < -90 || value[1] > 90) {
-    issues.push(issue(path, "invalid_coordinate", "GeoJSON positions must be finite [longitude, latitude] WGS84 coordinates."));
+function validateFairLocations(value: unknown, snapshot: unknown, patterns: unknown, path: Array<string | number>, issues: ResponseValidationIssue[]): void {
+  if (!Array.isArray(value) || value.length === 0) {
+    issues.push(issue(path, "invalid_length", "fairLocations must contain at least one location."));
+    return;
   }
+  const ids = new Set<string>();
+  const participantIds = isRecord(snapshot) && Array.isArray(snapshot.participants)
+    ? new Set(snapshot.participants.flatMap((participant) => isRecord(participant) && typeof participant.id === "string" ? [participant.id] : []))
+    : new Set<string>();
+  const snapshotArrival = isRecord(snapshot) && typeof snapshot.arrivalAt === "string" ? Date.parse(snapshot.arrivalAt) : Number.NaN;
+  const snapshotSelected = isRecord(snapshot) ? snapshot.selectedTolerancePercent : undefined;
+  const snapshotEffective = isRecord(snapshot) ? snapshot.effectiveTolerancePercent : undefined;
+  const patternIds = Array.isArray(patterns) ? new Set(patterns.flatMap((pattern) => isRecord(pattern) && typeof pattern.id === "string" ? [pattern.id] : [])) : new Set<string>();
+  value.forEach((location, index) => {
+    const locationPath = path.concat(index);
+    if (!isRecord(location)) {
+      issues.push(issue(locationPath, "invalid_type", "Fair Location must be an object."));
+      return;
+    }
+    requireKeys(location, ["id", "label", "kind", "physicalIdentity", "coordinate", "journeys", "differenceMilliseconds", "selectedTolerancePercent", "effectiveTolerancePercent", "sourceRoutePatternIds"], locationPath, issues);
+    validateString(location.id, locationPath.concat("id"), issues, 1);
+    validateString(location.label, locationPath.concat("label"), issues, 1);
+    validateString(location.physicalIdentity, locationPath.concat("physicalIdentity"), issues, 1);
+    if (typeof location.id === "string") {
+      if (ids.has(location.id)) issues.push(issue(locationPath.concat("id"), "duplicate", "Fair Location ids must be unique."));
+      ids.add(location.id);
+    }
+    if (location.kind !== "station" && location.kind !== "walking-endpoint" && location.kind !== "origin") issues.push(issue(locationPath.concat("kind"), "invalid_value", "Unknown Fair Location kind."));
+    validateCoordinate(location.coordinate, locationPath.concat("coordinate"), issues);
+    if (isCoordinateRecord(location.coordinate) && !isWithinOfficialMunichBoundary(location.coordinate)) issues.push(issue(locationPath.concat("coordinate"), "outside_munich", "Fair Locations must be inside Munich."));
+    validateSelectedTolerance(location.selectedTolerancePercent, locationPath.concat("selectedTolerancePercent"), issues);
+    validateEffectiveTolerance(location.effectiveTolerancePercent, location.selectedTolerancePercent, locationPath.concat("effectiveTolerancePercent"), issues);
+    if (location.selectedTolerancePercent !== snapshotSelected) issues.push(issue(locationPath.concat("selectedTolerancePercent"), "mismatched_snapshot", "Fair Location selected tolerance must equal the request snapshot."));
+    if (location.effectiveTolerancePercent !== snapshotEffective) issues.push(issue(locationPath.concat("effectiveTolerancePercent"), "mismatched_snapshot", "Fair Location effective tolerance must equal the request snapshot."));
+    if (location.physicalIdentity !== location.id) issues.push(issue(locationPath.concat("physicalIdentity"), "mismatched_identity", "Fair Location id and physicalIdentity must agree."));
+    validateFiniteInteger(location.differenceMilliseconds, locationPath.concat("differenceMilliseconds"), issues, 0);
+    if (!Array.isArray(location.journeys) || location.journeys.length !== 2) {
+      issues.push(issue(locationPath.concat("journeys"), "invalid_length", "A Fair Location must contain two planned participant journeys."));
+    } else {
+      const journeyIds = new Set<string>();
+      location.journeys.forEach((journey, journeyIndex) => {
+        const journeyPath = locationPath.concat("journeys", journeyIndex);
+        if (!isRecord(journey)) {
+          issues.push(issue(journeyPath, "invalid_type", "Planned participant journey must be an object."));
+          return;
+        }
+        requireKeys(journey, ["participantId", "mode", "plannedDepartureAt", "plannedArrivalAt", "plannedDurationMilliseconds", "source"], journeyPath, issues);
+        validateString(journey.participantId, journeyPath.concat("participantId"), issues, 1);
+        if (typeof journey.participantId === "string") {
+          if (journeyIds.has(journey.participantId)) issues.push(issue(journeyPath.concat("participantId"), "duplicate", "Journey participant ids must be unique."));
+          journeyIds.add(journey.participantId);
+          if (!participantIds.has(journey.participantId)) issues.push(issue(journeyPath.concat("participantId"), "unknown_participant", "Journey references an unknown participant."));
+        }
+        if (journey.mode !== "transit") issues.push(issue(journeyPath.concat("mode"), "invalid_value", "Only transit journeys are supported."));
+        validateIsoInstant(journey.plannedDepartureAt, journeyPath.concat("plannedDepartureAt"), issues);
+        validateIsoInstant(journey.plannedArrivalAt, journeyPath.concat("plannedArrivalAt"), issues);
+        validateFiniteInteger(journey.plannedDurationMilliseconds, journeyPath.concat("plannedDurationMilliseconds"), issues, 0);
+        if (typeof journey.plannedDurationMilliseconds === "number" && journey.plannedDurationMilliseconds > 24 * 60 * 60 * 1_000) issues.push(issue(journeyPath.concat("plannedDurationMilliseconds"), "out_of_range", "Planned journey duration must not exceed 24 hours."));
+        validateString(journey.source, journeyPath.concat("source"), issues, 1);
+        if (typeof journey.plannedArrivalAt === "string" && Number.isFinite(snapshotArrival) && Date.parse(journey.plannedArrivalAt) > snapshotArrival) issues.push(issue(journeyPath.concat("plannedArrivalAt"), "after_arrival_at", "Planned journey must arrive no later than arrivalAt."));
+        if (typeof journey.plannedDepartureAt === "string" && typeof journey.plannedArrivalAt === "string" && typeof journey.plannedDurationMilliseconds === "number" && Date.parse(journey.plannedArrivalAt) - Date.parse(journey.plannedDepartureAt) !== journey.plannedDurationMilliseconds) issues.push(issue(journeyPath, "incoherent_duration", "Planned duration must equal planned arrival minus planned departure."));
+      });
+      if (journeyIds.size !== 2) issues.push(issue(locationPath.concat("journeys"), "invalid_participants", "Journeys must cover both participants."));
+      if (Array.isArray(location.journeys) && location.journeys.every(isJourneyShape)) {
+        const difference = Math.abs(location.journeys[0].plannedDurationMilliseconds - location.journeys[1].plannedDurationMilliseconds);
+        if (difference !== location.differenceMilliseconds) issues.push(issue(locationPath.concat("differenceMilliseconds"), "incoherent_difference", "Difference must equal the absolute planned duration difference."));
+        if (typeof location.effectiveTolerancePercent === "number" && !isFairPairInteger(location.journeys[0].plannedDurationMilliseconds, location.journeys[1].plannedDurationMilliseconds, location.effectiveTolerancePercent)) issues.push(issue(locationPath, "not_fair", "Fair Location journeys do not satisfy the exact tolerance rule."));
+      }
+    }
+    if (!Array.isArray(location.sourceRoutePatternIds) || location.sourceRoutePatternIds.length === 0) issues.push(issue(locationPath.concat("sourceRoutePatternIds"), "invalid_length", "Every Fair Location must retain source Route Pattern ids."));
+    else {
+      const sourceIds = new Set<string>();
+      location.sourceRoutePatternIds.forEach((id, idIndex) => {
+      validateString(id, locationPath.concat("sourceRoutePatternIds", idIndex), issues, 1);
+        if (typeof id === "string") {
+          if (sourceIds.has(id)) issues.push(issue(locationPath.concat("sourceRoutePatternIds", idIndex), "duplicate", "Fair Location source Route Pattern ids must be unique."));
+          sourceIds.add(id);
+          if (!patternIds.has(id)) issues.push(issue(locationPath.concat("sourceRoutePatternIds", idIndex), "unknown_pattern", "Fair Location references an unknown Route Pattern."));
+        }
+      });
+      const coordinate = isCoordinateRecord(location.coordinate) ? location.coordinate : null;
+      if (coordinate && Array.isArray(patterns) && !location.sourceRoutePatternIds.some((id) => typeof id === "string" && patterns.some((pattern) => isRecord(pattern) && pattern.id === id && patternSupportsCoordinate(pattern, coordinate)))) {
+        issues.push(issue(locationPath.concat("sourceRoutePatternIds"), "unsupported_location", "Fair Location coordinate is not present in its source Route Patterns."));
+      }
+    }
+  });
 }
 
-function validateTravelTimeRange(value: unknown, path: Array<string | number>, issues: ResponseValidationIssue[]): void {
+function isFairPairInteger(first: number, second: number, tolerancePercent: number): boolean {
+  return 100 * Math.abs(first - second) <= tolerancePercent * (first + second);
+}
+
+function patternSupportsCoordinate(pattern: Record<string, unknown>, coordinate: { latitude: number; longitude: number }): boolean {
+  const endpoints: unknown[] = [
+    ...(Array.isArray(pattern.transitStops) ? pattern.transitStops : []),
+    ...(Array.isArray(pattern.parts) ? pattern.parts.flatMap((part) => isRecord(part) ? [part.from, ...(Array.isArray(part.intermediateStops) ? part.intermediateStops : []), part.to] : []) : []),
+  ];
+  return endpoints.some((endpoint) => isRecord(endpoint) && isCoordinateRecord(endpoint.coordinate) && haversineDistanceKm(endpoint.coordinate, coordinate) * 1_000 <= 50);
+}
+
+function validateJourneyPart(value: unknown, path: Array<string | number>, issues: ResponseValidationIssue[]): void {
   if (!isRecord(value)) {
-    issues.push(issue(path, "invalid_type", "travelTimeRange must be an object."));
+    issues.push(issue(path, "invalid_type", "Journey part must be an object."));
     return;
   }
-  requireKeys(value, ["targetMinutes", "lowerMinutes", "upperMinutes", "observedMinMinutes", "observedMaxMinutes", "tolerancePercent", "isComparable"], path, issues);
-  ["targetMinutes", "lowerMinutes", "upperMinutes", "observedMinMinutes", "observedMaxMinutes"].forEach((key) => validateFiniteBoundedNumber(value[key], path.concat(key), issues, 0, 24 * 60));
-  validateTolerance(value.tolerancePercent, path.concat("tolerancePercent"), issues);
-  if (typeof value.isComparable !== "boolean") issues.push(issue(path.concat("isComparable"), "invalid_type", "isComparable must be boolean."));
+  requireKeys(value, ["kind", "from", "to", "intermediateStops", "line", "plannedDepartureAt", "plannedArrivalAt"], path, issues);
+  if (value.kind !== "transit" && value.kind !== "walking") issues.push(issue(path.concat("kind"), "invalid_value", "Unknown Journey part kind."));
+  validateEndpoint(value.from, path.concat("from"), issues, true);
+  validateEndpoint(value.to, path.concat("to"), issues, true);
+  if (!Array.isArray(value.intermediateStops)) issues.push(issue(path.concat("intermediateStops"), "invalid_type", "intermediateStops must be an array."));
+  else value.intermediateStops.forEach((stop, index) => validateEndpoint(stop, path.concat("intermediateStops", index), issues, true));
+  if (value.line === null) {
+    if (value.kind === "transit") issues.push(issue(path.concat("line"), "invalid_value", "Transit parts must contain a line."));
+  } else validateLine(value.line, path.concat("line"), issues);
+  if (value.kind === "walking" && value.line !== null) issues.push(issue(path.concat("line"), "invalid_value", "Walking parts must not contain a transit line."));
+  validateIsoInstant(value.plannedDepartureAt, path.concat("plannedDepartureAt"), issues);
+  validateIsoInstant(value.plannedArrivalAt, path.concat("plannedArrivalAt"), issues);
 }
 
-function validateTravelTimes(
-  value: unknown,
-  snapshot: unknown,
-  issues: ResponseValidationIssue[],
-  basePath: Array<string | number> = ["travelTimes"],
-): void {
-  if (!Array.isArray(value) || value.length < 2 || value.length > 4) {
-    issues.push(issue(basePath, "invalid_length", "travelTimes must contain 2 to 4 entries."));
+function validateEndpoint(value: unknown, path: Array<string | number>, issues: ResponseValidationIssue[], requireStationOrNull: boolean): void {
+  if (!isRecord(value)) {
+    issues.push(issue(path, "invalid_type", "Journey endpoint must be an object."));
     return;
   }
-  const ids = new Set<string>();
-  value.forEach((item, index) => {
-    const path = [...basePath, index];
-    if (!isRecord(item)) {
-      issues.push(issue(path, "invalid_type", "Travel time must be an object."));
-      return;
-    }
-    requireKeys(item, ["participantId", "mode", "minutes", "source"], path, issues);
-    validateString(item.participantId, path.concat("participantId"), issues, 1);
-    if (typeof item.participantId === "string") {
-      if (ids.has(item.participantId)) issues.push(issue(path.concat("participantId"), "duplicate", "Travel-time participant ids must be unique."));
-      ids.add(item.participantId);
-    }
-    if (!isTravelMode(item.mode)) issues.push(issue(path.concat("mode"), "invalid_value", "Unknown travel mode."));
-    validateFiniteBoundedNumber(item.minutes, path.concat("minutes"), issues, 0, 24 * 60);
-    validateString(item.source, path.concat("source"), issues, 1);
-  });
-  if (isRecord(snapshot) && Array.isArray(snapshot.participants)) {
-    const expected = new Set(snapshot.participants.flatMap((participant) => isRecord(participant) && typeof participant.id === "string" ? [participant.id] : []));
-    const expectedModes = new Map(snapshot.participants.flatMap((participant) => isRecord(participant) && typeof participant.id === "string" && isTravelMode(participant.mode) ? [[participant.id, participant.mode] as const] : []));
-    if (value.length !== expected.size) issues.push(issue(basePath, "invalid_length", "Travel times must cover every snapshot participant exactly once."));
-    ids.forEach((id) => {
-      if (!expected.has(id)) issues.push(issue(basePath, "unknown_participant", "Travel time references an unknown participant."));
-    });
-    value.forEach((item, index) => {
-      if (isRecord(item) && typeof item.participantId === "string" && expectedModes.get(item.participantId) !== item.mode) {
-        issues.push(issue([...basePath, index, "mode"], "mismatched_mode", "Travel time mode does not match the request snapshot."));
-      }
-    });
-  }
+  requireKeys(value, ["stationGlobalId", "coordinate"], path, issues, ["label"]);
+  if (value.label !== undefined) validateString(value.label, path.concat("label"), issues, 1);
+  if (value.stationGlobalId !== null) validateString(value.stationGlobalId, path.concat("stationGlobalId"), issues, 1);
+  if (requireStationOrNull && value.stationGlobalId !== null && typeof value.stationGlobalId !== "string") issues.push(issue(path.concat("stationGlobalId"), "invalid_type", "stationGlobalId must be a string or null."));
+  validateCoordinate(value.coordinate, path.concat("coordinate"), issues);
 }
 
-function validateCandidates(
-  value: unknown,
-  snapshot: unknown,
-  issues: ResponseValidationIssue[],
-): void {
-  const path: Array<string | number> = ["candidates"];
-  if (!Array.isArray(value) || value.length < 1 || value.length > MAX_ROUTE_CANDIDATES) {
-    issues.push(issue(path, "invalid_length", "candidates must contain 1 to 10 verified entries."));
+function validateLine(value: unknown, path: Array<string | number>, issues: ResponseValidationIssue[]): void {
+  if (!isRecord(value)) {
+    issues.push(issue(path, "invalid_type", "Transit line must be an object."));
     return;
   }
-  const ids = new Set<string>();
-  value.forEach((candidate, index) => {
-    const candidatePath = [...path, index];
-    if (!isRecord(candidate)) {
-      issues.push(issue(candidatePath, "invalid_type", "Candidate must be an object."));
-      return;
-    }
-    requireKeys(
-      candidate,
-      [
-        "id",
-        "kind",
-        "label",
-        "coordinate",
-        "travelTimeRange",
-        "travelTimes",
-        "normalizedSpread",
-        "maxTravelMinutes",
-      ],
-      candidatePath,
-      issues,
-    );
-    validateString(candidate.id, candidatePath.concat("id"), issues, 1);
-    if (typeof candidate.id === "string") {
-      if (ids.has(candidate.id)) issues.push(issue(candidatePath.concat("id"), "duplicate", "Candidate ids must be unique."));
-      ids.add(candidate.id);
-    }
-    if (candidate.kind !== "route-part-endpoint" && candidate.kind !== "fixed-hub") {
-      issues.push(issue(candidatePath.concat("kind"), "invalid_value", "Unknown candidate kind."));
-    }
-    validateString(candidate.label, candidatePath.concat("label"), issues, 1);
-    validateCoordinate(candidate.coordinate, candidatePath.concat("coordinate"), issues);
-    validateTravelTimeRange(candidate.travelTimeRange, candidatePath.concat("travelTimeRange"), issues);
-    if (isRecord(candidate.travelTimeRange) && candidate.travelTimeRange.isComparable !== true) {
-      issues.push(issue(candidatePath.concat("travelTimeRange", "isComparable"), "invalid_value", "Verified candidates must be comparable."));
-    }
-    validateTravelTimes(candidate.travelTimes, snapshot, issues, candidatePath.concat("travelTimes"));
-    validateFiniteBoundedNumber(candidate.normalizedSpread, candidatePath.concat("normalizedSpread"), issues, 0, 24 * 60);
-    validateFiniteBoundedNumber(candidate.maxTravelMinutes, candidatePath.concat("maxTravelMinutes"), issues, 0, 24 * 60);
-  });
+  requireKeys(value, ["identity", "type"], path, issues);
+  validateString(value.identity, path.concat("identity"), issues, 1);
+  validateString(value.type, path.concat("type"), issues, 1);
 }
 
-function validateRouteCandidateResponseCoherence(
-  value: Record<string, unknown>,
-  issues: ResponseValidationIssue[],
-): void {
-  if (!Array.isArray(value.candidates) || value.candidates.length === 0) return;
-
-  if (value.candidates.every(isRankableCandidate)) {
-    for (let index = 1; index < value.candidates.length; index += 1) {
-      const previous = value.candidates[index - 1];
-      const current = value.candidates[index];
-      if (compareCandidateRanking(previous, current) > 0) {
-        issues.push(
-          issue(
-            ["candidates", index],
-            "invalid_order",
-            "Candidates must be sorted by normalized spread, max travel time, then id.",
-          ),
-        );
-      }
-    }
-  }
-
-  const first = value.candidates[0];
-  if (!isRecord(first)) return;
-
-  if (
-    isCoordinateValue(first.coordinate) &&
-    isCoordinateValue(value.meetingPoint) &&
-    !sameCoordinate(first.coordinate, value.meetingPoint)
-  ) {
-    issues.push(
-      issue(
-        ["meetingPoint"],
-        "mismatched_selection",
-        "meetingPoint must match the first verified route candidate.",
-      ),
-    );
-  }
-  if (
-    Array.isArray(first.travelTimes) &&
-    Array.isArray(value.travelTimes) &&
-    !sameTravelTimes(first.travelTimes, value.travelTimes)
-  ) {
-    issues.push(
-      issue(
-        ["travelTimes"],
-        "mismatched_selection",
-        "travelTimes must match the first verified route candidate.",
-      ),
-    );
-  }
-  if (
-    isRecord(first.travelTimeRange) &&
-    isRecord(value.travelTimeRange) &&
-    !sameTravelTimeRange(first.travelTimeRange, value.travelTimeRange)
-  ) {
-    issues.push(
-      issue(
-        ["travelTimeRange"],
-        "mismatched_selection",
-        "travelTimeRange must match the first verified route candidate.",
-      ),
-    );
-  }
-}
-
-function isRankableCandidate(value: unknown): value is Record<string, unknown> {
-  return isRecord(value) &&
-    typeof value.id === "string" &&
-    typeof value.normalizedSpread === "number" &&
-    Number.isFinite(value.normalizedSpread) &&
-    typeof value.maxTravelMinutes === "number" &&
-    Number.isFinite(value.maxTravelMinutes);
-}
-
-function compareCandidateRanking(
-  left: Record<string, unknown>,
-  right: Record<string, unknown>,
-): number {
-  return (left.normalizedSpread as number) - (right.normalizedSpread as number) ||
-    (left.maxTravelMinutes as number) - (right.maxTravelMinutes as number) ||
-    (left.id as string).localeCompare(right.id as string);
-}
-
-function isCoordinateValue(value: unknown): value is Record<string, unknown> {
-  return isRecord(value) &&
-    typeof value.latitude === "number" &&
-    Number.isFinite(value.latitude) &&
-    typeof value.longitude === "number" &&
-    Number.isFinite(value.longitude);
-}
-
-function sameCoordinate(
-  left: Record<string, unknown>,
-  right: Record<string, unknown>,
-): boolean {
-  return left.latitude === right.latitude && left.longitude === right.longitude;
-}
-
-function sameTravelTimes(left: unknown[], right: unknown[]): boolean {
-  if (left.length !== right.length) return false;
-  return left.every((item, index) => {
-    const other = right[index];
-    return isRecord(item) && isRecord(other) &&
-      item.participantId === other.participantId &&
-      item.mode === other.mode &&
-      item.minutes === other.minutes &&
-      item.source === other.source;
-  });
-}
-
-function sameTravelTimeRange(
-  left: Record<string, unknown>,
-  right: Record<string, unknown>,
-): boolean {
-  return left.targetMinutes === right.targetMinutes &&
-    left.lowerMinutes === right.lowerMinutes &&
-    left.upperMinutes === right.upperMinutes &&
-    left.observedMinMinutes === right.observedMinMinutes &&
-    left.observedMaxMinutes === right.observedMaxMinutes &&
-    left.tolerancePercent === right.tolerancePercent &&
-    left.isComparable === right.isComparable;
-}
-
-function validatePois(value: unknown, path: Array<string | number>, issues: ResponseValidationIssue[]): void {
-  if (!Array.isArray(value) || value.length > MAX_POIS) {
-    issues.push(issue(path, "invalid_length", "POIs must be an array of at most 100 entries."));
+function validateProvenance(value: unknown, path: Array<string | number>, issues: ResponseValidationIssue[]): void {
+  if (!isRecord(value)) {
+    issues.push(issue(path, "invalid_type", "Route Pattern provenance must be an object."));
     return;
   }
-  const ids = new Set<string>();
-  value.forEach((item, index) => {
-    const itemPath = path.concat(index);
-    if (!isRecord(item)) {
-      issues.push(issue(itemPath, "invalid_type", "POI must be an object."));
-      return;
-    }
-    requireKeys(item, ["id", "name", "category", "coordinates", "source"], itemPath, issues, ["address"]);
-    validateString(item.id, itemPath.concat("id"), issues, 1);
-    if (typeof item.id === "string") {
-      if (ids.has(item.id)) issues.push(issue(itemPath.concat("id"), "duplicate", "POI ids must be unique."));
-      ids.add(item.id);
-    }
-    validateString(item.name, itemPath.concat("name"), issues, 1);
-    if (item.category !== "food" && item.category !== "drink") issues.push(issue(itemPath.concat("category"), "invalid_value", "POI category must be food or drink."));
-    validatePosition(item.coordinates, itemPath.concat("coordinates"), issues);
-    validateString(item.source, itemPath.concat("source"), issues, 1);
-    if (item.address !== undefined) validateString(item.address, itemPath.concat("address"), issues, 0);
-  });
+  requireKeys(value, ["direction", "searchKind", "anchorStationGlobalId"], path, issues);
+  if (value.direction !== "participant-1-to-participant-2" && value.direction !== "participant-2-to-participant-1") issues.push(issue(path.concat("direction"), "invalid_value", "Unknown Route Pattern direction."));
+  if (value.searchKind !== "direct" && value.searchKind !== "anchor") issues.push(issue(path.concat("searchKind"), "invalid_value", "Unknown Route Pattern search kind."));
+  if (value.anchorStationGlobalId !== null) validateString(value.anchorStationGlobalId, path.concat("anchorStationGlobalId"), issues, 1);
+  if (value.searchKind === "direct" && value.anchorStationGlobalId !== null) issues.push(issue(path.concat("anchorStationGlobalId"), "invalid_value", "Direct provenance cannot contain an anchor station."));
+  if (value.searchKind === "anchor" && value.anchorStationGlobalId === null) issues.push(issue(path.concat("anchorStationGlobalId"), "invalid_value", "Anchor provenance must contain an anchor station."));
 }
 
-function validateMetadata(
-  value: unknown,
-  path: Array<string | number>,
-  issues: ResponseValidationIssue[],
-  routeCandidateSearch = false,
-): void {
+function validateMetadata(value: unknown, path: Array<string | number>, issues: ResponseValidationIssue[]): void {
   if (!isRecord(value)) {
     issues.push(issue(path, "invalid_type", "metadata must be an object."));
     return;
   }
-  requireKeys(value, ["source", "approximation", "providers", "boundary", "provenance"], path, issues);
-  if (!isRecord(value.source)) issues.push(issue(path.concat("source"), "invalid_type", "metadata source is required."));
-  else {
-    requireKeys(value.source, ["deployment", "dataKind", "liveData", "label"], path.concat("source"), issues);
-    validateString(value.source.deployment, path.concat("source", "deployment"), issues, 1);
-    validateString(value.source.dataKind, path.concat("source", "dataKind"), issues, 1);
-    if (!["fixture", "self-hosted", "managed", "unknown"].includes(String(value.source.deployment))) issues.push(issue(path.concat("source", "deployment"), "invalid_value", "Unknown provider deployment."));
-    if (!["demo-static", "scheduled", "live", "unknown"].includes(String(value.source.dataKind))) issues.push(issue(path.concat("source", "dataKind"), "invalid_value", "Unknown provider data kind."));
-    if (typeof value.source.liveData !== "boolean") issues.push(issue(path.concat("source", "liveData"), "invalid_type", "liveData must be boolean."));
-    validateString(value.source.label, path.concat("source", "label"), issues, 1);
-  }
-  validateString(value.approximation, path.concat("approximation"), issues, 1);
-  if (routeCandidateSearch) {
-    if (
-      !String(value.approximation).includes("Route-candidate approximation") ||
-      !String(value.approximation).includes("not independently routed")
-    ) {
-      issues.push(issue(path.concat("approximation"), "missing_caveat", "Metadata must describe the limited route-candidate search area."));
-    }
-  } else if (!String(value.approximation).includes("Sample-grid approximation")) {
-    issues.push(issue(path.concat("approximation"), "missing_caveat", "Metadata must describe sample-grid approximation."));
-  }
-  if (!isRecord(value.providers)) issues.push(issue(path.concat("providers"), "invalid_type", "Provider descriptors are required."));
-  else {
-    validateProviderDescriptor(value.providers.geocoding, "geocoding", path.concat("providers", "geocoding"), issues);
-    validateProviderDescriptor(value.providers.routing, "routing", path.concat("providers", "routing"), issues);
-    validateProviderDescriptor(value.providers.poi, "poi", path.concat("providers", "poi"), issues);
-  }
+  requireKeys(value, ["routing", "boundary", "provenance"], path, issues);
+  validateDescriptor(value.routing, path.concat("routing"), issues);
   validateBoundary(value.boundary, path.concat("boundary"), issues);
-  if (!isRecord(value.provenance)) issues.push(issue(path.concat("provenance"), "invalid_type", "Attribution provenance is required."));
+  if (!isRecord(value.provenance)) issues.push(issue(path.concat("provenance"), "invalid_type", "metadata provenance is required."));
   else {
+    requireKeys(value.provenance, ["routing", "boundary"], path.concat("provenance"), issues);
+    validateProvenanceMetadata(value.provenance.routing, path.concat("provenance", "routing"), issues);
     validateBoundary(value.provenance.boundary, path.concat("provenance", "boundary"), issues);
-    validateProviderProvenance(value.provenance.routing, "routing", path.concat("provenance", "routing"), issues);
-    validateProviderProvenance(value.provenance.geocoding, "geocoding", path.concat("provenance", "geocoding"), issues);
-    validateProviderProvenance(value.provenance.poi, "poi", path.concat("provenance", "poi"), issues);
-    validateMapProvenance(value.provenance.map, path.concat("provenance", "map"), issues);
+    if (isRecord(value.routing) && !deepEqualJson(value.routing.provenance, value.provenance.routing)) issues.push(issue(path.concat("provenance", "routing"), "mismatched_duplicate", "Routing provenance duplicates must be identical."));
+    if (!deepEqualJson(value.boundary, value.provenance.boundary)) issues.push(issue(path.concat("provenance", "boundary"), "mismatched_duplicate", "Boundary provenance duplicates must be identical."));
   }
 }
 
-function validateProviderDescriptor(value: unknown, role: "geocoding" | "routing" | "poi", path: Array<string | number>, issues: ResponseValidationIssue[]): void {
+function validateDescriptor(value: unknown, path: Array<string | number>, issues: ResponseValidationIssue[]): void {
   if (!isRecord(value)) {
-    issues.push(issue(path, "invalid_type", "Provider descriptor is required."));
+    issues.push(issue(path, "invalid_type", "routing provider descriptor is required."));
     return;
   }
   requireKeys(value, ["name", "deployment", "dataKind", "liveData", "asOf", "notes", "provenance"], path, issues);
   validateString(value.name, path.concat("name"), issues, 1);
   validateString(value.deployment, path.concat("deployment"), issues, 1);
+  validateProviderDeployment(value.deployment, path.concat("deployment"), issues);
   validateString(value.dataKind, path.concat("dataKind"), issues, 1);
-  if (!["fixture", "self-hosted", "managed", "unknown"].includes(String(value.deployment))) issues.push(issue(path.concat("deployment"), "invalid_value", "Unknown provider deployment."));
-  if (!["demo-static", "scheduled", "live", "unknown"].includes(String(value.dataKind))) issues.push(issue(path.concat("dataKind"), "invalid_value", "Unknown provider data kind."));
-  if (value.deployment !== "fixture" && value.dataKind === "demo-static") issues.push(issue(path, "contradictory_provenance", "Configured providers cannot report fixture/static data."));
+  validateRoutingDataKind(value.dataKind, value.deployment, value.liveData, path, issues);
   if (typeof value.liveData !== "boolean") issues.push(issue(path.concat("liveData"), "invalid_type", "liveData must be boolean."));
-  if (value.name === DIRECT_MVG_PROVIDER) {
-    if (value.deployment !== "unknown") {
-      issues.push(issue(path.concat("deployment"), "invalid_value", "Direct MVG routing must use unknown deployment."));
-    }
-    if (
-      !(
-        (value.dataKind === "scheduled" && value.liveData === false) ||
-        (value.dataKind === "live" && value.liveData === true)
-      )
-    ) {
-      issues.push(issue(path, "invalid_value", "Direct MVG routing dataKind/liveData must be scheduled/false or live/true."));
-    }
-  }
   validateString(value.asOf, path.concat("asOf"), issues, 1);
   validateString(value.notes, path.concat("notes"), issues, 1);
-  validateProviderProvenance(value.provenance, role, path.concat("provenance"), issues);
+  validateProvenanceMetadata(value.provenance, path.concat("provenance"), issues);
+  if (isRecord(value.provenance) && (value.provenance.deployment !== value.deployment || value.provenance.dataKind !== value.dataKind || value.provenance.liveData !== value.liveData)) {
+    issues.push(issue(path.concat("provenance"), "mismatched_metadata", "Routing descriptor and provenance must agree on deployment and data kind."));
+  }
 }
 
-function validateProviderProvenance(value: unknown, role: "geocoding" | "routing" | "poi", path: Array<string | number>, issues: ResponseValidationIssue[]): void {
+function validateProvenanceMetadata(value: unknown, path: Array<string | number>, issues: ResponseValidationIssue[]): void {
   if (!isRecord(value)) {
-    issues.push(issue(path, "invalid_type", "Provider provenance is required."));
+    issues.push(issue(path, "invalid_type", "routing provenance is required."));
     return;
   }
   requireKeys(value, ["role", "provider", "deployment", "dataKind", "liveData", "sourceUrl", "license", "attribution", "version", "retrievedAt", "notes", "feeds"], path, issues);
-  if (value.role !== role) issues.push(issue(path.concat("role"), "invalid_value", "Provider provenance role does not match."));
+  if (value.role !== "routing") issues.push(issue(path.concat("role"), "invalid_value", "routing provenance role must be routing."));
   validateString(value.provider, path.concat("provider"), issues, 1);
   validateString(value.deployment, path.concat("deployment"), issues, 1);
-  validateString(value.dataKind, path.concat("dataKind"), issues, 1);
-  if (value.deployment !== "fixture" && value.dataKind === "demo-static") issues.push(issue(path, "contradictory_provenance", "Configured providers cannot report fixture/static data."));
-  if (typeof value.liveData !== "boolean") issues.push(issue(path.concat("liveData"), "invalid_type", "liveData must be boolean."));
+  validateProviderDeployment(value.deployment, path.concat("deployment"), issues);
+  validateRoutingDataKind(value.dataKind, value.deployment, value.liveData, path, issues);
   validateHttpsOrNull(value.sourceUrl, path.concat("sourceUrl"), issues);
   validateLicenseOrNull(value.license, path.concat("license"), issues);
   validateString(value.attribution, path.concat("attribution"), issues, 1);
   validateString(value.version, path.concat("version"), issues, 1);
-  validateString(value.retrievedAt, path.concat("retrievedAt"), issues, 1);
+  if (value.dataKind === "demo-static" && value.retrievedAt === "fixture-static") validateString(value.retrievedAt, path.concat("retrievedAt"), issues, 1);
+  else validateIsoInstant(value.retrievedAt, path.concat("retrievedAt"), issues);
   validateString(value.notes, path.concat("notes"), issues, 1);
-  if (role === "routing" && value.provider === DIRECT_MVG_PROVIDER) {
-    if (value.deployment !== "unknown") {
-      issues.push(issue(path.concat("deployment"), "invalid_value", "Direct MVG routing must use unknown deployment provenance."));
-    }
-    if (
-      !(
-        (value.dataKind === "scheduled" && value.liveData === false) ||
-        (value.dataKind === "live" && value.liveData === true)
-      )
-    ) {
-      issues.push(issue(path, "invalid_value", "Direct MVG provenance dataKind/liveData must be scheduled/false or live/true."));
-    }
-    if (value.sourceUrl !== DIRECT_MVG_SOURCE_URL) {
-      issues.push(issue(path.concat("sourceUrl"), "invalid_value", "Direct MVG provenance must use the fixed BGW PT v3 source URL."));
-    }
-    if (value.license !== null) {
-      issues.push(issue(path.concat("license"), "invalid_value", "Direct MVG provenance must not claim an unverified licence."));
-    }
-    if (value.feeds !== null) {
-      issues.push(issue(path.concat("feeds"), "invalid_value", "Direct MVG routing does not claim MVG or MVV feed provenance."));
-    }
-    if (
-      !String(value.attribution).toLowerCase().includes("unofficial") ||
-      !String(value.notes).toLowerCase().includes("no sla") ||
-      !String(value.attribution).toLowerCase().includes("realtime is used when supplied") ||
-      !String(value.attribution).toLowerCase().includes("planned timestamps used") ||
-      !String(value.notes).toLowerCase().includes("realtime is used when supplied") ||
-      !String(value.notes).toLowerCase().includes("planned timestamps used") ||
-      !String(value.attribution).toLowerCase().includes("as the fallback") ||
-      !String(value.notes).toLowerCase().includes("as the fallback")
-    ) {
-      issues.push(issue(path, "incomplete_provenance", "Direct MVG provenance must disclose its unofficial, no-SLA, realtime-when-supplied, planned-time-fallback status."));
-    }
-    validateIsoInstant(value.retrievedAt, path.concat("retrievedAt"), issues);
-  } else if (role === "routing" && value.dataKind === "scheduled") validateFeeds(value.feeds, path.concat("feeds"), issues);
-  else if (value.feeds !== null) validateFeeds(value.feeds, path.concat("feeds"), issues);
-  else if (value.feeds !== null) issues.push(issue(path.concat("feeds"), "invalid_value", "feeds must be null or a valid feed object."));
+  if (value.feeds !== null) issues.push(issue(path.concat("feeds"), "invalid_value", "Canonical direct MVG provenance does not claim feed or realtime provenance."));
 }
 
-function validateFeeds(value: unknown, path: Array<string | number>, issues: ResponseValidationIssue[]): void {
-  if (!isRecord(value)) {
-    issues.push(issue(path, "missing_provenance", "Configured scheduled routing requires MVG and MVV feed provenance."));
-    return;
-  }
-  validateFeed(value.mvg, "MVG", path.concat("mvg"), issues);
-  validateFeed(value.mvv, "MVV", path.concat("mvv"), issues);
+function validateRoutingDataKind(
+  dataKind: unknown,
+  deployment: unknown,
+  liveData: unknown,
+  path: Array<string | number>,
+  issues: ResponseValidationIssue[],
+): void {
+  const fixture = dataKind === "demo-static" && deployment === "fixture" && liveData === false;
+  const scheduled = dataKind === "scheduled" && deployment !== "fixture" && liveData === false;
+  if (!fixture && !scheduled) issues.push(issue(path, "invalid_value", "Routing metadata must be coherent demo-static fixture data or scheduled non-live data."));
 }
 
-function validateFeed(value: unknown, name: "MVG" | "MVV", path: Array<string | number>, issues: ResponseValidationIssue[]): void {
-  if (!isRecord(value)) {
-    issues.push(issue(path, "missing_provenance", `${name} feed provenance is required.`));
-    return;
-  }
-  requireKeys(value, ["name", "sourceUrl", "license", "attribution", "version", "retrievedAt"], path, issues);
-  if (value.name !== name) issues.push(issue(path.concat("name"), "invalid_value", `Expected ${name} feed provenance.`));
-  validateHttpsOrNull(value.sourceUrl, path.concat("sourceUrl"), issues);
-  validateLicenseOrNull(value.license, path.concat("license"), issues);
-  validateString(value.attribution, path.concat("attribution"), issues, 1);
-  validateString(value.version, path.concat("version"), issues, 1);
-  validateIsoInstant(value.retrievedAt, path.concat("retrievedAt"), issues);
+function validateProviderDeployment(value: unknown, path: Array<string | number>, issues: ResponseValidationIssue[]): void {
+  if (!isProviderDeployment(value)) issues.push(issue(path, "invalid_enum", "Provider deployment is outside the ProviderDeploymentKind contract."));
+}
+
+function isProviderDeployment(value: unknown): value is ProviderDeploymentKind {
+  return value === "fixture" || value === "self-hosted" || value === "managed" || value === "unknown";
 }
 
 function validateBoundary(value: unknown, path: Array<string | number>, issues: ResponseValidationIssue[]): void {
   if (!isRecord(value)) {
-    issues.push(issue(path, "invalid_type", "Official boundary provenance is required."));
+    issues.push(issue(path, "invalid_type", "Munich boundary provenance is required."));
     return;
   }
   requireKeys(value, ["name", "sourceUrl", "metadataUrl", "retrievedAt", "contentHash", "metadataContentHash", "districtCount", "license", "attribution", "legalBoundary"], path, issues);
@@ -799,24 +442,19 @@ function validateBoundary(value: unknown, path: Array<string | number>, issues: 
   validateString(value.retrievedAt, path.concat("retrievedAt"), issues, 1);
   validateHash(value.contentHash, path.concat("contentHash"), issues);
   validateHash(value.metadataContentHash, path.concat("metadataContentHash"), issues);
-  if (value.districtCount !== 25) issues.push(issue(path.concat("districtCount"), "invalid_value", "Official application boundary must contain 25 districts."));
-  validateLicenseOrNull(value.license, path.concat("license"), issues);
-  if (isRecord(value.license) && (typeof value.license.name !== "string" || !value.license.name.includes("DL-DE-BY-2.0"))) {
-    issues.push(issue(path.concat("license", "name"), "missing_license", "Official boundary licence attribution is missing."));
-  }
+  if (value.districtCount !== 25 || value.legalBoundary !== false) issues.push(issue(path, "invalid_value", "Boundary metadata must identify the non-legal 25-district Munich application boundary."));
+  validateRequiredLicense(value.license, path.concat("license"), issues);
   validateString(value.attribution, path.concat("attribution"), issues, 1);
-  if (value.legalBoundary !== false) issues.push(issue(path.concat("legalBoundary"), "invalid_value", "Boundary must not be labelled legal or cadastral."));
 }
 
-function validateMapProvenance(value: unknown, path: Array<string | number>, issues: ResponseValidationIssue[]): void {
+function validateRequiredLicense(value: unknown, path: Array<string | number>, issues: ResponseValidationIssue[]): void {
   if (!isRecord(value)) {
-    issues.push(issue(path, "invalid_type", "Map configuration provenance is required."));
+    issues.push(issue(path, "missing_provenance", "Official boundary metadata requires a non-null licence."));
     return;
   }
-  requireKeys(value, ["source", "styleUrl", "attribution"], path, issues);
-  if (value.source !== "client-configured") issues.push(issue(path.concat("source"), "invalid_value", "Map configuration must be client-configured."));
-  validateHttpsOrNull(value.styleUrl, path.concat("styleUrl"), issues);
-  if (value.attribution !== null) validateString(value.attribution, path.concat("attribution"), issues, 1);
+  requireKeys(value, ["name", "url"], path, issues);
+  validateString(value.name, path.concat("name"), issues, 1);
+  validateHttpsOrNull(value.url, path.concat("url"), issues);
 }
 
 function validateCoordinate(value: unknown, path: Array<string | number>, issues: ResponseValidationIssue[]): void {
@@ -829,25 +467,23 @@ function validateCoordinate(value: unknown, path: Array<string | number>, issues
 }
 
 function validateWgs84(latitude: unknown, longitude: unknown, path: Array<string | number>, issues: ResponseValidationIssue[]): void {
-  if (typeof latitude !== "number" || typeof longitude !== "number" || !Number.isFinite(latitude) || !Number.isFinite(longitude) || latitude < -90 || latitude > 90 || longitude < -180 || longitude > 180) {
-    issues.push(issue(path, "invalid_coordinate", "Coordinates must be finite WGS84 values."));
-  }
+  if (typeof latitude !== "number" || typeof longitude !== "number" || !Number.isFinite(latitude) || !Number.isFinite(longitude) || latitude < -90 || latitude > 90 || longitude < -180 || longitude > 180) issues.push(issue(path, "invalid_coordinate", "Coordinates must be finite WGS84 values."));
 }
 
-function validateTolerance(value: unknown, path: Array<string | number>, issues: ResponseValidationIssue[]): void {
-  if (typeof value !== "number" || !(TOLERANCE_PERCENT_OPTIONS as readonly number[]).includes(value)) issues.push(issue(path, "invalid_value", "Tolerance must be 5, 10, or 15."));
+function validateSelectedTolerance(value: unknown, path: Array<string | number>, issues: ResponseValidationIssue[]): void {
+  if (typeof value !== "number" || !(TOLERANCE_PERCENT_OPTIONS as readonly number[]).includes(value)) issues.push(issue(path, "invalid_value", "Selected tolerance must be 5, 10, or 15."));
+}
+
+function validateEffectiveTolerance(value: unknown, selected: unknown, path: Array<string | number>, issues: ResponseValidationIssue[]): void {
+  if (typeof value !== "number" || !Number.isInteger(value) || value < 5 || value > 100 || typeof selected !== "number" || value < selected || (value - selected) % 5 !== 0) issues.push(issue(path, "invalid_value", "Effective tolerance must escalate from the selected value in five-point steps through 100."));
+}
+
+function validateFiniteInteger(value: unknown, path: Array<string | number>, issues: ResponseValidationIssue[], minimum: number): void {
+  if (typeof value !== "number" || !Number.isInteger(value) || !Number.isFinite(value) || value < minimum) issues.push(issue(path, "invalid_integer", "Value must be a finite integer in the allowed range."));
 }
 
 function validateIsoInstant(value: unknown, path: Array<string | number>, issues: ResponseValidationIssue[]): void {
-  if (typeof value !== "string" || !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,3})?Z$/.test(value) || !Number.isFinite(new Date(String(value)).getTime())) issues.push(issue(path, "invalid_datetime", "Timestamp must be a canonical UTC ISO instant."));
-}
-
-function validateFiniteBoundedNumber(value: unknown, path: Array<string | number>, issues: ResponseValidationIssue[], minimum: number, maximum: number): void {
-  if (typeof value !== "number" || !Number.isFinite(value) || value < minimum || value > maximum) issues.push(issue(path, "invalid_number", "Number is outside the allowed finite range."));
-}
-
-function validateBoundedInteger(value: unknown, path: Array<string | number>, issues: ResponseValidationIssue[], minimum: number, maximum: number): void {
-  if (typeof value !== "number" || !Number.isInteger(value) || value < minimum || value > maximum) issues.push(issue(path, "invalid_integer", "Integer is outside the allowed range."));
+  if (typeof value !== "string" || !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,3})?Z$/.test(value) || !Number.isFinite(Date.parse(value))) issues.push(issue(path, "invalid_datetime", "Timestamp must be a canonical UTC ISO instant."));
 }
 
 function validateString(value: unknown, path: Array<string | number>, issues: ResponseValidationIssue[], minimum: number): void {
@@ -859,18 +495,44 @@ function validateHttpsOrNull(value: unknown, path: Array<string | number>, issue
 }
 
 function validateLicenseOrNull(value: unknown, path: Array<string | number>, issues: ResponseValidationIssue[]): void {
-  if (value !== null) {
-    if (!isRecord(value)) issues.push(issue(path, "invalid_type", "License must be null or an object."));
-    else {
-      requireKeys(value, ["name", "url"], path, issues);
-      validateString(value.name, path.concat("name"), issues, 1);
-      validateHttpsOrNull(value.url, path.concat("url"), issues);
-    }
+  if (value === null) return;
+  if (!isRecord(value)) {
+    issues.push(issue(path, "invalid_type", "License must be null or an object."));
+    return;
   }
+  requireKeys(value, ["name", "url"], path, issues);
+  validateString(value.name, path.concat("name"), issues, 1);
+  validateHttpsOrNull(value.url, path.concat("url"), issues);
 }
 
 function validateHash(value: unknown, path: Array<string | number>, issues: ResponseValidationIssue[]): void {
   if (typeof value !== "string" || !/^[a-f0-9]{64}$/.test(value)) issues.push(issue(path, "invalid_hash", "Content hash must be a SHA-256 hex string."));
+}
+
+function isJourneyShape(value: unknown): value is { plannedDurationMilliseconds: number } {
+  return isRecord(value) && typeof value.plannedDurationMilliseconds === "number";
+}
+
+function isCanonicalResponse(value: unknown): value is MeetingCalculationResponse {
+  return isRecord(value) && value.contractVersion === CONTRACT_VERSION && value.status === "ok";
+}
+
+function isCoordinateRecord(value: unknown): value is { latitude: number; longitude: number } {
+  return isRecord(value) && typeof value.latitude === "number" && typeof value.longitude === "number" && Number.isFinite(value.latitude) && Number.isFinite(value.longitude);
+}
+
+function deepEqualJson(left: unknown, right: unknown): boolean {
+  if (Object.is(left, right)) return true;
+  if (Array.isArray(left) || Array.isArray(right)) {
+    return Array.isArray(left) && Array.isArray(right) && left.length === right.length && left.every((value, index) => deepEqualJson(value, right[index]));
+  }
+  if (isRecord(left) || isRecord(right)) {
+    if (!isRecord(left) || !isRecord(right)) return false;
+    const leftKeys = Object.keys(left);
+    const rightKeys = Object.keys(right);
+    return leftKeys.length === rightKeys.length && leftKeys.every((key) => Object.hasOwn(right, key) && deepEqualJson(left[key], right[key]));
+  }
+  return false;
 }
 
 function requireKeys(value: Record<string, unknown>, required: readonly string[], path: Array<string | number>, issues: ResponseValidationIssue[], optional: readonly string[] = []): void {
@@ -881,28 +543,6 @@ function requireKeys(value: Record<string, unknown>, required: readonly string[]
   Object.keys(value).forEach((key) => {
     if (!allowed.has(key)) issues.push(issue(path.concat(key), "unknown_field", `Unknown field ${key}.`));
   });
-}
-
-function validatePositionObject(value: unknown): value is [number, number] {
-  return Array.isArray(value) && value.length === 2 && value.every((entry) => typeof entry === "number");
-}
-
-function closedRing(ring: unknown[]): boolean {
-  const first = ring[0];
-  const last = ring[ring.length - 1];
-  return validatePositionObject(first) && validatePositionObject(last) && first[0] === last[0] && first[1] === last[1];
-}
-
-function ringArea(ring: unknown[]): number {
-  const positions = ring.filter(validatePositionObject);
-  return Math.abs(positions.reduce((sum, current, index) => {
-    const next = positions[(index + 1) % positions.length];
-    return sum + current[0] * next[1] - next[0] * current[1];
-  }, 0) / 2);
-}
-
-function isTravelMode(value: unknown): value is "transit" | "bike" | "car" {
-  return (TRAVEL_MODES as readonly unknown[]).includes(value);
 }
 
 function issue(path: Array<string | number>, code: string, message: string): ResponseValidationIssue {

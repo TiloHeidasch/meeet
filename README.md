@@ -39,22 +39,26 @@ still apply. The direct provider shares a four-request upstream concurrency cap
 within one Node process/instance; this is not a deployment-wide distributed
 limit, so multi-instance deployments can issue more concurrent requests and
 need external rate limiting if required. It enforces a 12-second calculation
-deadline. An aborted browser/API request stops its own wait; queued uncached
+deadline. An already-aborted request starts no provider work; an aborted
+browser/API request stops its own wait; queued uncached
 work is removed, in-flight uncached work is aborted, and an active shared
 location/station cache fill keeps its limiter slot until the fill settles. Each
 upstream response is capped at 512 KiB (a larger configured response limit does
 not raise that cap). It does not retry automatically.
 
-Routing is transit-only. The first two participants are evaluated in both
-directions against the finite alternatives returned by MVG; actual route-part
-station endpoints and three explicit Munich hubs become candidate centers. At
-most 10 candidate centers are routed for all participants in one matrix
-(subject to the provider cap of 19 destinations and 76 entries). Origins and
-candidate centers are snapped to a returned station within 1,500 m, with access
-and egress estimated at 75 m/min. The provider descriptor is scheduled and does
-not claim an MVG/MVV live feed. Geocoding is fixture coordinate pass-through and
-POIs are static fixtures; there is no routing fallback. This mode does not
-provide bike or car routing and makes no MVV or official-MVG-API claim.
+Routing is transit-only. The canonical search evaluates exactly two
+participants in both directions using direct and six fixed anchor-station
+arrive-by searches. MVG transit stops and public walking endpoints are finite
+route-derived candidates; each candidate is independently verified from both
+origins. Fairness uses planned timetable durations and the exact symmetric
+tolerance rule, starting at the selected ±5%, ±10% (default), or ±15% and
+increasing by five percentage points until a result exists. The response keeps
+all fourteen source-query records—including empty queries—for both directions,
+direct searches, and all six ten-minute anchor searches. The provider
+descriptor is scheduled and does not claim an MVG/MVV live feed. Geocoding is
+fixture coordinate pass-through and POI discovery is outside the canonical MVP
+flow. This mode does not provide bike or car routing and makes no MVV or
+official-MVG-API claim.
 
 Treat the upstream as moderate-use only: it is unofficial, undocumented,
 potentially unstable, and has no SLA. Production or commercial use requires
@@ -100,12 +104,16 @@ npm run boundary:refresh
 ## Provider deployment
 
 See [`docs/provider-adapters.md`](docs/provider-adapters.md) for the complete
-gateway, geocoding, POI, MVG/MVV provenance, OSRM, OTP, attribution, and
-allowlisting contracts. A configured routing gateway must provide recorded
-MVG and licensed MVV scheduled-feed source URLs, licences, attributions,
-versions, and retrieval dates. The gateway owns bounded OTP point-to-point
-calls and configured OSRM tables; this application does not pretend OTP has a
-generic matrix endpoint.
+provider provenance, OTP, OSRM, attribution, and allowlisting contracts. A
+configured routing gateway must provide recorded MVG and licensed MVV
+scheduled-feed source URLs, licences, attributions, versions, and retrieval
+dates. The canonical direct mode remains the only configured path that
+currently supplies the coordinate-journey search provider; self-hosted
+route-first foundations stay unavailable until their complete calculation
+contract is enabled.
+
+The isolated route-first domain library remains available for future work, but
+its job API is not mounted by the MVP runtime.
 
 Configure endpoints only as fixed server environment values. Do not forward
 arbitrary client URLs. Exact participant coordinates are sensitive: retain

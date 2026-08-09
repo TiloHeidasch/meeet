@@ -28,11 +28,110 @@ export interface MeetingParticipant {
   mode: TravelMode;
 }
 
-/** Normalized server input. `departureAt` is always resolved before calculation. */
+/** Normalized server input for the canonical two-participant meeting search. */
 export interface MeetingCalculationInput {
-  participants: readonly MeetingParticipant[];
+  participants: readonly [MeetingParticipant, MeetingParticipant];
   tolerancePercent: TolerancePercent;
-  departureAt: string;
+  arrivalAt: string;
+}
+
+export type MeetingSearchDirection =
+  | "participant-1-to-participant-2"
+  | "participant-2-to-participant-1";
+
+export type RoutePatternSearchKind = "direct" | "anchor";
+export type RoutePatternKind = "transit" | "walk-only";
+export type RouteCandidateKind = "station" | "walking-endpoint" | "origin";
+
+export interface CoordinateJourneyRequest {
+  origin: LocationCoordinate;
+  destination: LocationCoordinate;
+  arrivalAt: string;
+  viaStationGlobalId?: string;
+  viaDwellTimeInMinutes?: 10;
+  signal?: AbortSignal;
+}
+
+export type JourneyPartKind = "transit" | "walking";
+
+export interface JourneyEndpoint {
+  stationGlobalId: string | null;
+  coordinate: LocationCoordinate;
+  label?: string;
+}
+
+export interface CoordinateJourneyPart {
+  kind: JourneyPartKind;
+  from: JourneyEndpoint;
+  to: JourneyEndpoint;
+  /** Ordered provider stops between this transit part's endpoints. */
+  intermediateStops: readonly JourneyEndpoint[];
+  line: TransitLineReference | null;
+  plannedDepartureAt: string;
+  plannedArrivalAt: string;
+}
+
+/** A provider-normalized, planned-time journey. Realtime is intentionally absent. */
+export interface CoordinateJourney {
+  transitStops: readonly JourneyEndpoint[];
+  parts: readonly CoordinateJourneyPart[];
+  plannedDepartureAt: string;
+  plannedArrivalAt: string;
+  plannedDurationMilliseconds: number;
+}
+
+export interface CoordinateJourneyResult {
+  journeys: readonly CoordinateJourney[];
+  source: string;
+}
+
+export interface RoutePatternProvenance {
+  direction: MeetingSearchDirection;
+  searchKind: RoutePatternSearchKind;
+  anchorStationGlobalId: string | null;
+}
+
+export interface MeetingSourceQueryProvenance {
+  direction: MeetingSearchDirection;
+  searchKind: RoutePatternSearchKind;
+  originParticipantId: string;
+  destinationParticipantId: string;
+  anchorStationGlobalId: string | null;
+  viaDwellTimeInMinutes: 10 | null;
+  arrivalAt: string;
+  journeyCount: number;
+  source: string;
+}
+
+export interface RoutePattern {
+  id: string;
+  kind: RoutePatternKind;
+  transitStops: readonly JourneyEndpoint[];
+  lines: readonly TransitLineReference[];
+  parts: readonly CoordinateJourneyPart[];
+  provenance: readonly RoutePatternProvenance[];
+}
+
+export interface PlannedParticipantJourney {
+  participantId: string;
+  mode: "transit";
+  plannedDepartureAt: string;
+  plannedArrivalAt: string;
+  plannedDurationMilliseconds: number;
+  source: string;
+}
+
+export interface FairLocation {
+  id: string;
+  label: string;
+  kind: RouteCandidateKind;
+  physicalIdentity: string;
+  coordinate: LocationCoordinate;
+  journeys: readonly [PlannedParticipantJourney, PlannedParticipantJourney];
+  differenceMilliseconds: number;
+  selectedTolerancePercent: TolerancePercent;
+  effectiveTolerancePercent: number;
+  sourceRoutePatternIds: readonly string[];
 }
 
 export type GeoJsonPosition = [number, number];
@@ -54,52 +153,6 @@ export interface GeoJsonMultiPolygon {
 }
 
 export type GeoJsonGeometry = GeoJsonPolygon | GeoJsonMultiPolygon;
-
-export interface GeoJsonFeature<
-  Geometry extends GeoJsonGeometry,
-  Properties extends Record<string, unknown>,
-> {
-  type: "Feature";
-  properties: Properties;
-  geometry: Geometry;
-}
-
-export interface SampleGridCorridorProperties extends Record<string, unknown> {
-  kind: "sample-grid-corridor";
-  approximation: "sample-grid";
-  verification: "center-and-clipped-vertices";
-  tolerancePercent: TolerancePercent;
-  cellCount: number;
-  gridColumns: number;
-  gridRows: number;
-  boundaryName: string;
-  geometryGuarantee: string;
-}
-
-export interface RouteCandidateSearchAreaProperties extends Record<string, unknown> {
-  kind: "route-candidate-search-area";
-  approximation: "route-candidate-search";
-  verification: "candidate-centers-routed";
-  tolerancePercent: TolerancePercent;
-  /** Common corridor count field; for this kind it equals candidateCount. */
-  cellCount: number;
-  candidateCount: number;
-  bufferRadiusMeters: number;
-  boundaryName: string;
-  geometryGuarantee: string;
-}
-
-export type SampleGridCorridor = GeoJsonFeature<
-  GeoJsonMultiPolygon,
-  SampleGridCorridorProperties
->;
-
-export type RouteCandidateSearchArea = GeoJsonFeature<
-  GeoJsonMultiPolygon,
-  RouteCandidateSearchAreaProperties
->;
-
-export type MeetingCorridor = SampleGridCorridor | RouteCandidateSearchArea;
 
 export interface RoutingParticipant {
   participantId: string;
@@ -201,25 +254,15 @@ export interface RouteAlternativeDiscoveryResult {
   alternatives: readonly RouteAlternative[];
 }
 
-export type RouteCandidateKind = "route-part-endpoint" | "fixed-hub";
+export type LegacyRouteCandidateKind = "route-part-endpoint" | "fixed-hub";
 
 export interface RouteCandidate {
   id: string;
-  kind: RouteCandidateKind;
+  kind: LegacyRouteCandidateKind;
   coordinate: LocationCoordinate;
   label: string;
   station: RouteStationReference | null;
   alternativeIdentity: string | null;
-}
-
-export interface ComparableTravelTimeRange {
-  targetMinutes: number;
-  lowerMinutes: number;
-  upperMinutes: number;
-  observedMinMinutes: number;
-  observedMaxMinutes: number;
-  tolerancePercent: TolerancePercent;
-  isComparable: boolean;
 }
 
 export interface GridCell {
@@ -239,24 +282,6 @@ export interface BoundedMunichGrid {
   destinations: readonly RoutingMatrixDestination[];
 }
 
-export interface TravelTimeEstimate {
-  participantId: string;
-  mode: TravelMode;
-  minutes: number;
-  source: string;
-}
-
-export interface VerifiedMeetingCandidate {
-  id: string;
-  kind: RouteCandidateKind;
-  label: string;
-  coordinate: LocationCoordinate;
-  travelTimeRange: ComparableTravelTimeRange;
-  travelTimes: readonly TravelTimeEstimate[];
-  normalizedSpread: number;
-  maxTravelMinutes: number;
-}
-
 export type PoiCategory = "food" | "drink";
 
 export interface MeetingPointOfInterest {
@@ -267,71 +292,6 @@ export interface MeetingPointOfInterest {
   address?: string;
   source: string;
 }
-
-/**
- * The client-selected venue sent to the venue-route endpoint. The optional
- * POI fields let the client pass through the selected calculation result
- * without making route projection depend on POI provenance.
- */
-export interface SelectedVenueRouteVenue {
-  id: string;
-  name: string;
-  coordinates: GeoJsonPosition;
-  category?: PoiCategory;
-  address?: string;
-  source?: string;
-}
-
-export interface SelectedVenueRouteRequest {
-  selectedPoi: SelectedVenueRouteVenue;
-  participants: readonly MeetingParticipant[];
-  departureAt?: string;
-}
-
-export type VenueRouteRequest = SelectedVenueRouteRequest;
-export type SelectedVenueRequest = SelectedVenueRouteRequest;
-
-export type VenueRouteStepKind = "transit" | "summary";
-
-export interface SelectedVenueRouteStep {
-  kind: VenueRouteStepKind;
-  instruction: string;
-  from: LocationCoordinate | null;
-  to: LocationCoordinate | null;
-  fromStopId: string | null;
-  toStopId: string | null;
-  line: TransitLineReference | null;
-  departureAt: string | null;
-  arrivalAt: string | null;
-  durationMinutes: number | null;
-}
-
-export type VenueRouteStep = SelectedVenueRouteStep;
-
-export type SelectedVenueRouteLegStatus = "detailed" | "summary";
-
-export interface SelectedVenueRouteLeg {
-  participantId: string;
-  mode: TravelMode;
-  status: SelectedVenueRouteLegStatus;
-  summary: string;
-  durationMinutes: number | null;
-  steps: readonly SelectedVenueRouteStep[];
-  geometry: GeoJsonLineString | null;
-  source: string;
-}
-
-export type VenueRouteLeg = SelectedVenueRouteLeg;
-
-export interface SelectedVenueRouteResponse {
-  contractVersion: "meeet-venue-routes/v1";
-  status: "ok";
-  departureAt: string;
-  venue: SelectedVenueRouteVenue;
-  legs: readonly SelectedVenueRouteLeg[];
-}
-
-export type VenueRouteResponse = SelectedVenueRouteResponse;
 
 export type ProviderDeploymentKind =
   | "fixture"
@@ -573,9 +533,10 @@ export interface ResolvedLocation extends MeetingLocation {
 }
 
 export interface MeetingRequestSnapshot {
-  participants: readonly MeetingParticipant[];
-  tolerancePercent: TolerancePercent;
-  departureAt: string;
+  participants: readonly [MeetingParticipant, MeetingParticipant];
+  arrivalAt: string;
+  selectedTolerancePercent: TolerancePercent;
+  effectiveTolerancePercent: number;
   timeZone: MeetingTimeZone;
 }
 
@@ -593,56 +554,25 @@ export interface OfficialBoundaryMetadata {
 }
 
 export interface MeetingCalculationMetadata {
-  source: {
-    deployment: ProviderDeploymentKind;
-    dataKind: ProviderDataKind;
-    liveData: boolean;
-    label: string;
-  };
-  approximation: string;
-  providers: {
-    geocoding: ProviderDescriptor;
-    routing: ProviderDescriptor;
-    poi: ProviderDescriptor;
-  };
+  routing: ProviderDescriptor;
   boundary: OfficialBoundaryMetadata;
   provenance: {
-    boundary: OfficialBoundaryMetadata;
     routing: ProviderProvenance;
-    geocoding: ProviderProvenance;
-    poi: ProviderProvenance;
-    map: MapConfigurationProvenance;
+    boundary: OfficialBoundaryMetadata;
   };
 }
 
 export interface MeetingCalculationOkResponse {
+  contractVersion: "meeet-meeting/v2";
   status: "ok";
-  meetingPoint: LocationCoordinate;
-  corridor: MeetingCorridor;
-  travelTimeRange: ComparableTravelTimeRange;
-  travelTimes: readonly TravelTimeEstimate[];
-  pois: readonly MeetingPointOfInterest[];
-  /** Present for route-candidate searches; omitted for the fixture grid fallback. */
-  candidates?: readonly VerifiedMeetingCandidate[];
+  fairLocations: readonly FairLocation[];
+  routePatterns: readonly RoutePattern[];
+  sourceQueries: readonly MeetingSourceQueryProvenance[];
   requestSnapshot: MeetingRequestSnapshot;
   metadata: MeetingCalculationMetadata;
 }
 
-export interface NoCorridorReason {
-  code: "NO_COMPARABLE_GRID_CELL" | "NO_COMPARABLE_ROUTE_CANDIDATE";
-  message: string;
-}
-
-export interface MeetingCalculationNoCorridorResponse {
-  status: "no-corridor";
-  reason: NoCorridorReason;
-  requestSnapshot: MeetingRequestSnapshot;
-  metadata: MeetingCalculationMetadata;
-}
-
-export type MeetingCalculationResponse =
-  | MeetingCalculationOkResponse
-  | MeetingCalculationNoCorridorResponse;
+export type MeetingCalculationResponse = MeetingCalculationOkResponse;
 
 export type {
   AccessibleTargetInterval,

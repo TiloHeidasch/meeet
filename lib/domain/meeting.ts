@@ -1,60 +1,59 @@
-import {
-  isPointInGeoJsonGeometry,
-} from "./geo.ts";
+import "server-only";
+
+import { haversineDistanceKm } from "./geo.ts";
 import {
   isWithinOfficialMunichBoundary,
   OFFICIAL_MUNICH_BOUNDARY_MANIFEST,
 } from "./boundary.ts";
-import {
-  createGridForRoutingCapabilities,
-} from "./grid.ts";
-import { createRouteCandidateSearchArea, ROUTE_CANDIDATE_BUFFER_RADIUS_METERS } from "./route-candidate-area.ts";
-import { getMunichHubCandidates } from "./munich-hubs.ts";
-import {
-  deduplicateRouteCandidates,
-  deriveRouteCandidates,
-} from "./route-candidates.ts";
-import type { MeetingProviders } from "./providers.ts";
-import { MEETING_TIME_ZONE } from "./types.ts";
+import type { CoordinateJourneyProvider, MeetingProviders } from "./providers.ts";
 import type {
-  ComparableTravelTimeRange,
-  GeoJsonGeometry,
-  GridCell,
+  CoordinateJourney,
+  CoordinateJourneyPart,
+  CoordinateJourneyRequest,
+  FairLocation,
+  JourneyEndpoint,
   LocationCoordinate,
   MeetingCalculationInput,
   MeetingCalculationMetadata,
-  MeetingCalculationNoCorridorResponse,
   MeetingCalculationOkResponse,
   MeetingCalculationResponse,
-  MeetingCorridor,
   MeetingParticipant,
-  ProviderDataKind,
-  ProviderDeploymentKind,
+  MeetingSourceQueryProvenance,
+  MeetingSearchDirection,
+  OfficialBoundaryMetadata,
+  PlannedParticipantJourney,
   ProviderDescriptor,
-  RoutingMatrixCell,
-  RoutingMatrixRequest,
-  RoutingMatrixResponse,
-  RoutingMatrixTimingMetadata,
-  RoutingProviderCapabilities,
-  RoutingParticipant,
-  SampleGridCorridorProperties,
+  RouteCandidateKind,
+  RoutePattern,
+  RoutePatternProvenance,
+  RoutePatternSearchKind,
   TolerancePercent,
-  TravelTimeEstimate,
-  RouteAlternative,
-  RouteCandidate,
-  RouteCandidateSearchArea,
-  VerifiedMeetingCandidate,
+  TransitLineReference,
 } from "./types.ts";
+import { MEETING_TIME_ZONE } from "./types.ts";
 
-const SAMPLE_GRID_APPROXIMATION_NOTICE =
-  "Sample-grid approximation only: each returned clipped cell's center and declared clipped vertices passed the median ± tolerance rule and the official application boundary; cell interiors are not independently routed or proven comparable.";
-const NO_CORRIDOR_MESSAGE =
-  "No Munich grid cell had all five declared samples within the selected median ± tolerance window.";
-const ROUTE_CANDIDATE_APPROXIMATION_NOTICE =
-  "Route-candidate approximation only: returned candidate centers were routed for every participant and passed the median ± tolerance rule; the 350m POI buffers are clipped to the official Munich application boundary but their interiors are not independently routed or proven comparable.";
-const NO_ROUTE_CANDIDATE_MESSAGE =
-  "No returned MVG route candidate or explicit Munich hub had all participants within the selected median ± tolerance window.";
-const MAX_ROUTE_CANDIDATES = 10;
+export const MVG_ANCHOR_STATIONS = [
+  { id: "de:09162:6", label: "Hauptbahnhof" },
+  { id: "de:09162:50", label: "Sendlinger Tor" },
+  { id: "de:09162:70", label: "Universität" },
+  { id: "de:09162:1170", label: "Silberhornstraße" },
+  { id: "de:09162:190", label: "Rotkreuzplatz" },
+  { id: "de:09162:350", label: "Olympiazentrum" },
+] as const;
+
+const WALKING_ENDPOINT_MERGE_RADIUS_METRES = 50;
+const MAX_LOCATION_LABEL_LENGTH = 512;
+const MAX_PLANNED_JOURNEY_DURATION_MS = 24 * 60 * 60 * 1_000;
+export const MEETING_CALCULATION_DEADLINE_MS = 12_000;
+export const MAX_CANDIDATE_VERIFICATION_REQUESTS = 1_000;
+export const COORDINATE_BINDING_TOLERANCE_METRES = 1;
+
+export interface MeetingCalculationOptions {
+  /** Test/deployment override; production uses the documented 12-second bound. */
+  deadlineMs?: number;
+  /** Exceeding this budget fails; work is never truncated. */
+  maxCandidateVerificationRequests?: number;
+}
 
 export class ProviderUnavailableError extends Error {
   readonly providerRole: "geocoding" | "routing" | "poi";
@@ -77,19 +76,11 @@ export class ProviderNotConfiguredError extends Error {
 }
 
 export class InvalidRoutingRequestError extends Error {
-  readonly issues: readonly {
-    path: Array<string | number>;
-    code: string;
-    message: string;
-  }[];
+  readonly issues: readonly { path: Array<string | number>; code: string; message: string }[];
 
   constructor(
     message: string,
-    issues: readonly {
-      path: Array<string | number>;
-      code: string;
-      message: string;
-    }[],
+    issues: readonly { path: Array<string | number>; code: string; message: string }[],
   ) {
     super(message);
     this.name = "InvalidRoutingRequestError";
@@ -104,759 +95,631 @@ export class ResolvedLocationOutsideMunichError extends Error {
   }
 }
 
-interface VerifiedGridCell {
-  cell: GridCell;
-  sampleRanges: readonly ComparableTravelTimeRange[];
+export class NoFairLocationError extends Error {
+  constructor() {
+    super("MVG returned no qualifying Route-Derived Fair Location through the maximum tolerance.");
+    this.name = "NoFairLocationError";
+  }
 }
 
+interface RawCandidate {
+  kind: RouteCandidateKind;
+  label: string;
+  physicalStationId: string | null;
+  coordinate: LocationCoordinate;
+  sourceRoutePatternIds: readonly string[];
+  originParticipantId?: string;
+  order: number;
+}
+
+interface VerifiedCandidate extends RawCandidate {
+  journeys: readonly [PlannedParticipantJourney, PlannedParticipantJourney];
+  differenceMilliseconds: number;
+}
+
+interface MutablePhysicalLocation {
+  kind: RouteCandidateKind;
+  physicalIdentity: string;
+  coordinate: LocationCoordinate;
+  sourceRoutePatternIds: Set<string>;
+  representative: VerifiedCandidate;
+}
+
+/**
+ * Calculate the finite Route-Derived Fair Location Set. The service never
+ * calls a matrix, geocoder, POI provider, or route-first subsystem.
+ */
 export async function calculateMeeting(
   input: MeetingCalculationInput,
   providers: MeetingProviders,
   signal?: AbortSignal,
+  options: MeetingCalculationOptions = {},
 ): Promise<MeetingCalculationResponse> {
-  if (providers.routeAlternatives) {
-    validateRouteCandidateRequest(input, providers.routing.capabilities);
-    const participants = await resolveParticipants(input.participants, providers);
-    return calculateRouteCandidateMeeting(
-      input,
-      providers,
-      participants,
-      providers.routeAlternatives,
-      signal,
-    );
+  if (signal?.aborted) throw new ProviderUnavailableError("routing");
+  const controller = new AbortController();
+  const abort = () => controller.abort();
+  signal?.addEventListener("abort", abort, { once: true });
+  const deadlineMs = options.deadlineMs ?? MEETING_CALCULATION_DEADLINE_MS;
+  const timer = setTimeout(abort, deadlineMs);
+  let timeoutTimer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<never>((_, reject) => {
+    timeoutTimer = setTimeout(() => reject(new ProviderUnavailableError("routing")), deadlineMs);
+  });
+  const callerAborted = signal
+    ? new Promise<never>((_, reject) => signal.addEventListener("abort", () => reject(new ProviderUnavailableError("routing")), { once: true }))
+    : null;
+  try {
+    return await Promise.race([
+      calculateMeetingCore(input, providers, controller.signal, options),
+      timeout,
+      ...(callerAborted ? [callerAborted] : []),
+    ]);
+  } finally {
+    clearTimeout(timer);
+    if (timeoutTimer) clearTimeout(timeoutTimer);
+    signal?.removeEventListener("abort", abort);
+    controller.abort();
   }
-
-  const capabilities = providers.routing.capabilities;
-  const grid = selectRoutingGrid(capabilities);
-  validateRoutingRequest(input, capabilities, grid.destinations.length);
-  const participants = await resolveParticipants(input.participants, providers);
-  const matrixRequest: RoutingMatrixRequest = {
-    participants: participants.map(toRoutingParticipant),
-    destinations: grid.destinations,
-    departureAt: input.departureAt,
-    signal,
-  };
-
-  const matrix = await invokeProvider("routing", () =>
-    providers.routing.getTravelTimeMatrix(matrixRequest),
-  );
-  const matrixByKey = validateAndIndexMatrix(matrix, matrixRequest);
-  const verifiedCells = findVerifiedCells(
-    grid.cells,
-    matrixByKey,
-    participants,
-    input.tolerancePercent,
-  );
-  const routingTiming = matrix.timing ??
-    (providers.routing.descriptor.provenance.provider === "mvg-direct-routing"
-      ? { dataKind: "scheduled" as const, liveData: false }
-      : undefined);
-  const metadata = createMetadata(providers, routingTiming, "sample-grid");
-  const requestSnapshot = createRequestSnapshot(input, participants);
-
-  if (verifiedCells.length === 0) {
-    const noCorridor: MeetingCalculationNoCorridorResponse = {
-      status: "no-corridor",
-      reason: {
-        code: "NO_COMPARABLE_GRID_CELL",
-        message: NO_CORRIDOR_MESSAGE,
-      },
-      requestSnapshot,
-      metadata,
-    };
-    return noCorridor;
-  }
-
-  const representative = chooseRepresentativeCell(verifiedCells, participants);
-  const representativeDestinationId = representative.cell.sampleDestinationIds[0];
-  const representativeTimes = getTravelTimesForDestination(
-    representativeDestinationId,
-    participants,
-    matrixByKey,
-  );
-  const corridor = createCorridor(
-    verifiedCells.map(({ cell }) => cell),
-    input.tolerancePercent,
-    grid,
-  );
-  const pois = await invokeProvider("poi", () =>
-    providers.poi.findFoodAndDrink(corridor.geometry),
-  );
-  const containedPois = pois.filter((poi) =>
-    isPointInGeoJsonGeometry(poi.coordinates, corridor.geometry),
-  );
-  const ok: MeetingCalculationOkResponse = {
-    status: "ok",
-    meetingPoint: representative.cell.center,
-    corridor,
-    travelTimeRange: calculateComparableTravelTimeRange(
-      representativeTimes.map((travelTime) => travelTime.minutes),
-      input.tolerancePercent,
-    ),
-    travelTimes: representativeTimes,
-    pois: containedPois,
-    requestSnapshot,
-    metadata,
-  };
-  return ok;
 }
 
-async function calculateRouteCandidateMeeting(
+async function calculateMeetingCore(
   input: MeetingCalculationInput,
   providers: MeetingProviders,
-  participants: readonly MeetingParticipant[],
-  alternativeProvider: NonNullable<MeetingProviders["routeAlternatives"]>,
-  signal?: AbortSignal,
+  signal: AbortSignal,
+  options: MeetingCalculationOptions,
 ): Promise<MeetingCalculationResponse> {
-  const first = participants[0];
-  const second = participants[1];
-  const [forward, reverse] = await invokeProvider("routing", () =>
-    Promise.all([
-      alternativeProvider.discoverRouteAlternatives({
-        origin: first.location,
-        destination: second.location,
-        departureAt: input.departureAt,
-        signal,
-      }),
-      alternativeProvider.discoverRouteAlternatives({
-        origin: second.location,
-        destination: first.location,
-        departureAt: input.departureAt,
-        signal,
-      }),
-    ]),
-  );
-  const destinations = createRouteCandidateDestinations([
-    ...forward.alternatives,
-    ...reverse.alternatives,
-  ]);
-  validateRoutingRequest(input, providers.routing.capabilities, destinations.length);
+  validateCanonicalInput(input);
+  const journeyProvider = resolveJourneyProvider(providers);
+  const participants = input.participants;
+  const arrivalAt = input.arrivalAt;
 
-  const matrixRequest: RoutingMatrixRequest = {
-    participants: participants.map(toRoutingParticipant),
-    destinations: destinations.map((candidate) => ({
-      id: candidate.id,
-      coordinate: candidate.coordinate,
-      sampleKind: "center" as const,
-    })),
-    departureAt: input.departureAt,
-    signal,
-  };
-  const matrix = await invokeProvider("routing", () =>
-    providers.routing.getTravelTimeMatrix(matrixRequest),
+  const sourceRequests = createSourceRequests(arrivalAt, participants, signal);
+  const sourceResults = await Promise.all(
+    sourceRequests.map((request) => invokeJourneyProvider(journeyProvider, toProviderRequest(request))),
   );
-  const matrixByKey = validateAndIndexMatrix(matrix, matrixRequest);
-  const verified = findVerifiedRouteCandidates(
-    destinations,
-    matrixByKey,
-    participants,
-    input.tolerancePercent,
-  ).sort(compareRouteCandidateVerification);
-  const routingTiming = matrix.timing ??
-    (providers.routing.descriptor.provenance.provider === "mvg-direct-routing"
-      ? { dataKind: "scheduled" as const, liveData: false }
-      : undefined);
-  const metadata = createMetadata(providers, routingTiming, "route-candidate");
-  const requestSnapshot = createRequestSnapshot(input, participants);
 
-  if (verified.length === 0) {
-    const noCorridor: MeetingCalculationNoCorridorResponse = {
-      status: "no-corridor",
-      reason: {
-        code: "NO_COMPARABLE_ROUTE_CANDIDATE",
-        message: NO_ROUTE_CANDIDATE_MESSAGE,
-      },
-      requestSnapshot,
-      metadata,
-    };
-    return noCorridor;
+  const patternMap = new Map<string, RoutePattern>();
+  const rawCandidates: RawCandidate[] = [];
+  let order = 0;
+  sourceResults.forEach((result, sourceIndex) => {
+    const source = sourceRequests[sourceIndex];
+    result.journeys.forEach((rawJourney) => {
+      const journey = normalizeJourneyCoordinates(rawJourney);
+      validateJourney(journey, arrivalAt);
+      const shapeKey = structuralShape(journey, source.direction).key;
+      const isNewPattern = !patternMap.has(shapeKey);
+      const pattern = upsertRoutePattern(
+        patternMap,
+        journey,
+        source.direction,
+        source.searchKind,
+        source.anchorStationGlobalId,
+      );
+      if (isNewPattern) {
+        const extractedCandidates = extractRawCandidates(journey, pattern.id, order);
+        rawCandidates.push(...extractedCandidates);
+        order += extractedCandidates.length;
+      }
+    });
+  });
+
+  for (const participant of participants) {
+    if (!isWithinOfficialMunichBoundary(participant.location)) {
+      throw new ResolvedLocationOutsideMunichError();
+    }
+    rawCandidates.push({
+      kind: "origin",
+      label: participant.location.label,
+      physicalStationId: null,
+      coordinate: coordinateOnly(participant.location),
+      sourceRoutePatternIds: [...patternMap.values()].map((pattern) => pattern.id),
+      originParticipantId: participant.id,
+      order: order++,
+    });
   }
 
-  const representative = verified[0];
-  const corridor = createRouteCandidateCorridor(verified, input.tolerancePercent);
-  const pois = await invokeProvider("poi", () =>
-    providers.poi.findFoodAndDrink(corridor.geometry),
+  const munichCandidates = rawCandidates.filter((candidate) =>
+    isWithinOfficialMunichBoundary(candidate.coordinate),
   );
-  const containedPois = pois.filter((poi) =>
-    isPointInGeoJsonGeometry(poi.coordinates, corridor.geometry),
+  if (munichCandidates.length === 0 || patternMap.size === 0) {
+    throw new NoFairLocationError();
+  }
+  const verificationRequests = munichCandidates.length * participants.length;
+  const maxVerificationRequests = options.maxCandidateVerificationRequests ?? MAX_CANDIDATE_VERIFICATION_REQUESTS;
+  if (verificationRequests > maxVerificationRequests) {
+    throw new ProviderUnavailableError("routing");
+  }
+
+  // This is intentionally before physical merging: two occurrences of the
+  // same station or endpoint are separate provider checks.
+  const verified = await Promise.all(
+    munichCandidates.map(async (candidate) => {
+      const journeys: [
+        Awaited<ReturnType<typeof invokeJourneyProvider>>,
+        Awaited<ReturnType<typeof invokeJourneyProvider>>,
+      ] = await Promise.all([
+        invokeJourneyProvider(journeyProvider, {
+          origin: participants[0].location,
+          destination: candidate.coordinate,
+          arrivalAt,
+          signal,
+        }),
+        invokeJourneyProvider(journeyProvider, {
+          origin: participants[1].location,
+          destination: candidate.coordinate,
+          arrivalAt,
+          signal,
+        }),
+      ]);
+      return verifyCandidate(candidate, participants, journeys, arrivalAt, journeyProvider.descriptor.name);
+    }),
   );
-  const ok: MeetingCalculationOkResponse = {
-    status: "ok",
-    meetingPoint: representative.candidate.coordinate,
-    corridor,
-    travelTimeRange: representative.travelTimeRange,
-    travelTimes: representative.travelTimes,
-    pois: containedPois,
-    candidates: verified.map(toVerifiedMeetingCandidate),
-    requestSnapshot,
-    metadata,
+
+  let qualifying: VerifiedCandidate[] = [];
+  let effectiveTolerancePercent = input.tolerancePercent;
+  for (let tolerance = input.tolerancePercent; tolerance <= 100; tolerance += 5) {
+    const current = verified.filter((candidate) =>
+      isFairPair(
+        candidate.journeys[0].plannedDurationMilliseconds,
+        candidate.journeys[1].plannedDurationMilliseconds,
+        tolerance,
+      ),
+    );
+    if (current.length > 0) {
+      qualifying = current;
+      effectiveTolerancePercent = tolerance;
+      break;
+    }
+  }
+  if (qualifying.length === 0) throw new NoFairLocationError();
+
+  const fairLocations = mergeQualifiedCandidates(
+    qualifying,
+    input.tolerancePercent,
+    effectiveTolerancePercent,
+  );
+  const routing = journeyProvider.descriptor;
+  const response: MeetingCalculationOkResponse = {
+    contractVersion: "meeet-meeting/v2" as const,
+    status: "ok" as const,
+    requestSnapshot: {
+      participants,
+      arrivalAt,
+      selectedTolerancePercent: input.tolerancePercent,
+      effectiveTolerancePercent,
+      timeZone: MEETING_TIME_ZONE,
+    },
+    fairLocations,
+    routePatterns: [...patternMap.values()],
+    sourceQueries: sourceResults.map((result, index) => toSourceQueryProvenance(sourceRequests[index], result)),
+    metadata: createMetadata(routing),
   };
-  return ok;
+
+  // The public DTO intentionally has no corridor/POI/legacy approximate fields.
+  return response;
 }
 
-function validateRouteCandidateRequest(
-  input: MeetingCalculationInput,
-  capabilities: RoutingProviderCapabilities,
-): void {
-  const issues: Array<{ path: Array<string | number>; code: string; message: string }> = [];
-  for (const index of [0, 1]) {
-    if (input.participants[index]?.mode !== "transit") {
-      issues.push({
-        path: ["participants", index, "mode"],
-        code: "route_candidate_anchor_mode_unsupported",
-        message: "The first two participants must use public transport for route-candidate search.",
+function validateCanonicalInput(input: MeetingCalculationInput): void {
+  if (
+    input.participants.length !== 2 ||
+    input.participants.some((participant) => participant.mode !== "transit") ||
+    !Number.isFinite(Date.parse(input.arrivalAt))
+  ) {
+    throw new InvalidRoutingRequestError(
+      "The canonical meeting search requires exactly two transit participants and a valid arrivalAt.",
+      [{ path: ["participants"], code: "canonical_request_invalid", message: "Exactly two transit participants and arrivalAt are required." }],
+    );
+  }
+}
+
+function resolveJourneyProvider(providers: MeetingProviders): CoordinateJourneyProvider {
+  if (providers.journey) return providers.journey;
+  throw new ProviderNotConfiguredError("routing");
+}
+
+interface SourceRequest extends CoordinateJourneyRequest {
+  direction: MeetingSearchDirection;
+  searchKind: RoutePatternSearchKind;
+  anchorStationGlobalId: string | null;
+  originParticipantId: string;
+  destinationParticipantId: string;
+}
+
+function createSourceRequests(
+  arrivalAt: string,
+  participants: readonly [MeetingParticipant, MeetingParticipant],
+  signal?: AbortSignal,
+): SourceRequest[] {
+  const requests: SourceRequest[] = [];
+  const directions: Array<readonly [MeetingParticipant, MeetingParticipant, MeetingSearchDirection]> = [
+    [participants[0], participants[1], "participant-1-to-participant-2"],
+    [participants[1], participants[0], "participant-2-to-participant-1"],
+  ];
+  for (const [origin, destination, direction] of directions) {
+    requests.push({
+      origin: origin.location,
+      destination: destination.location,
+      arrivalAt,
+      signal,
+      direction,
+      searchKind: "direct",
+      anchorStationGlobalId: null,
+      originParticipantId: origin.id,
+      destinationParticipantId: destination.id,
+    });
+    for (const anchor of MVG_ANCHOR_STATIONS) {
+      requests.push({
+        origin: origin.location,
+        destination: destination.location,
+        arrivalAt,
+        viaStationGlobalId: anchor.id,
+        viaDwellTimeInMinutes: 10,
+        signal,
+        direction,
+        searchKind: "anchor",
+        anchorStationGlobalId: anchor.id,
+        originParticipantId: origin.id,
+        destinationParticipantId: destination.id,
       });
     }
   }
-  if (issues.length > 0) {
-    throw new InvalidRoutingRequestError(
-      "The first two participants must use public transport for route-candidate search.",
-      issues,
-    );
-  }
-  validateRoutingRequest(input, capabilities, 1);
+  return requests;
 }
 
-function createRouteCandidateDestinations(
-  alternatives: readonly RouteAlternative[],
-): readonly RouteCandidate[] {
-  const routeCandidates = deriveRouteCandidates(alternatives).filter((candidate) =>
-    isWithinOfficialMunichBoundary(candidate.coordinate),
-  );
-  const hubs = getMunichHubCandidates().filter((candidate) =>
-    isWithinOfficialMunichBoundary(candidate.coordinate),
-  );
-  const unique = deduplicateRouteCandidates([...hubs, ...routeCandidates]);
-  const hubIds = new Set(hubs.map((hub) => hub.id));
-  const ordered = [
-    ...unique.filter((candidate) => hubIds.has(candidate.id)),
-    ...unique.filter((candidate) => !hubIds.has(candidate.id)),
-  ];
-  return ordered.slice(0, MAX_ROUTE_CANDIDATES);
+function toProviderRequest(request: SourceRequest): CoordinateJourneyRequest {
+  return {
+    origin: request.origin,
+    destination: request.destination,
+    arrivalAt: request.arrivalAt,
+    ...(request.viaStationGlobalId === undefined ? {} : { viaStationGlobalId: request.viaStationGlobalId }),
+    ...(request.viaDwellTimeInMinutes === undefined ? {} : { viaDwellTimeInMinutes: request.viaDwellTimeInMinutes }),
+    signal: request.signal,
+  };
 }
 
-interface RouteCandidateVerification {
-  candidate: RouteCandidate;
-  travelTimeRange: ComparableTravelTimeRange;
-  travelTimes: readonly TravelTimeEstimate[];
-  normalizedSpread: number;
-  maxTravelMinutes: number;
+function toSourceQueryProvenance(
+  request: SourceRequest,
+  result: { journeys: readonly CoordinateJourney[]; source: string },
+): MeetingSourceQueryProvenance {
+  return {
+    direction: request.direction,
+    searchKind: request.searchKind,
+    originParticipantId: request.originParticipantId,
+    destinationParticipantId: request.destinationParticipantId,
+    anchorStationGlobalId: request.anchorStationGlobalId,
+    viaDwellTimeInMinutes: request.viaStationGlobalId ? 10 : null,
+    arrivalAt: request.arrivalAt,
+    journeyCount: result.journeys.length,
+    source: result.source,
+  };
 }
 
-function findVerifiedRouteCandidates(
-  candidates: readonly RouteCandidate[],
-  matrixByKey: ReadonlyMap<string, RoutingMatrixCell>,
-  participants: readonly MeetingParticipant[],
-  tolerancePercent: TolerancePercent,
-): RouteCandidateVerification[] {
-  return candidates.flatMap((candidate) => {
-    const cells = participants.map((participant) =>
-      getMatrixCell(participant.id, candidate.id, matrixByKey),
-    );
-    if (cells.some((cell) => cell.status === "unreachable" || cell.minutes === null)) {
-      return [];
+async function invokeJourneyProvider(
+  provider: CoordinateJourneyProvider,
+  request: CoordinateJourneyRequest,
+): Promise<{ journeys: readonly CoordinateJourney[]; source: string }> {
+  try {
+    const result = await provider.getCoordinateJourneys(request);
+    if (!result || !Array.isArray(result.journeys) || typeof result.source !== "string" || !result.source.trim()) {
+      throw new Error("The journey provider returned an incomplete result.");
     }
-    const minutes = cells.map((cell) => cell.minutes as number);
-    const travelTimeRange = calculateComparableTravelTimeRange(minutes, tolerancePercent);
-    if (!travelTimeRange.isComparable) return [];
-    const maxTravelMinutes = travelTimeRange.observedMaxMinutes;
-    const normalizedSpread = travelTimeRange.targetMinutes === 0
-      ? maxTravelMinutes === 0 ? 0 : Number.POSITIVE_INFINITY
-      : (travelTimeRange.observedMaxMinutes - travelTimeRange.observedMinMinutes) /
-        travelTimeRange.targetMinutes;
-    return [{
-      candidate,
-      travelTimeRange,
-      travelTimes: cells.map((cell) => ({
-        participantId: cell.participantId,
-        mode: cell.mode,
-        minutes: cell.minutes as number,
-        source: cell.source,
-      })),
-      normalizedSpread,
-      maxTravelMinutes,
-    }];
+    for (const journey of result.journeys) {
+      validateJourney(journey, request.arrivalAt);
+      if (!coordinatesWithinMvgPrecision(journey.parts[0]!.from.coordinate, request.origin) || !coordinatesWithinMvgPrecision(journey.parts.at(-1)!.to.coordinate, request.destination)) {
+        throw new Error("The journey is not bound to its requested origin and destination.");
+      }
+      if (request.viaStationGlobalId && !journey.parts.some((part: CoordinateJourneyPart) => part.kind === "transit" && (
+        part.from.stationGlobalId === request.viaStationGlobalId ||
+        part.to.stationGlobalId === request.viaStationGlobalId ||
+        part.intermediateStops.some((stop) => stop.stationGlobalId === request.viaStationGlobalId)
+      ))) {
+        throw new Error("The via journey did not traverse its requested anchor station.");
+      }
+    }
+    return result;
+  } catch (error) {
+    if (error instanceof ProviderUnavailableError || error instanceof ProviderNotConfiguredError) throw error;
+    throw new ProviderUnavailableError("routing");
+  }
+}
+
+function validateJourney(journey: CoordinateJourney, arrivalAt: string): void {
+  if (!journey || !Array.isArray(journey.transitStops) || !Array.isArray(journey.parts) || journey.parts.length === 0 || journey.parts.length > 100) {
+    throw new ProviderUnavailableError("routing");
+  }
+  journey.transitStops.forEach((stop) => {
+    if (!stop || typeof stop.stationGlobalId !== "string" || !stop.stationGlobalId || !isValidCoordinate(stop.coordinate)) {
+      throw new ProviderUnavailableError("routing");
+    }
+  });
+  const departure = Date.parse(journey.plannedDepartureAt);
+  const arrival = Date.parse(journey.plannedArrivalAt);
+  if (!Number.isFinite(departure) || !Number.isFinite(arrival) || arrival < departure || arrival > Date.parse(arrivalAt) || arrival - departure > MAX_PLANNED_JOURNEY_DURATION_MS || !Number.isInteger(journey.plannedDurationMilliseconds) || journey.plannedDurationMilliseconds !== arrival - departure) {
+    throw new ProviderUnavailableError("routing");
+  }
+  journey.parts.forEach((part, index) => {
+    if (!part || (part.kind !== "transit" && part.kind !== "walking") || !part.from || !part.to || (part.from.stationGlobalId !== null && typeof part.from.stationGlobalId !== "string") || (part.to.stationGlobalId !== null && typeof part.to.stationGlobalId !== "string") || !isValidCoordinate(part.from.coordinate) || !isValidCoordinate(part.to.coordinate) || !isCanonicalInstant(part.plannedDepartureAt) || !isCanonicalInstant(part.plannedArrivalAt) || Date.parse(part.plannedArrivalAt) < Date.parse(part.plannedDepartureAt)) {
+      throw new ProviderUnavailableError("routing");
+    }
+    if (index > 0) {
+      const previous = journey.parts[index - 1];
+      if (previous.to.stationGlobalId !== null && part.from.stationGlobalId !== null && previous.to.stationGlobalId !== part.from.stationGlobalId) {
+        throw new ProviderUnavailableError("routing");
+      }
+      if (Date.parse(part.plannedDepartureAt) < Date.parse(previous.plannedArrivalAt)) {
+        throw new ProviderUnavailableError("routing");
+      }
+    }
+    if (part.kind === "transit" && (!part.line || typeof part.line.identity !== "string" || typeof part.line.type !== "string" || !part.from.stationGlobalId || !part.to.stationGlobalId)) {
+      throw new ProviderUnavailableError("routing");
+    }
+    if (!Array.isArray(part.intermediateStops) || part.intermediateStops.some((stop: JourneyEndpoint) => !stop || typeof stop.stationGlobalId !== "string" || !stop.stationGlobalId || !isValidCoordinate(stop.coordinate))) {
+      throw new ProviderUnavailableError("routing");
+    }
+    if (part.kind === "walking" && part.line !== null) {
+      throw new ProviderUnavailableError("routing");
+    }
+  });
+  if (journey.parts[0].plannedDepartureAt !== journey.plannedDepartureAt || journey.parts.at(-1)!.plannedArrivalAt !== journey.plannedArrivalAt) {
+    throw new ProviderUnavailableError("routing");
+  }
+}
+
+function upsertRoutePattern(
+  patterns: Map<string, RoutePattern>,
+  journey: CoordinateJourney,
+  direction: MeetingSearchDirection,
+  searchKind: RoutePatternSearchKind,
+  anchorStationGlobalId: string | null,
+): RoutePattern {
+  const shape = structuralShape(journey, direction);
+  const existing = patterns.get(shape.key);
+  const provenance: RoutePatternProvenance = { direction, searchKind, anchorStationGlobalId };
+  if (existing) {
+    if (!existing.provenance.some((item) => JSON.stringify(item) === JSON.stringify(provenance))) {
+      const updated = { ...existing, provenance: [...existing.provenance, provenance] };
+      patterns.set(shape.key, updated);
+      return updated;
+    }
+    return existing;
+  }
+  const pattern: RoutePattern = {
+    id: `route-pattern:${stableHash(shape.key)}`,
+    kind: shape.kind,
+    transitStops: shape.transitStops,
+    lines: shape.lines,
+    parts: journey.parts,
+    provenance: [provenance],
+  };
+  patterns.set(shape.key, pattern);
+  return pattern;
+}
+
+function structuralShape(journey: CoordinateJourney, direction: MeetingSearchDirection): {
+  key: string;
+  kind: "transit" | "walk-only";
+  transitStops: readonly JourneyEndpoint[];
+  lines: readonly TransitLineReference[];
+} {
+  const parts = journey.parts;
+  const transitParts = parts.filter((part) => part.kind === "transit");
+  if (transitParts.length === 0) {
+    const endpoints = parts.flatMap((part) => [part.from, part.to]);
+    const key = `walk-only:${JSON.stringify({ direction, endpoints: endpoints.map(endpointIdentity) })}`;
+    return { key, kind: "walk-only", transitStops: [], lines: [] };
+  }
+  const stops: JourneyEndpoint[] = [];
+  const lines: TransitLineReference[] = [];
+  for (const part of transitParts) {
+    stops.push(part.from, ...part.intermediateStops, part.to);
+    if (part.line) lines.push(part.line);
+  }
+  const key = `transit:${JSON.stringify({ stops: stops.map((stop) => stop.stationGlobalId), lines: lines.map((line) => [line.identity, line.type]) })}`;
+  return { key, kind: "transit", transitStops: stops, lines };
+}
+
+function extractRawCandidates(journey: CoordinateJourney, patternId: string, order: number): RawCandidate[] {
+  const candidates: RawCandidate[] = [];
+  let nextOrder = order;
+  for (const part of journey.parts) {
+    const endpoints = part.kind === "transit"
+      ? [part.from, ...part.intermediateStops, part.to]
+      : [part.from, part.to];
+    for (const endpoint of endpoints) {
+      if (!isWithinOfficialMunichBoundary(endpoint.coordinate)) continue;
+      candidates.push({
+        kind: endpoint.stationGlobalId ? "station" : "walking-endpoint",
+        label: endpoint.label ?? (endpoint.stationGlobalId ? `Transit stop ${endpoint.stationGlobalId}` : "Walking endpoint"),
+        physicalStationId: endpoint.stationGlobalId,
+        coordinate: endpoint.coordinate,
+        sourceRoutePatternIds: [patternId],
+        order: nextOrder++,
+      });
+    }
+  }
+  return candidates;
+}
+
+function verifyCandidate(
+  candidate: RawCandidate,
+  participants: readonly [MeetingParticipant, MeetingParticipant],
+  results: readonly [{ journeys: readonly CoordinateJourney[]; source: string }, { journeys: readonly CoordinateJourney[]; source: string }],
+  arrivalAt: string,
+  fallbackSource: string,
+): VerifiedCandidate {
+  const selected = results.map((result) => selectJourney(result.journeys, arrivalAt));
+  const journeys: [PlannedParticipantJourney, PlannedParticipantJourney] = [
+    toParticipantJourney(participants[0], selected[0], results[0].source || fallbackSource),
+    toParticipantJourney(participants[1], selected[1], results[1].source || fallbackSource),
+  ];
+  return {
+    ...candidate,
+    journeys,
+    differenceMilliseconds: Math.abs(journeys[0].plannedDurationMilliseconds - journeys[1].plannedDurationMilliseconds),
+  };
+}
+
+function selectJourney(journeys: readonly CoordinateJourney[], arrivalAt: string): CoordinateJourney {
+  if (journeys.length === 0) throw new ProviderUnavailableError("routing");
+  journeys.forEach((journey) => validateJourney(journey, arrivalAt));
+  return journeys.reduce((best, current) => {
+    const bestDeparture = Date.parse(best.plannedDepartureAt);
+    const currentDeparture = Date.parse(current.plannedDepartureAt);
+    return currentDeparture > bestDeparture ||
+      (currentDeparture === bestDeparture && Date.parse(current.plannedArrivalAt) > Date.parse(best.plannedArrivalAt))
+      ? current
+      : best;
   });
 }
 
-function compareRouteCandidateVerification(
-  left: RouteCandidateVerification,
-  right: RouteCandidateVerification,
-): number {
-  return left.normalizedSpread - right.normalizedSpread ||
-    left.maxTravelMinutes - right.maxTravelMinutes ||
-    left.candidate.id.localeCompare(right.candidate.id);
-}
-
-function createRouteCandidateCorridor(
-  verified: readonly RouteCandidateVerification[],
-  tolerancePercent: TolerancePercent,
-): RouteCandidateSearchArea {
-  const properties = {
-    kind: "route-candidate-search-area" as const,
-    approximation: "route-candidate-search" as const,
-    verification: "candidate-centers-routed" as const,
-    tolerancePercent,
-    cellCount: verified.length,
-    candidateCount: verified.length,
-    bufferRadiusMeters: ROUTE_CANDIDATE_BUFFER_RADIUS_METERS,
-    boundaryName: "OFFICIAL_MUNICH_STADTBEZIRKE_APPLICATION_COLLECTION",
-    geometryGuarantee: ROUTE_CANDIDATE_APPROXIMATION_NOTICE,
-  };
-  return {
-    type: "Feature",
-    properties,
-    geometry: createRouteCandidateSearchArea(
-      verified.map(({ candidate }) => candidate.coordinate),
-    ),
-  };
-}
-
-function toVerifiedMeetingCandidate(
-  verification: RouteCandidateVerification,
-): VerifiedMeetingCandidate {
-  return {
-    id: verification.candidate.id,
-    kind: verification.candidate.kind,
-    label: verification.candidate.label,
-    coordinate: verification.candidate.coordinate,
-    travelTimeRange: verification.travelTimeRange,
-    travelTimes: verification.travelTimes,
-    normalizedSpread: verification.normalizedSpread,
-    maxTravelMinutes: verification.maxTravelMinutes,
-  };
-}
-
-export function calculateComparableTravelTimeRange(
-  minutes: readonly number[],
-  tolerancePercent: TolerancePercent,
-): ComparableTravelTimeRange {
-  if (minutes.length === 0 || minutes.some((minute) => !Number.isFinite(minute))) {
-    throw new RangeError("At least one finite travel time is required.");
-  }
-
-  const orderedMinutes = [...minutes].sort((first, second) => first - second);
-  const middle = Math.floor(orderedMinutes.length / 2);
-  const targetMinutes =
-    orderedMinutes.length % 2 === 0
-      ? (orderedMinutes[middle - 1] + orderedMinutes[middle]) / 2
-      : orderedMinutes[middle];
-  const tolerance = tolerancePercent / 100;
-  const lowerMinutes = targetMinutes * (1 - tolerance);
-  const upperMinutes = targetMinutes * (1 + tolerance);
-  const observedMinMinutes = orderedMinutes[0];
-  const observedMaxMinutes = orderedMinutes[orderedMinutes.length - 1];
-
-  return {
-    targetMinutes,
-    lowerMinutes,
-    upperMinutes,
-    observedMinMinutes,
-    observedMaxMinutes,
-    tolerancePercent,
-    isComparable:
-      observedMinMinutes >= lowerMinutes && observedMaxMinutes <= upperMinutes,
-  };
-}
-
-function toRoutingParticipant(
-  participant: MeetingParticipant,
-): RoutingParticipant {
+function toParticipantJourney(participant: MeetingParticipant, journey: CoordinateJourney, source: string): PlannedParticipantJourney {
   return {
     participantId: participant.id,
-    origin: participant.location,
-    mode: participant.mode,
+    mode: "transit",
+    plannedDepartureAt: journey.plannedDepartureAt,
+    plannedArrivalAt: journey.plannedArrivalAt,
+    plannedDurationMilliseconds: journey.plannedDurationMilliseconds,
+    source,
   };
 }
 
-async function resolveParticipants(
-  participants: readonly MeetingParticipant[],
-  providers: MeetingProviders,
-): Promise<readonly MeetingParticipant[]> {
-  return Promise.all(
-    participants.map(async (participant) => {
-      const location = await invokeProvider("geocoding", () =>
-        providers.geocoding.resolveLocation(participant.location),
-      );
-      if (
-        !Number.isFinite(location.latitude) ||
-        !Number.isFinite(location.longitude) ||
-        !isWithinOfficialMunichBoundary(location)
-      ) {
-        throw new ResolvedLocationOutsideMunichError();
-      }
-      return {
-        ...participant,
-        location: {
-          label: location.label,
-          latitude: location.latitude,
-          longitude: location.longitude,
-        },
-      };
-    }),
-  );
+function isFairPair(first: number, second: number, tolerancePercent: number): boolean {
+  return 100 * Math.abs(first - second) <= tolerancePercent * (first + second);
 }
 
-function findVerifiedCells(
-  cells: readonly GridCell[],
-  matrixByKey: ReadonlyMap<string, RoutingMatrixCell>,
-  participants: readonly MeetingParticipant[],
-  tolerancePercent: TolerancePercent,
-): readonly VerifiedGridCell[] {
-  return cells.flatMap((cell) => {
-    const sampleRanges = cell.sampleDestinationIds.flatMap((destinationId) => {
-      const matrixCells = participants.map((participant) =>
-        getMatrixCell(participant.id, destinationId, matrixByKey),
-      );
-      if (
-        matrixCells.some(
-          (matrixCell) => matrixCell.status === "unreachable" || matrixCell.minutes === null,
-        )
-      ) {
-        return [];
-      }
-      return [
-        calculateComparableTravelTimeRange(
-          matrixCells.map((matrixCell) => matrixCell.minutes as number),
-          tolerancePercent,
-        ),
-      ];
-    });
-    return sampleRanges.length === cell.sampleDestinationIds.length &&
-      sampleRanges.every((range) => range.isComparable)
-      ? [{ cell, sampleRanges }]
-      : [];
-  });
-}
-
-function createCorridor(
-  cells: readonly GridCell[],
-  tolerancePercent: TolerancePercent,
-  grid: { columns: number; rows: number },
-): MeetingCorridor {
-  const properties: SampleGridCorridorProperties = {
-    kind: "sample-grid-corridor",
-    approximation: "sample-grid",
-    verification: "center-and-clipped-vertices",
-    tolerancePercent,
-    cellCount: cells.length,
-    gridColumns: grid.columns,
-    gridRows: grid.rows,
-    boundaryName: "OFFICIAL_MUNICH_STADTBEZIRKE_APPLICATION_COLLECTION",
-    geometryGuarantee: SAMPLE_GRID_APPROXIMATION_NOTICE,
-  };
-  const geometry: GeoJsonGeometry = {
-    type: "MultiPolygon",
-    coordinates: cells.flatMap((cell) => cell.geometry.coordinates),
-  };
-
-  return { type: "Feature", properties, geometry };
-}
-
-function selectRoutingGrid(
-  capabilities: RoutingProviderCapabilities,
-) {
-  try {
-    return createGridForRoutingCapabilities(capabilities);
-  } catch {
-    throw new InvalidRoutingRequestError(
-      "The selected routing provider cannot serve a complete bounded Munich grid.",
-      [
-        {
-          path: ["participants"],
-          code: "routing_grid_exceeds_provider_cap",
-          message: "The selected provider cannot serve a complete grid for this request.",
-        },
-      ],
-    );
-  }
-}
-
-function validateRoutingRequest(
-  input: MeetingCalculationInput,
-  capabilities: RoutingProviderCapabilities,
-  destinationCount: number,
-): void {
-  const issues: Array<{ path: Array<string | number>; code: string; message: string }> = [];
-  if (input.participants.length > capabilities.maxParticipants) {
-    issues.push({
-      path: ["participants"],
-      code: "routing_provider_participant_cap",
-      message: `The selected routing provider supports at most ${capabilities.maxParticipants} participants.`,
-    });
-  }
-  input.participants.forEach((participant, index) => {
-    if (!capabilities.supportedModes.includes(participant.mode)) {
-      issues.push({
-        path: ["participants", index, "mode"],
-        code: "routing_mode_unsupported",
-        message: `The selected routing provider does not support ${participant.mode} travel.`,
-      });
+function mergeQualifiedCandidates(
+  candidates: readonly VerifiedCandidate[],
+  selectedTolerancePercent: TolerancePercent,
+  effectiveTolerancePercent: number,
+): FairLocation[] {
+  const merged: MutablePhysicalLocation[] = [];
+  const orderedCandidates = [...candidates].sort(compareCandidatePhysicalOrder);
+  for (const candidate of orderedCandidates) {
+    const existing = merged.find((location) => samePhysicalLocation(location, candidate));
+    if (existing) {
+      candidate.sourceRoutePatternIds.forEach((id) => existing.sourceRoutePatternIds.add(id));
+      continue;
     }
-  });
-  if (destinationCount > capabilities.maxDestinations) {
-    issues.push({
-      path: ["participants"],
-      code: "routing_provider_destination_cap",
-      message: `The selected routing provider supports at most ${capabilities.maxDestinations} destinations.`,
+    const kind = candidate.kind;
+    const physicalIdentity = kind === "station"
+      ? `station:${candidate.physicalStationId}`
+      : kind === "origin"
+        ? `origin:${stableHash(`${candidate.coordinate.latitude}:${candidate.coordinate.longitude}`)}`
+        : `walking-endpoint:${stableHash(`${candidate.coordinate.latitude}:${candidate.coordinate.longitude}`)}`;
+    merged.push({
+      kind,
+      physicalIdentity,
+      coordinate: candidate.coordinate,
+      sourceRoutePatternIds: new Set(candidate.sourceRoutePatternIds),
+      representative: candidate,
     });
   }
-  const entries = input.participants.length * destinationCount;
-  if (entries > capabilities.maxMatrixEntries) {
-    issues.push({
-      path: ["participants"],
-      code: "routing_provider_matrix_cap",
-      message: `The selected routing provider supports at most ${capabilities.maxMatrixEntries} matrix entries.`,
-    });
-  }
-  if (issues.length > 0) {
-    throw new InvalidRoutingRequestError(
-      "The request exceeds the selected routing provider capabilities.",
-      issues,
-    );
-  }
-}
-
-function chooseRepresentativeCell(
-  cells: readonly VerifiedGridCell[],
-  participants: readonly MeetingParticipant[],
-): VerifiedGridCell {
-  const average = participants.reduce(
-    (sum, participant) => ({
-      latitude: sum.latitude + participant.location.latitude / participants.length,
-      longitude: sum.longitude + participant.location.longitude / participants.length,
-    }),
-    { latitude: 0, longitude: 0 },
-  );
-  return cells.reduce((best, current) =>
-    coordinateDistanceSquared(current.cell.center, average) <
-    coordinateDistanceSquared(best.cell.center, average)
-      ? current
-      : best,
-  );
-}
-
-function getTravelTimesForDestination(
-  destinationId: string,
-  participants: readonly MeetingParticipant[],
-  matrixByKey: ReadonlyMap<string, RoutingMatrixCell>,
-): readonly TravelTimeEstimate[] {
-  return participants.map((participant) => {
-    const cell = getMatrixCell(participant.id, destinationId, matrixByKey);
-    if (cell.status !== "ok" || cell.minutes === null) {
-      throw new ProviderUnavailableError("routing");
-    }
+  return merged.map((location) => {
+    const representative = location.representative;
     return {
-      participantId: cell.participantId,
-      mode: cell.mode,
-      minutes: cell.minutes,
-      source: cell.source,
+      id: location.physicalIdentity,
+      label: representative.label,
+      kind: location.kind,
+      physicalIdentity: location.physicalIdentity,
+      coordinate: location.coordinate,
+      journeys: representative.journeys,
+      differenceMilliseconds: representative.differenceMilliseconds,
+      selectedTolerancePercent,
+      effectiveTolerancePercent,
+      sourceRoutePatternIds: [...location.sourceRoutePatternIds],
     };
   });
 }
 
-function getMatrixCell(
-  participantId: string,
-  destinationId: string,
-  matrixByKey: ReadonlyMap<string, RoutingMatrixCell>,
-): RoutingMatrixCell {
-  const matrixCell = matrixByKey.get(matrixKey(participantId, destinationId));
-  if (!matrixCell) {
-    throw new ProviderUnavailableError("routing");
-  }
-  return matrixCell;
+function compareCandidatePhysicalOrder(left: VerifiedCandidate, right: VerifiedCandidate): number {
+  const kindOrder: Record<RouteCandidateKind, number> = { station: 0, origin: 1, "walking-endpoint": 2 };
+  return kindOrder[left.kind] - kindOrder[right.kind] ||
+    (left.physicalStationId ?? "").localeCompare(right.physicalStationId ?? "") ||
+    left.coordinate.latitude - right.coordinate.latitude ||
+    left.coordinate.longitude - right.coordinate.longitude ||
+    left.order - right.order;
 }
 
-function validateAndIndexMatrix(
-  response: RoutingMatrixResponse,
-  request: RoutingMatrixRequest,
-): ReadonlyMap<string, RoutingMatrixCell> {
-  if (
-    response.contractVersion !== "meeet-routing-gateway/v1" ||
-    response.departureAt !== request.departureAt ||
-    response.travelTimes.length !==
-      request.participants.length * request.destinations.length
-  ) {
-    throw new ProviderUnavailableError("routing");
-  }
-
-  const participantModes = new Map(
-    request.participants.map((participant) => [
-      participant.participantId,
-      participant.mode,
-    ]),
-  );
-  const destinationIds = new Set(
-    request.destinations.map((destination) => destination.id),
-  );
-  const matrixByKey = new Map<string, RoutingMatrixCell>();
-  for (const cell of response.travelTimes) {
-    if (
-      !participantModes.has(cell.participantId) ||
-      participantModes.get(cell.participantId) !== cell.mode ||
-      !destinationIds.has(cell.destinationId) ||
-      (cell.status === "ok" &&
-        (cell.minutes === null ||
-          !Number.isFinite(cell.minutes) ||
-          cell.minutes < 0)) ||
-      (cell.status === "unreachable" && cell.minutes !== null) ||
-      cell.status !== "ok" && cell.status !== "unreachable"
-    ) {
-      throw new ProviderUnavailableError("routing");
-    }
-    const key = matrixKey(cell.participantId, cell.destinationId);
-    if (matrixByKey.has(key)) {
-      throw new ProviderUnavailableError("routing");
-    }
-    matrixByKey.set(key, cell);
-  }
-  return matrixByKey;
+function samePhysicalLocation(location: MutablePhysicalLocation, candidate: VerifiedCandidate): boolean {
+  if (location.kind === "station" && candidate.kind === "station") return location.physicalIdentity === `station:${candidate.physicalStationId}`;
+  if (location.kind === "station" || candidate.kind === "station") return false;
+  return haversineDistanceKm(location.coordinate, candidate.coordinate) * 1_000 <= WALKING_ENDPOINT_MERGE_RADIUS_METRES;
 }
 
-function matrixKey(participantId: string, destinationId: string): string {
-  return `${participantId}\u0000${destinationId}`;
-}
-
-function createRequestSnapshot(
-  input: MeetingCalculationInput,
-  participants: readonly MeetingParticipant[],
-) {
+function createMetadata(routing: ProviderDescriptor): MeetingCalculationMetadata {
+  const boundary = createBoundaryMetadata();
   return {
-    participants,
-    tolerancePercent: input.tolerancePercent,
-    departureAt: input.departureAt,
-    timeZone: MEETING_TIME_ZONE,
+    routing,
+    boundary,
+    provenance: {
+      routing: routing.provenance,
+      boundary,
+    },
   };
 }
 
-function createMetadata(
-  providers: MeetingProviders,
-  routingTiming?: RoutingMatrixTimingMetadata,
-  searchKind: "sample-grid" | "route-candidate" = "sample-grid",
-): MeetingCalculationMetadata {
-  const routing = applyRoutingTiming(providers.routing.descriptor, routingTiming);
-  const descriptors = [
-    providers.geocoding.descriptor,
-    routing,
-    providers.poi.descriptor,
-  ];
-  const dataKind = routingTiming
-    ? routingTiming.liveData
-      ? "live"
-      : "scheduled"
-    : getOverallDataKind(descriptors);
-  const deployment = getOverallDeployment(descriptors);
-  const mapConfiguration = providers.mapConfiguration ?? {
-    source: "client-configured" as const,
-    styleUrl: null,
-    attribution: null,
-  };
-  const boundary = {
+function createBoundaryMetadata(): OfficialBoundaryMetadata {
+  return {
     name: "OFFICIAL_MUNICH_STADTBEZIRKE_APPLICATION_COLLECTION",
     sourceUrl: OFFICIAL_MUNICH_BOUNDARY_MANIFEST.sourceUrl,
     metadataUrl: OFFICIAL_MUNICH_BOUNDARY_MANIFEST.metadataUrl,
     retrievedAt: OFFICIAL_MUNICH_BOUNDARY_MANIFEST.retrievedAt,
     contentHash: OFFICIAL_MUNICH_BOUNDARY_MANIFEST.normalizedContentHash,
     metadataContentHash: OFFICIAL_MUNICH_BOUNDARY_MANIFEST.metadataContentHash,
-    districtCount: 25 as const,
-    license: {
-      name: OFFICIAL_MUNICH_BOUNDARY_MANIFEST.license.name,
-      url: OFFICIAL_MUNICH_BOUNDARY_MANIFEST.license.url,
-    },
+    districtCount: 25,
+    license: OFFICIAL_MUNICH_BOUNDARY_MANIFEST.license,
     attribution: OFFICIAL_MUNICH_BOUNDARY_MANIFEST.attribution,
-    legalBoundary: false as const,
+    legalBoundary: false,
   };
+}
 
+function normalizeJourneyCoordinates(journey: CoordinateJourney): CoordinateJourney {
   return {
-    source: {
-      deployment,
-      dataKind,
-      liveData: routingTiming?.liveData ?? descriptors.some((descriptor) => descriptor.liveData),
-      label:
-        routing.provenance.provider === "mvg-direct-routing"
-          ? "Unofficial MVG routing with candidate centers + fixture coordinate resolution/static POIs"
-          : dataKind === "demo-static"
-          ? "Local static demo providers"
-          : "Configured provider adapters",
-    },
-    approximation: searchKind === "route-candidate"
-      ? ROUTE_CANDIDATE_APPROXIMATION_NOTICE
-      : SAMPLE_GRID_APPROXIMATION_NOTICE,
-    providers: {
-      geocoding: providers.geocoding.descriptor,
-      routing,
-      poi: providers.poi.descriptor,
-    },
-    boundary,
-    provenance: {
-      boundary,
-      routing: routing.provenance,
-      geocoding: providers.geocoding.descriptor.provenance,
-      poi: providers.poi.descriptor.provenance,
-      map: mapConfiguration,
-    },
+    ...journey,
+    transitStops: journey.transitStops.map(normalizeJourneyEndpoint),
+    parts: journey.parts.map((part) => ({
+      ...part,
+      from: normalizeJourneyEndpoint(part.from),
+      to: normalizeJourneyEndpoint(part.to),
+      intermediateStops: part.intermediateStops.map(normalizeJourneyEndpoint),
+    })),
   };
 }
 
-function applyRoutingTiming(
-  descriptor: ProviderDescriptor,
-  timing?: RoutingMatrixTimingMetadata,
-): ProviderDescriptor {
-  if (!timing) return descriptor;
-  const dataKind = timing.liveData ? "live" : "scheduled";
+function normalizeJourneyEndpoint(endpoint: JourneyEndpoint): JourneyEndpoint {
+  const label = typeof endpoint.label === "string" ? endpoint.label.trim() : "";
   return {
-    ...descriptor,
-    dataKind,
-    liveData: timing.liveData,
-    provenance: {
-      ...descriptor.provenance,
-      dataKind,
-      liveData: timing.liveData,
-    },
+    stationGlobalId: endpoint.stationGlobalId,
+    coordinate: coordinateOnly(endpoint.coordinate),
+    ...(label.length > 0 && label.length <= MAX_LOCATION_LABEL_LENGTH ? { label } : {}),
   };
 }
 
-function getOverallDataKind(
-  descriptors: readonly ProviderDescriptor[],
-): ProviderDataKind {
-  const first = descriptors[0]?.dataKind;
-  return first && descriptors.every((descriptor) => descriptor.dataKind === first)
-    ? first
-    : "unknown";
+function coordinateOnly(coordinate: LocationCoordinate): LocationCoordinate {
+  return { latitude: coordinate.latitude, longitude: coordinate.longitude };
 }
 
-function getOverallDeployment(
-  descriptors: readonly ProviderDescriptor[],
-): ProviderDeploymentKind {
-  const first = descriptors[0]?.deployment;
-  return first && descriptors.every((descriptor) => descriptor.deployment === first)
-    ? first
-    : "unknown";
+function endpointIdentity(endpoint: JourneyEndpoint): string {
+  return JSON.stringify({ stationGlobalId: endpoint.stationGlobalId, coordinate: endpoint.coordinate });
 }
 
-async function invokeProvider<T>(
-  providerRole: "geocoding" | "routing" | "poi",
-  operation: () => Promise<T>,
-): Promise<T> {
-  try {
-    return await operation();
-  } catch (error) {
-    if (error instanceof ProviderUnavailableError) {
-      throw error;
-    }
-    if (error instanceof ProviderNotConfiguredError) {
-      throw error;
-    }
-    throw new ProviderUnavailableError(providerRole);
+function isValidCoordinate(value: LocationCoordinate): boolean {
+  return Number.isFinite(value.latitude) && Number.isFinite(value.longitude) && value.latitude >= -90 && value.latitude <= 90 && value.longitude >= -180 && value.longitude <= 180;
+}
+
+function coordinatesWithinMvgPrecision(first: LocationCoordinate, second: LocationCoordinate): boolean {
+  return haversineDistanceKm(first, second) * 1_000 <= COORDINATE_BINDING_TOLERANCE_METRES;
+}
+
+function isCanonicalInstant(value: string): boolean {
+  return /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,3})?Z$/.test(value) && Number.isFinite(Date.parse(value));
+}
+
+function stableHash(value: string): string {
+  let hash = 2166136261;
+  for (let index = 0; index < value.length; index += 1) {
+    hash ^= value.charCodeAt(index);
+    hash = Math.imul(hash, 16777619);
   }
-}
-
-function coordinateDistanceSquared(
-  first: LocationCoordinate,
-  second: LocationCoordinate,
-): number {
-  return (
-    (first.latitude - second.latitude) ** 2 +
-    (first.longitude - second.longitude) ** 2
-  );
+  return (hash >>> 0).toString(16).padStart(8, "0");
 }

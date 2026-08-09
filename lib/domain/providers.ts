@@ -6,6 +6,8 @@ import type {
   MeetingPointOfInterest,
   ProviderDescriptor,
   ResolvedLocation,
+  CoordinateJourneyRequest,
+  CoordinateJourneyResult,
   RoutingMatrixRequest,
   RoutingMatrixResponse,
   RouteAlternativeDiscoveryRequest,
@@ -59,6 +61,17 @@ export interface RouteAlternativeProvider {
   ): Promise<RouteAlternativeDiscoveryResult>;
 }
 
+/**
+ * Canonical meeting-search seam. It is deliberately separate from the
+ * route-first point-to-point subsystem.
+ */
+export interface CoordinateJourneyProvider {
+  readonly descriptor: ProviderDescriptor;
+  getCoordinateJourneys(
+    request: CoordinateJourneyRequest,
+  ): Promise<CoordinateJourneyResult>;
+}
+
 /** Domain boundary for bounded route-first point-to-point adapters. */
 export interface PointToPointRoutingProvider {
   readonly descriptor: SelfHostedRoutingAdapterDescriptor;
@@ -83,6 +96,8 @@ export interface MeetingProviders {
   routing: RoutingProvider;
   poi: PoiProvider;
   routeAlternatives?: RouteAlternativeProvider;
+  /** Coordinate-to-coordinate provider used by the canonical meeting search. */
+  journey?: CoordinateJourneyProvider;
   /** Route-first snapshot identity; calculation does not consume it yet. */
   routingSnapshot?: RoutingSnapshot;
   routingFoundation?: RoutingFoundationCapability;

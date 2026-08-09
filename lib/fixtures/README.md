@@ -1,11 +1,12 @@
 # Phase 1 local providers
 
 `providers.ts` is the intentionally temporary provider boundary for the MVP.
-It uses a bounded routing matrix, fixed straight-line distance calculations,
-fixed average speeds and fixed food/drink demo entries. It is deterministic,
-does not contact external services, and contains neither MVG/MVV timetable
-data nor live routing, geocoding, or listing data. The fixture version is
-metadata only; it is not a transit schedule.
+Its canonical journey provider returns deterministic planned transit journeys
+with walking endpoints and optional fixed anchor stops. Additional provider
+interfaces are retained only for isolated compatibility seams and are not part
+of the public calculation. The fixture does not contact external services and
+contains neither MVG/MVV timetable data nor live provider data. The fixture
+version is metadata only; it is not a transit schedule.
 
 The input boundary is:
 
@@ -13,30 +14,41 @@ The input boundary is:
 {
   "participants": [
     {
-      "id": "optional-stable-id",
+      "id": "participant-1",
       "location": {
         "label": "Marienplatz",
         "latitude": 48.1374,
         "longitude": 11.5755
       },
       "mode": "transit"
+    },
+    {
+      "id": "participant-2",
+      "location": {
+        "label": "Odeonsplatz",
+        "latitude": 48.1421,
+        "longitude": 11.5764
+      },
+      "mode": "transit"
     }
   ],
   "tolerancePercent": 10,
-  "departureAt": "2026-07-25T10:00:00+02:00"
+  "arrivalAt": "2026-07-25T10:00:00.000Z"
 }
 ```
 
-There must be 2–4 participants. `mode` is `transit`, `bike`, or `car`.
-`tolerancePercent` is 5, 10, or 15 and defaults to 10. The temporary
-official district collection is defined in `lib/domain/boundary.ts` and is
-used for coordinate membership and grid clipping. It is application coverage
-geometry only, not a legal or cadastral boundary.
+The canonical request has exactly two `transit` participants and an
+`arrivalAt` instant. `tolerancePercent` is 5, 10, or 15 and defaults to 10.
+The temporary official district collection is defined in
+`lib/domain/boundary.ts` and remains application coverage geometry only, not a
+legal or cadastral boundary.
 
-The response is discriminated by `status`: `ok` includes a `MultiPolygon`
-assembled from clipped cells whose center and declared clipped vertices all
-passed the median ± tolerance sample rule; `no-corridor` includes a reason and
-no geometry. The cell interiors are not independently routed.
+The canonical response is discriminated by `status` and returns only finite
+route-derived fair locations, route patterns, and provider metadata. Selected
+venues and venue-specific routing are outside this MVP contract.
+Fixture provider metadata remains `demo-static`; it is never relabelled as a
+scheduled timetable. Each canonical response also records all fourteen source
+queries, including queries that returned no journeys.
 
 Run the focused tests with `npm test`, or run validation checks with
 `npm run lint` and `npm run build`.

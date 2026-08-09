@@ -58,6 +58,21 @@ button:focus-visible, input:focus-visible, select:focus-visible {
 .map-river { stroke: #b4d7df; stroke-linecap: round; fill: none; }
 .corridor-path { fill: rgba(239,120,94,.2); stroke: #d8644e; stroke-width: 2; stroke-dasharray: 5 5; }
 .marker-shadow { filter: drop-shadow(0 3px 3px rgba(31,48,37,.22)); }
+.meeet-origin-marker {
+  display: grid;
+  width: 28px;
+  height: 28px;
+  place-items: center;
+  border: 3px solid var(--paper);
+  border-radius: 999px;
+  background: var(--coral);
+  color: var(--ink);
+  font-size: 11px;
+  font-weight: 800;
+  box-shadow: 0 3px 7px rgba(31,48,37,.24);
+  cursor: grab;
+}
+.meeet-origin-marker:active { cursor: grabbing; }
 
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { scroll-behavior: auto !important; animation-duration: .01ms !important; transition-duration: .01ms !important; }
