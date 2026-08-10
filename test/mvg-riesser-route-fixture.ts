@@ -3,7 +3,6 @@ export const RIESSER_COORDINATE_ROUTE = {
   parts: [
     {
       from: {
-        stationGlobalId: "",
         latitude: 48.11435,
         longitude: 11.51525,
         plannedDeparture: "2026-08-09T14:38:00.000Z",
@@ -45,11 +44,128 @@ export const RIESSER_COORDINATE_ROUTE = {
         plannedDeparture: "2026-08-09T14:55:00.000Z",
       },
       to: {
-        stationGlobalId: "",
         latitude: 48.10475,
         longitude: 11.5618,
         plannedDeparture: "2026-08-09T14:59:00.000Z",
       },
+      line: { transportType: "FUSS" },
+      intermediateStops: [],
+    },
+  ],
+} as const;
+
+export const REICHENBACH_REQUESTED_ORIGIN = {
+  latitude: 48.134265500000005,
+  longitude: 11.5765195,
+} as const;
+export const REICHENBACH_MVG_SNAPPED_ORIGIN = {
+  latitude: 48.134264,
+  longitude: 11.576454,
+} as const;
+export const REICHENBACH_PARTICIPANT_TWO = {
+  latitude: 48.153423,
+  longitude: 11.53312,
+} as const;
+export const REICHENBACH_TARGET = {
+  latitude: 48.1401,
+  longitude: 11.5601,
+} as const;
+export const REICHENBACH_ANCHOR_STOPS = [
+  { stationGlobalId: "de:09162:6", latitude: 47, longitude: 10 },
+  { stationGlobalId: "de:09162:50", latitude: 47, longitude: 10 },
+  { stationGlobalId: "de:09162:70", latitude: 47, longitude: 10 },
+  { stationGlobalId: "de:09162:1170", latitude: 47, longitude: 10 },
+  { stationGlobalId: "de:09162:190", latitude: 47, longitude: 10 },
+  { stationGlobalId: "de:09162:350", latitude: 47, longitude: 10 },
+] as const;
+
+/** Static sanitized route variants for the exact two-participant meeting regression. */
+export const REICHENBACH_PARTICIPANT_ONE_TO_TWO_ROUTE = {
+  parts: [
+    {
+      from: { stationGlobalId: null, ...REICHENBACH_MVG_SNAPPED_ORIGIN, plannedDeparture: "2026-08-10T08:45:00.000Z" },
+      to: { stationGlobalId: "de:09162:reichenbach-origin", latitude: 47, longitude: 10, plannedDeparture: "2026-08-10T08:50:00.000Z" },
+      line: { transportType: "FUSS" },
+      intermediateStops: [],
+    },
+    {
+      from: { stationGlobalId: "de:09162:reichenbach-origin", latitude: 47, longitude: 10, plannedDeparture: "2026-08-10T08:50:00.000Z" },
+      to: { stationGlobalId: "de:09162:reichenbach-target", ...REICHENBACH_TARGET, plannedDeparture: "2026-08-10T09:00:00.000Z" },
+      line: { transportType: "BUS", name: "Bus 134" },
+      intermediateStops: REICHENBACH_ANCHOR_STOPS,
+    },
+    {
+      from: { stationGlobalId: "de:09162:reichenbach-target", ...REICHENBACH_TARGET, plannedDeparture: "2026-08-10T09:00:00.000Z" },
+      to: { ...REICHENBACH_PARTICIPANT_TWO, plannedDeparture: "2026-08-10T09:10:00.000Z" },
+      line: { transportType: "FUSS" },
+      intermediateStops: [],
+    },
+  ],
+} as const;
+
+export const REICHENBACH_PARTICIPANT_TWO_TO_ONE_ROUTE = {
+  parts: [
+    {
+      from: { ...REICHENBACH_PARTICIPANT_TWO, plannedDeparture: "2026-08-10T08:45:00.000Z" },
+      to: { stationGlobalId: "de:09162:reichenbach-origin", latitude: 47, longitude: 10, plannedDeparture: "2026-08-10T08:50:00.000Z" },
+      line: { transportType: "FUSS" },
+      intermediateStops: [],
+    },
+    {
+      from: { stationGlobalId: "de:09162:reichenbach-origin", latitude: 47, longitude: 10, plannedDeparture: "2026-08-10T08:50:00.000Z" },
+      to: { stationGlobalId: "de:09162:reichenbach-target", ...REICHENBACH_TARGET, plannedDeparture: "2026-08-10T09:00:00.000Z" },
+      line: { transportType: "BUS", name: "Bus 134" },
+      intermediateStops: REICHENBACH_ANCHOR_STOPS,
+    },
+    {
+      from: { stationGlobalId: "de:09162:reichenbach-target", ...REICHENBACH_TARGET, plannedDeparture: "2026-08-10T09:00:00.000Z" },
+      to: { stationGlobalId: null, ...REICHENBACH_REQUESTED_ORIGIN, plannedDeparture: "2026-08-10T09:10:00.000Z" },
+      line: { transportType: "FUSS" },
+      intermediateStops: [],
+    },
+  ],
+} as const;
+
+export const REICHENBACH_PARTICIPANT_ONE_TO_TARGET_ROUTE = {
+  parts: [
+    {
+      from: { stationGlobalId: null, ...REICHENBACH_MVG_SNAPPED_ORIGIN, plannedDeparture: "2026-08-10T08:45:00.000Z" },
+      to: { stationGlobalId: "de:09162:reichenbach-origin", latitude: 47, longitude: 10, plannedDeparture: "2026-08-10T08:50:00.000Z" },
+      line: { transportType: "FUSS" },
+      intermediateStops: [],
+    },
+    {
+      from: { stationGlobalId: "de:09162:reichenbach-origin", latitude: 47, longitude: 10, plannedDeparture: "2026-08-10T08:50:00.000Z" },
+      to: { stationGlobalId: "de:09162:reichenbach-target", ...REICHENBACH_TARGET, plannedDeparture: "2026-08-10T09:00:00.000Z" },
+      line: { transportType: "BUS", name: "Bus 134" },
+      intermediateStops: REICHENBACH_ANCHOR_STOPS,
+    },
+    {
+      from: { stationGlobalId: "de:09162:reichenbach-target", ...REICHENBACH_TARGET, plannedDeparture: "2026-08-10T09:00:00.000Z" },
+      to: { ...REICHENBACH_TARGET, plannedDeparture: "2026-08-10T09:10:00.000Z" },
+      line: { transportType: "FUSS" },
+      intermediateStops: [],
+    },
+  ],
+} as const;
+
+export const REICHENBACH_PARTICIPANT_TWO_TO_TARGET_ROUTE = {
+  parts: [
+    {
+      from: { ...REICHENBACH_PARTICIPANT_TWO, plannedDeparture: "2026-08-10T08:45:00.000Z" },
+      to: { stationGlobalId: "de:09162:reichenbach-origin", latitude: 47, longitude: 10, plannedDeparture: "2026-08-10T08:50:00.000Z" },
+      line: { transportType: "FUSS" },
+      intermediateStops: [],
+    },
+    {
+      from: { stationGlobalId: "de:09162:reichenbach-origin", latitude: 47, longitude: 10, plannedDeparture: "2026-08-10T08:50:00.000Z" },
+      to: { stationGlobalId: "de:09162:reichenbach-target", ...REICHENBACH_TARGET, plannedDeparture: "2026-08-10T09:00:00.000Z" },
+      line: { transportType: "BUS", name: "Bus 134" },
+      intermediateStops: REICHENBACH_ANCHOR_STOPS,
+    },
+    {
+      from: { stationGlobalId: "de:09162:reichenbach-target", ...REICHENBACH_TARGET, plannedDeparture: "2026-08-10T09:00:00.000Z" },
+      to: { ...REICHENBACH_TARGET, plannedDeparture: "2026-08-10T09:10:00.000Z" },
       line: { transportType: "FUSS" },
       intermediateStops: [],
     },
@@ -61,7 +177,6 @@ export const RIESSER_HBF_COORDINATE_ROUTE = {
   parts: [
     {
       from: {
-        stationGlobalId: "",
         latitude: 48.11435,
         longitude: 11.51525,
         plannedDeparture: "2026-08-09T14:20:00.000Z",
@@ -121,7 +236,6 @@ export const RIESSER_HBF_COORDINATE_ROUTE = {
         plannedDeparture: "2026-08-09T14:46:00.000Z",
       },
       to: {
-        stationGlobalId: "",
         latitude: 48.10475,
         longitude: 11.5618,
         plannedDeparture: "2026-08-09T14:59:00.000Z",

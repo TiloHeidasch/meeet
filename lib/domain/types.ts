@@ -42,11 +42,13 @@ export type MeetingSearchDirection =
 export type RoutePatternSearchKind = "direct" | "anchor";
 export type RoutePatternKind = "transit" | "walk-only";
 export type RouteCandidateKind = "station" | "walking-endpoint" | "origin";
+export type ParticipantOriginEndpoint = "origin" | "destination";
 
 export interface CoordinateJourneyRequest {
   origin: LocationCoordinate;
   destination: LocationCoordinate;
   arrivalAt: string;
+  participantOriginEndpoint: ParticipantOriginEndpoint;
   viaStationGlobalId?: string;
   viaDwellTimeInMinutes?: 10;
   signal?: AbortSignal;

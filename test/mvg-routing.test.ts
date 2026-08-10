@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { calculateMeeting } from "../lib/domain/meeting.ts";
+import { calculateMeeting, MVG_ANCHOR_STATIONS } from "../lib/domain/meeting.ts";
 import type { MeetingProviders } from "../lib/domain/providers.ts";
 import type { FetchImplementation } from "../lib/providers/http.ts";
 import { HttpProviderError } from "../lib/providers/http.ts";
@@ -19,6 +19,16 @@ import {
 } from "../lib/providers/config.ts";
 import { handleMeetingPost } from "../lib/domain/meeting-api.ts";
 import { validateMeetingCalculationResponse } from "../lib/domain/response.ts";
+import {
+  REICHENBACH_MVG_SNAPPED_ORIGIN,
+  REICHENBACH_PARTICIPANT_ONE_TO_TARGET_ROUTE,
+  REICHENBACH_PARTICIPANT_ONE_TO_TWO_ROUTE,
+  REICHENBACH_PARTICIPANT_TWO,
+  REICHENBACH_PARTICIPANT_TWO_TO_ONE_ROUTE,
+  REICHENBACH_PARTICIPANT_TWO_TO_TARGET_ROUTE,
+  REICHENBACH_REQUESTED_ORIGIN,
+  REICHENBACH_TARGET,
+} from "./mvg-riesser-route-fixture.ts";
 
 const DEPARTURE = "2026-07-25T08:00:00.000Z";
 const A = { latitude: 48.1374, longitude: 11.5755 };
@@ -120,6 +130,7 @@ test("MVG walking pathPolyline decodes E5 coordinates in GeoJSON order", () => {
     origin,
     destination,
     arrivalAt: "2026-07-25T08:03:00.000Z",
+    participantOriginEndpoint: "origin",
   })[0]!;
 
   assert.deepEqual(journey.parts[0]!.geometry, {
@@ -141,6 +152,7 @@ test("malformed or endpoint-mismatched MVG path geometry degrades to null", () =
     origin,
     destination,
     arrivalAt: "2026-07-25T08:03:00.000Z",
+    participantOriginEndpoint: "origin",
   });
   assert.equal(malformed.length, 1);
   assert.equal(malformed[0]!.parts[0]!.geometry, null);
@@ -155,9 +167,88 @@ test("malformed or endpoint-mismatched MVG path geometry degrades to null", () =
     origin: mismatchedOrigin,
     destination: mismatchedDestination,
     arrivalAt: "2026-07-25T08:03:00.000Z",
+    participantOriginEndpoint: "origin",
   });
   assert.equal(mismatched.length, 1);
   assert.equal(mismatched[0]!.parts[0]!.geometry, null);
+});
+
+test("MVG permits a nearby anonymous first participant-origin snap and keeps destination strict", () => {
+  const origin = { latitude: 48.1374, longitude: 11.5755 };
+  const destination = { latitude: 48.145, longitude: 11.58 };
+  const request = { origin, destination, arrivalAt: "2026-07-25T08:25:00.000Z", participantOriginEndpoint: "origin" as const };
+  const route = {
+    parts: [
+      {
+        from: { latitude: origin.latitude + 0.00007, longitude: origin.longitude, plannedDeparture: "2026-07-25T08:00:00.000Z" },
+        to: { stationGlobalId: "origin-station", latitude: 48.138, longitude: 11.576, plannedDeparture: "2026-07-25T08:05:00.000Z" },
+        line: { transportType: "FUSS" },
+      },
+      {
+        from: { stationGlobalId: "origin-station", latitude: 48.138, longitude: 11.576, plannedDeparture: "2026-07-25T08:05:00.000Z" },
+        to: { stationGlobalId: "destination-station", latitude: 48.144, longitude: 11.579, plannedDeparture: "2026-07-25T08:20:00.000Z" },
+        line: { transportType: "BUS" },
+      },
+      {
+        from: { stationGlobalId: "destination-station", latitude: 48.144, longitude: 11.579, plannedDeparture: "2026-07-25T08:20:00.000Z" },
+        to: { latitude: destination.latitude, longitude: destination.longitude, plannedDeparture: "2026-07-25T08:25:00.000Z" },
+        line: { transportType: "FUSS" },
+      },
+    ],
+  };
+  const parsed = parseMvgCoordinateJourneys([route], request)[0]!;
+  assert.deepEqual(parsed.parts[0]!.from.coordinate, origin);
+  assert.deepEqual(parsed.parts.at(-1)!.to.coordinate, destination);
+
+  const tooFar = structuredClone(route);
+  tooFar.parts[0]!.from.latitude = origin.latitude + 0.0002;
+  assert.throws(() => parseMvgCoordinateJourneys([tooFar], request), /not bound/);
+
+  const tooFarDestination = structuredClone(route);
+  tooFarDestination.parts.at(-1)!.to.longitude = destination.longitude + 0.00005;
+  assert.throws(() => parseMvgCoordinateJourneys([tooFarDestination], request), /not bound/);
+
+  const identified = structuredClone(route);
+  identified.parts[0]!.from.stationGlobalId = "anonymous-origin-station";
+  assert.throws(() => parseMvgCoordinateJourneys([identified], request), /not bound/);
+
+  const transitAnonymous = structuredClone(route);
+  (transitAnonymous.parts[1]!.from as Record<string, unknown>).stationGlobalId = null;
+  assert.throws(() => parseMvgCoordinateJourneys([transitAnonymous], request), /invalid station identity/);
+});
+
+test("MVG binds only a declared final participant origin while keeping the other endpoint strict", () => {
+  const origin = { latitude: 48.1374, longitude: 11.5755 };
+  const destination = { latitude: 48.145, longitude: 11.58 };
+  const request = {
+    origin,
+    destination,
+    arrivalAt: "2026-07-25T08:25:00.000Z",
+    participantOriginEndpoint: "destination" as const,
+  };
+  const route = {
+    parts: [
+      {
+        from: { ...origin, plannedDeparture: "2026-07-25T08:00:00.000Z" },
+        to: { stationGlobalId: "origin-station", latitude: 48.138, longitude: 11.576, plannedDeparture: "2026-07-25T08:05:00.000Z" },
+        line: { transportType: "FUSS" },
+      },
+      {
+        from: { stationGlobalId: "origin-station", latitude: 48.138, longitude: 11.576, plannedDeparture: "2026-07-25T08:05:00.000Z" },
+        to: { stationGlobalId: "destination-station", latitude: 48.144, longitude: 11.579, plannedDeparture: "2026-07-25T08:20:00.000Z" },
+        line: { transportType: "BUS" },
+      },
+      {
+        from: { stationGlobalId: "destination-station", latitude: 48.144, longitude: 11.579, plannedDeparture: "2026-07-25T08:20:00.000Z" },
+        to: { stationGlobalId: "", latitude: destination.latitude, longitude: destination.longitude + 0.00005, plannedDeparture: "2026-07-25T08:25:00.000Z" },
+        line: { transportType: "FUSS" },
+      },
+    ],
+  };
+  const parsed = parseMvgCoordinateJourneys([route], request)[0]!;
+  assert.deepEqual(parsed.parts.at(-1)!.to.coordinate, destination);
+
+  assert.throws(() => parseMvgCoordinateJourneys([route], { ...request, participantOriginEndpoint: "origin" }), /invalid station identity|not bound/);
 });
 
 test("direct provider enforces destination and matrix caps", async () => {
@@ -621,6 +712,89 @@ test("canonical fixture results preserve demo attribution without legacy area fi
   assert.equal(Object.hasOwn(result, "pois"), false);
 });
 
+test("the Reichenbachstraße to Rotkreuzplatz MVG API request completes parser and domain validation", async () => {
+  const meetingInput = {
+    participants: [
+      {
+        id: "participant-1",
+        mode: "transit" as const,
+        location: {
+          label: "Reichenbachstraße 1",
+          ...REICHENBACH_REQUESTED_ORIGIN,
+        },
+      },
+      {
+        id: "participant-2",
+        mode: "transit" as const,
+        location: {
+          label: "Rotkreuzplatz",
+          ...REICHENBACH_PARTICIPANT_TWO,
+        },
+      },
+    ] as const,
+    arrivalAt: "2026-08-10T09:10:00.000Z",
+    tolerancePercent: 10 as const,
+  };
+  const requestedUrls: URL[] = [];
+  const anchorPayloadSizes: number[] = [];
+  const provider = new MvgDirectRoutingProvider((async (requestInput) => {
+    const url = new URL(String(requestInput));
+    requestedUrls.push(url);
+    const payload = sanitizedReichenbachFixture(url);
+    if (url.searchParams.has("viaStationGlobalId")) anchorPayloadSizes.push(payload.length);
+    return Response.json(payload);
+  }) as FetchImplementation);
+  const providerResult = await provider.getCoordinateJourneys({
+    origin: meetingInput.participants[0].location,
+    destination: meetingInput.participants[1].location,
+    arrivalAt: meetingInput.arrivalAt,
+    participantOriginEndpoint: "origin",
+  });
+  assert.deepEqual(providerResult.journeys[0]!.parts[0]!.from.coordinate, {
+    ...REICHENBACH_REQUESTED_ORIGIN,
+  });
+  const meetingDomainJourneyProvider = {
+    descriptor: provider.descriptor,
+    getCoordinateJourneys: async (request: Parameters<MvgDirectRoutingProvider["getCoordinateJourneys"]>[0]) => {
+      const result = await provider.getCoordinateJourneys(request);
+      const snapFirst = request.participantOriginEndpoint === "origin" && sameCoordinate(request.origin, REICHENBACH_REQUESTED_ORIGIN);
+      const snapFinal = request.participantOriginEndpoint === "destination" && sameCoordinate(request.destination, REICHENBACH_REQUESTED_ORIGIN);
+      if (!snapFirst && !snapFinal) return result;
+      return {
+        ...result,
+        journeys: result.journeys.map((journey) => ({
+          ...journey,
+          parts: journey.parts.map((part, index) => ({
+            ...part,
+            ...(snapFirst && index === 0 ? { from: { ...part.from, coordinate: REICHENBACH_MVG_SNAPPED_ORIGIN } } : {}),
+            ...(snapFinal && index === journey.parts.length - 1 ? { to: { ...part.to, coordinate: REICHENBACH_MVG_SNAPPED_ORIGIN } } : {}),
+          })),
+        })),
+      };
+    },
+  };
+  const response = await withFixedCurrentTime(() => handleMeetingPost(
+    jsonRequest(meetingInput),
+    {
+      ...fixtureProviders,
+      routing: provider,
+      journey: meetingDomainJourneyProvider,
+    },
+  ));
+  assert.equal(response.status, 200);
+  const responseBody = await response.json() as { status?: string; fairLocations?: unknown[] };
+  assert.equal(responseBody.status, "ok");
+  assert.ok((responseBody.fairLocations?.length ?? 0) > 0);
+  assert.equal(validateMeetingCalculationResponse(responseBody).success, true);
+  const anchorRequests = requestedUrls.filter((url) => url.searchParams.has("viaStationGlobalId"));
+  assert.equal(anchorRequests.length, MVG_ANCHOR_STATIONS.length * 2);
+  assert.ok(anchorPayloadSizes.every((size) => size > 0));
+  assert.deepEqual(
+    new Set(anchorRequests.map((url) => url.searchParams.get("viaStationGlobalId"))),
+    new Set(MVG_ANCHOR_STATIONS.map((anchor) => anchor.id)),
+  );
+});
+
 function participant(id: string, mode: "transit" | "bike" | "car") {
   return { id, location: { ...A, label: "Marienplatz" }, mode };
 }
@@ -656,4 +830,49 @@ function mvgRoute(
       },
     ],
   };
+}
+
+function sanitizedReichenbachFixture(url: URL): readonly unknown[] {
+  const origin = {
+    latitude: Number(url.searchParams.get("originLatitude")),
+    longitude: Number(url.searchParams.get("originLongitude")),
+  };
+  const destination = {
+    latitude: Number(url.searchParams.get("destinationLatitude")),
+    longitude: Number(url.searchParams.get("destinationLongitude")),
+  };
+  const isParticipantOneOrigin = sameCoordinate(origin, REICHENBACH_REQUESTED_ORIGIN) || sameCoordinate(origin, REICHENBACH_MVG_SNAPPED_ORIGIN);
+  const isParticipantTwoOrigin = sameCoordinate(origin, REICHENBACH_PARTICIPANT_TWO);
+  const isParticipantOneDestination = sameCoordinate(destination, REICHENBACH_REQUESTED_ORIGIN) || sameCoordinate(destination, REICHENBACH_MVG_SNAPPED_ORIGIN);
+  const isParticipantTwoDestination = sameCoordinate(destination, REICHENBACH_PARTICIPANT_TWO);
+  const isTargetDestination = sameCoordinate(destination, REICHENBACH_TARGET);
+  if (isParticipantOneOrigin && isParticipantTwoDestination) return [REICHENBACH_PARTICIPANT_ONE_TO_TWO_ROUTE];
+  if (isParticipantTwoOrigin && isParticipantOneDestination) return [REICHENBACH_PARTICIPANT_TWO_TO_ONE_ROUTE];
+  if (isParticipantOneOrigin && isTargetDestination) return [REICHENBACH_PARTICIPANT_ONE_TO_TARGET_ROUTE];
+  if (isParticipantTwoOrigin && isTargetDestination) return [REICHENBACH_PARTICIPANT_TWO_TO_TARGET_ROUTE];
+  return [];
+}
+
+function sameCoordinate(first: { latitude: number; longitude: number }, second: { latitude: number; longitude: number }): boolean {
+  return first.latitude === second.latitude && first.longitude === second.longitude;
+}
+
+async function withFixedCurrentTime<T>(callback: () => Promise<T>): Promise<T> {
+  const NativeDate = globalThis.Date;
+  const fixedNow = NativeDate.parse("2026-08-10T08:00:00.000Z");
+  class FixedDate extends NativeDate {
+    constructor(value?: string | number | Date) {
+      super(value === undefined ? fixedNow : value instanceof NativeDate ? value.getTime() : value);
+    }
+
+    static now(): number {
+      return fixedNow;
+    }
+  }
+  globalThis.Date = FixedDate as unknown as DateConstructor;
+  try {
+    return await callback();
+  } finally {
+    globalThis.Date = NativeDate;
+  }
 }

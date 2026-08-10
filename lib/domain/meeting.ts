@@ -1,10 +1,13 @@
 import "server-only";
 
-import { haversineDistanceKm } from "./geo.ts";
 import {
   isWithinOfficialMunichBoundary,
   OFFICIAL_MUNICH_BOUNDARY_MANIFEST,
 } from "./boundary.ts";
+import {
+  bindCoordinateJourneyEndpoints,
+  isWithinCoordinateBindingTolerance,
+} from "./coordinate-binding.ts";
 import type { CoordinateJourneyProvider, MeetingProviders } from "./providers.ts";
 import type {
   CoordinateJourney,
@@ -25,6 +28,7 @@ import type {
   MeetingSearchDirection,
   MeetingSourceQueryProvenance,
   OfficialBoundaryMetadata,
+  ParticipantOriginEndpoint,
   PlannedParticipantJourney,
   ProviderDescriptor,
   RoutePattern,
@@ -52,7 +56,7 @@ export const MEETING_CALCULATION_DEADLINE_MS = 90_000;
 /** Two pattern searches × two participant checks bounds normal verification concurrency at four calls. */
 export const MAX_PATTERN_SEARCH_CONCURRENCY = 2;
 export const MAX_CANDIDATE_VERIFICATION_REQUESTS = 1_000;
-export const COORDINATE_BINDING_TOLERANCE_METRES = 1;
+export { COORDINATE_BINDING_TOLERANCE_METRES } from "./coordinate-binding.ts";
 
 export interface MeetingCalculationOptions {
   /** Test/deployment override; production uses the documented 90-second full-search bound. */
@@ -238,6 +242,7 @@ async function calculateMeetingCore(
       origin: coordinateOnly(participants[participantIndex].location),
       destination: coordinateOnly(coordinate),
       arrivalAt,
+      participantOriginEndpoint: "origin",
       signal,
     }).catch((error: unknown) => {
       verificationCache.delete(key);
@@ -392,6 +397,9 @@ function createSourceRequests(
     [participants[1], participants[0], "participant-2-to-participant-1"],
   ];
   for (const [origin, destination, direction] of directions) {
+    // Every source query travels from its selected participant origin to the
+    // other Participant Origin; anchors constrain the route between them.
+    const participantOriginEndpoint: ParticipantOriginEndpoint = "origin";
     requests.push({
       origin: origin.location,
       destination: destination.location,
@@ -402,6 +410,7 @@ function createSourceRequests(
       anchorStationGlobalId: null,
       originParticipantId: origin.id,
       destinationParticipantId: destination.id,
+      participantOriginEndpoint,
     });
     for (const anchor of MVG_ANCHOR_STATIONS) {
       requests.push({
@@ -416,6 +425,7 @@ function createSourceRequests(
         anchorStationGlobalId: anchor.id,
         originParticipantId: origin.id,
         destinationParticipantId: destination.id,
+        participantOriginEndpoint,
       });
     }
   }
@@ -427,6 +437,7 @@ function toProviderRequest(request: SourceRequest): CoordinateJourneyRequest {
     origin: request.origin,
     destination: request.destination,
     arrivalAt: request.arrivalAt,
+    participantOriginEndpoint: request.participantOriginEndpoint,
     ...(request.viaStationGlobalId === undefined ? {} : { viaStationGlobalId: request.viaStationGlobalId }),
     ...(request.viaDwellTimeInMinutes === undefined ? {} : { viaDwellTimeInMinutes: request.viaDwellTimeInMinutes }),
     signal: request.signal,
@@ -459,20 +470,28 @@ async function invokeJourneyProvider(
     if (!result || !Array.isArray(result.journeys) || typeof result.source !== "string" || !result.source.trim()) {
       throw new Error("The journey provider returned an incomplete result.");
     }
-    for (const journey of result.journeys) {
+    const journeys = result.journeys.map((journey) => {
       validateJourney(journey, request.arrivalAt);
-      if (!coordinatesWithinMvgPrecision(journey.parts[0]!.from.coordinate, request.origin) || !coordinatesWithinMvgPrecision(journey.parts.at(-1)!.to.coordinate, request.destination)) {
+      const boundParts = bindCoordinateJourneyEndpoints(
+        journey.parts,
+        request.origin,
+        request.destination,
+        request.participantOriginEndpoint,
+      );
+      if (!boundParts) {
         throw new Error("The journey is not bound to its requested origin and destination.");
       }
-      if (request.viaStationGlobalId && !journey.parts.some((part: CoordinateJourneyPart) => part.kind === "transit" && (
+      const boundJourney = { ...journey, parts: boundParts };
+      if (request.viaStationGlobalId && !boundJourney.parts.some((part: CoordinateJourneyPart) => part.kind === "transit" && (
         part.from.stationGlobalId === request.viaStationGlobalId ||
         part.to.stationGlobalId === request.viaStationGlobalId ||
         part.intermediateStops.some((stop) => stop.stationGlobalId === request.viaStationGlobalId)
       ))) {
         throw new Error("The via journey did not traverse its requested anchor station.");
       }
-    }
-    return result;
+      return boundJourney;
+    });
+    return { ...result, journeys };
   } catch (error) {
     if (error instanceof ProviderUnavailableError || error instanceof ProviderNotConfiguredError) throw error;
     throw new ProviderUnavailableError("routing");
@@ -500,7 +519,7 @@ function validateJourney(journey: CoordinateJourney, arrivalAt: string): void {
     if (index > 0) {
       const previous = journey.parts[index - 1]!;
       const sameStation = previous.to.stationGlobalId !== null && part.from.stationGlobalId !== null && previous.to.stationGlobalId === part.from.stationGlobalId;
-      const sameCoordinate = coordinatesWithinMvgPrecision(previous.to.coordinate, part.from.coordinate);
+      const sameCoordinate = isWithinCoordinateBindingTolerance(previous.to.coordinate, part.from.coordinate);
       if (!sameStation && !sameCoordinate) throw new ProviderUnavailableError("routing");
       if (Date.parse(part.plannedDepartureAt) < Date.parse(previous.plannedArrivalAt)) throw new ProviderUnavailableError("routing");
     }
@@ -865,10 +884,6 @@ function stableJourneySignature(journey: CoordinateJourney): string {
 
 function isValidCoordinate(value: LocationCoordinate): boolean {
   return Number.isFinite(value.latitude) && Number.isFinite(value.longitude) && value.latitude >= -90 && value.latitude <= 90 && value.longitude >= -180 && value.longitude <= 180;
-}
-
-function coordinatesWithinMvgPrecision(first: LocationCoordinate, second: LocationCoordinate): boolean {
-  return haversineDistanceKm(first, second) * 1_000 <= COORDINATE_BINDING_TOLERANCE_METRES;
 }
 
 function isCanonicalInstant(value: string): boolean {

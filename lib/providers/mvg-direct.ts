@@ -1,6 +1,12 @@
 import "server-only";
 
 import { cacheLife } from "next/cache";
+import {
+  ANONYMOUS_PARTICIPANT_ORIGIN_SNAP_TOLERANCE_METRES,
+  bindCoordinateJourneyEndpoints,
+  COORDINATE_BINDING_TOLERANCE_METRES,
+  isWithinCoordinateBindingTolerance,
+} from "../domain/coordinate-binding.ts";
 import { haversineDistanceKm } from "../domain/geo.ts";
 import type {
   ProviderDescriptor,
@@ -84,8 +90,9 @@ export const MVG_DIRECT_MAX_PATH_GEOMETRY_POSITIONS = 10_000;
 export const MVG_DIRECT_MAX_LABEL_LENGTH = 512;
 export const MVG_DIRECT_MAX_WALKING_TRANSIT_HANDOFF_OVERLAP_MS = 60_000;
 export const MVG_DIRECT_MAX_SAME_STATION_ENDPOINT_DISPLACEMENT_METRES = 100;
+export const MVG_DIRECT_ANONYMOUS_OUTER_WALKING_BINDING_TOLERANCE_METRES = ANONYMOUS_PARTICIPANT_ORIGIN_SNAP_TOLERANCE_METRES;
 export const MVG_DIRECT_MAX_RADIUS_METERS = 1_500;
-export const MVG_DIRECT_COORDINATE_BINDING_TOLERANCE_METRES = 1;
+export const MVG_DIRECT_COORDINATE_BINDING_TOLERANCE_METRES = COORDINATE_BINDING_TOLERANCE_METRES;
 export const MVG_DIRECT_WALKING_METERS_PER_MINUTE = 75;
 export const MVG_DIRECT_MAX_ARRIVAL_DELAY_MINUTES = 24 * 60;
 export const MVG_DIRECT_TRANSPORT_TYPES =
@@ -906,8 +913,14 @@ function parseMvgCoordinateJourney(
       throw new Error("MVG coordinate journey parts must contain from and to endpoints.");
     }
     const line = parseCoordinateJourneyLine(rawPart.line);
-    const from = parseCoordinateJourneyEndpoint(rawPart.from, line.kind === "walking");
-    const to = parseCoordinateJourneyEndpoint(rawPart.to, line.kind === "walking");
+    const from = parseCoordinateJourneyEndpoint(
+      rawPart.from,
+      index === 0 && line.kind === "walking",
+    );
+    const to = parseCoordinateJourneyEndpoint(
+      rawPart.to,
+      index === value.parts.length - 1 && line.kind === "walking",
+    );
     if (index > 0 && previousArrival === null) throw new Error("MVG coordinate journey has no previous arrival.");
     const intermediateStops = "intermediateStops" in rawPart
       ? (() => {
@@ -926,7 +939,7 @@ function parseMvgCoordinateJourney(
       const previous = parts[index - 1]!;
       const hasStationIdentities = previous.to.stationGlobalId !== null && from.stationGlobalId !== null;
       const sameStation = hasStationIdentities && previous.to.stationGlobalId === from.stationGlobalId;
-      const sameCoordinate = coordinatesWithinMvgPrecision(previous.to.coordinate, from.coordinate);
+      const sameCoordinate = isWithinCoordinateBindingTolerance(previous.to.coordinate, from.coordinate);
       if (!sameStation && !sameCoordinate) {
         throw new Error("MVG coordinate journey parts are not continuous.");
       }
@@ -971,28 +984,28 @@ function parseMvgCoordinateJourney(
   if (arrival - departure > MVG_DIRECT_MAX_ITINERARY_DURATION_MS) {
     markTemporalInvalid("itinerary-duration-exceeded");
   }
-  if (parts[0]!.kind === "walking" && parts[0]!.from.stationGlobalId === null) {
-    parts[0]!.from.coordinate = request.origin;
-  }
-  if (parts.at(-1)!.kind === "walking" && parts.at(-1)!.to.stationGlobalId === null) {
-    parts.at(-1)!.to.coordinate = request.destination;
-  }
-  if (!coordinatesWithinMvgPrecision(parts[0].from.coordinate, request.origin) || !coordinatesWithinMvgPrecision(parts.at(-1)!.to.coordinate, request.destination)) {
+  const boundParts = bindCoordinateJourneyEndpoints(
+    parts,
+    request.origin,
+    request.destination,
+    request.participantOriginEndpoint,
+  );
+  if (!boundParts) {
     throw new Error("MVG coordinate journey is not bound to its requested origin and destination.");
   }
   for (const [index, pathPolyline] of pathPolylines.entries()) {
-    const part = parts[index]!;
+    const part = boundParts[index]!;
     part.geometry = parseMvgPathPolyline(pathPolyline, part.from.coordinate, part.to.coordinate);
   }
   if (arrival > arrivalLimit) {
     markTemporalInvalid("arrives-after-arrivalAt");
   }
-  const transitStops = parts
+  const transitStops = boundParts
     .filter((part) => part.kind === "transit")
     .flatMap((part) => [part.from, ...part.intermediateStops, part.to]);
   const journey = {
     transitStops,
-    parts,
+    parts: boundParts,
     plannedDepartureAt,
     plannedArrivalAt,
     plannedDurationMilliseconds: arrival - departure,
@@ -1035,8 +1048,8 @@ function parseMvgPathPolyline(
   if (coordinates.length < 2) return null;
   const first = coordinates[0]!;
   const last = coordinates.at(-1)!;
-  if (!coordinatesWithinMvgPrecision(from, { latitude: first[1], longitude: first[0] }) ||
-    !coordinatesWithinMvgPrecision(to, { latitude: last[1], longitude: last[0] })) return null;
+  if (!isWithinCoordinateBindingTolerance(from, { latitude: first[1], longitude: first[0] }) ||
+    !isWithinCoordinateBindingTolerance(to, { latitude: last[1], longitude: last[0] })) return null;
   return { type: "LineString", coordinates };
 }
 
@@ -1077,7 +1090,7 @@ function parseCoordinateJourneyEndpoint(value: Record<string, unknown>, allowBla
     if (!stationGlobalId) {
       const blankIdentity = identityKeys.some((key) => key in value) && identityKeys
         .filter((key) => key in value)
-        .every((key) => typeof value[key] === "string" && value[key].trim().length === 0);
+        .every((key) => value[key] === null || (typeof value[key] === "string" && value[key].trim().length === 0));
       if (!allowBlankStationIdentity || !blankIdentity) throw new Error("MVG coordinate endpoint has an invalid station identity.");
     }
   }
@@ -1134,16 +1147,12 @@ function validateCoordinateJourneyRequest(request: CoordinateJourneyRequest): vo
     throw new RangeError("MVG coordinate routing requires finite WGS84 coordinates.");
   }
   if (!Number.isFinite(Date.parse(request.arrivalAt))) throw new RangeError("MVG coordinate routing requires a valid arrival instant.");
+  if (request.participantOriginEndpoint !== "origin" && request.participantOriginEndpoint !== "destination") {
+    throw new RangeError("MVG coordinate routing requires an explicit participant-origin endpoint.");
+  }
   if (request.viaStationGlobalId !== undefined && (!request.viaStationGlobalId.trim() || request.viaDwellTimeInMinutes !== 10)) {
     throw new RangeError("MVG anchor routing requires a station id and ten-minute dwell time.");
   }
-}
-
-function coordinatesWithinMvgPrecision(
-  first: { latitude: number; longitude: number },
-  second: { latitude: number; longitude: number },
-): boolean {
-  return haversineDistanceKm(first, second) * 1_000 <= MVG_DIRECT_COORDINATE_BINDING_TOLERANCE_METRES;
 }
 
 /** Parse the finite, uncached route-alternative response used by Phase 2. */
