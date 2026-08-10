@@ -1,6 +1,7 @@
 import { MEETING_SEARCH_COVERAGE_METHOD, MEETING_TIME_ZONE, TOLERANCE_PERCENT_OPTIONS } from "./types.ts";
 import { isWithinOfficialMunichBoundary } from "./boundary.ts";
 import { haversineDistanceKm } from "./geo.ts";
+import { compareFairLocationOrder, fairLocationOrderKey, type FairLocationOrderKey } from "./fair-location-order.ts";
 import type {
   MeetingCalculationResponse,
   MeetingParticipant,
@@ -336,10 +337,21 @@ function validateFairLocations(value: unknown, snapshot: unknown, patterns: unkn
   const participantIds = isRecord(snapshot) && Array.isArray(snapshot.participants)
     ? new Set(snapshot.participants.flatMap((participant) => isRecord(participant) && typeof participant.id === "string" ? [participant.id] : []))
     : new Set<string>();
+  const participantIdsInOrder = isRecord(snapshot) && Array.isArray(snapshot.participants)
+    ? snapshot.participants.map((participant) => isRecord(participant) && typeof participant.id === "string" ? participant.id : null)
+    : [];
+  const participantOrigins = new Map<string, { latitude: number; longitude: number }>();
+  if (isRecord(snapshot) && Array.isArray(snapshot.participants)) {
+    snapshot.participants.forEach((participant) => {
+      if (!isRecord(participant) || typeof participant.id !== "string" || !isRecord(participant.location) || !isCoordinateRecord(participant.location)) return;
+      participantOrigins.set(participant.id, participant.location);
+    });
+  }
   const snapshotArrival = isRecord(snapshot) && typeof snapshot.arrivalAt === "string" ? Date.parse(snapshot.arrivalAt) : Number.NaN;
   const snapshotSelected = isRecord(snapshot) ? snapshot.selectedTolerancePercent : undefined;
   const snapshotEffective = isRecord(snapshot) ? snapshot.effectiveTolerancePercent : undefined;
   const patternIds = Array.isArray(patterns) ? new Set(patterns.flatMap((pattern) => isRecord(pattern) && typeof pattern.id === "string" ? [pattern.id] : [])) : new Set<string>();
+  let previousOrder: FairLocationOrderKey | null = null;
   value.forEach((location, index) => {
     const locationPath = path.concat(index);
     if (!isRecord(location)) {
@@ -374,8 +386,10 @@ function validateFairLocations(value: unknown, snapshot: unknown, patterns: unkn
           issues.push(issue(journeyPath, "invalid_type", "Planned participant journey must be an object."));
           return;
         }
-        requireKeys(journey, ["participantId", "mode", "plannedDepartureAt", "plannedArrivalAt", "plannedDurationMilliseconds", "source"], journeyPath, issues);
+        requireKeys(journey, ["participantId", "mode", "plannedDepartureAt", "plannedArrivalAt", "plannedDurationMilliseconds", "source", "origin", "destination", "parts"], journeyPath, issues);
         validateString(journey.participantId, journeyPath.concat("participantId"), issues, 1);
+        const expectedParticipantId = participantIdsInOrder[journeyIndex];
+        if (expectedParticipantId !== null && expectedParticipantId !== undefined && typeof journey.participantId === "string" && journey.participantId !== expectedParticipantId) issues.push(issue(journeyPath.concat("participantId"), "mismatched_order", "Journey indexes must preserve the request snapshot participant order."));
         if (typeof journey.participantId === "string") {
           if (journeyIds.has(journey.participantId)) issues.push(issue(journeyPath.concat("participantId"), "duplicate", "Journey participant ids must be unique."));
           journeyIds.add(journey.participantId);
@@ -389,8 +403,16 @@ function validateFairLocations(value: unknown, snapshot: unknown, patterns: unkn
         validateString(journey.source, journeyPath.concat("source"), issues, 1);
         if (typeof journey.plannedArrivalAt === "string" && Number.isFinite(snapshotArrival) && Date.parse(journey.plannedArrivalAt) > snapshotArrival) issues.push(issue(journeyPath.concat("plannedArrivalAt"), "after_arrival_at", "Planned journey must arrive no later than arrivalAt."));
         if (typeof journey.plannedDepartureAt === "string" && typeof journey.plannedArrivalAt === "string" && typeof journey.plannedDurationMilliseconds === "number" && Date.parse(journey.plannedArrivalAt) - Date.parse(journey.plannedDepartureAt) !== journey.plannedDurationMilliseconds) issues.push(issue(journeyPath, "incoherent_duration", "Planned duration must equal planned arrival minus planned departure."));
+        validateDetailedJourney(
+          journey,
+          journeyPath,
+          typeof journey.participantId === "string" ? participantOrigins.get(journey.participantId) ?? null : null,
+          isCoordinateRecord(location.coordinate) ? location.coordinate : null,
+          typeof location.physicalIdentity === "string" ? location.physicalIdentity : null,
+          issues,
+        );
       });
-      if (journeyIds.size !== 2) issues.push(issue(locationPath.concat("journeys"), "invalid_participants", "Journeys must cover both participants."));
+      if (journeyIds.size !== 2 || journeyIds.size !== participantIds.size || [...participantIds].some((participantId) => !journeyIds.has(participantId))) issues.push(issue(locationPath.concat("journeys"), "invalid_participants", "Journeys must contain exactly one detailed journey for every snapshot participant."));
       if (Array.isArray(location.journeys) && location.journeys.every(isJourneyShape)) {
         const difference = Math.abs(location.journeys[0].plannedDurationMilliseconds - location.journeys[1].plannedDurationMilliseconds);
         if (difference !== location.differenceMilliseconds) issues.push(issue(locationPath.concat("differenceMilliseconds"), "incoherent_difference", "Difference must equal the absolute planned duration difference."));
@@ -413,7 +435,82 @@ function validateFairLocations(value: unknown, snapshot: unknown, patterns: unkn
         issues.push(issue(locationPath.concat("sourceRoutePatternIds"), "unsupported_location", "Fair Location coordinate is not present in its source Route Patterns."));
       }
     }
+    if (typeof location.physicalIdentity === "string" && Array.isArray(location.journeys) && location.journeys.every(isJourneyShape) && location.journeys.every((journey) => Number.isFinite(journey.plannedDurationMilliseconds))) {
+      const currentOrder = fairLocationOrderKey(location.physicalIdentity, location.journeys);
+      if (previousOrder && compareFairLocationOrder(previousOrder, currentOrder) > 0) {
+        issues.push(issue(locationPath, "non_canonical_order", "fairLocations must be ordered by ascending maximum exact journey duration, then physicalIdentity."));
+      }
+      previousOrder = currentOrder;
+    }
   });
+}
+
+function validateDetailedJourney(
+  value: Record<string, unknown>,
+  path: Array<string | number>,
+  participantOrigin: { latitude: number; longitude: number } | null,
+  fairLocationCoordinate: { latitude: number; longitude: number } | null,
+  physicalIdentity: string | null,
+  issues: ResponseValidationIssue[],
+): void {
+  validateEndpoint(value.origin, path.concat("origin"), issues, true);
+  validateEndpoint(value.destination, path.concat("destination"), issues, true);
+  const expectedDestinationStationGlobalId = physicalIdentity?.startsWith("station:") ? physicalIdentity.slice("station:".length) : null;
+  if (expectedDestinationStationGlobalId && isRecord(value.destination)) {
+    if (typeof value.destination.stationGlobalId !== "string" || value.destination.stationGlobalId.length === 0) {
+      issues.push(issue(path.concat("destination", "stationGlobalId"), "invalid_destination_identity", "Journey destination must identify its enclosing Physical Transit Location."));
+    } else if (value.destination.stationGlobalId !== expectedDestinationStationGlobalId) {
+      issues.push(issue(path.concat("destination", "stationGlobalId"), "mismatched_destination_identity", "Journey destination identity must match its enclosing Physical Transit Location."));
+    }
+  }
+  if (!Array.isArray(value.parts) || value.parts.length === 0) {
+    issues.push(issue(path.concat("parts"), "invalid_length", "A detailed journey must contain ordered parts."));
+    return;
+  }
+  value.parts.forEach((part, index) => validateJourneyPart(part, path.concat("parts", index), issues));
+
+  const firstPart = value.parts[0];
+  const finalPart = value.parts.at(-1);
+  if (participantOrigin && isRecord(value.origin) && isCoordinateRecord(value.origin.coordinate) && !coordinatesWithinBinding(participantOrigin, value.origin.coordinate)) {
+    issues.push(issue(path.concat("origin", "coordinate"), "mismatched_origin", "Journey origin must bind to its snapshot participant origin."));
+  }
+  if (participantOrigin && isRecord(firstPart) && isRecord(firstPart.from) && isCoordinateRecord(firstPart.from.coordinate) && !coordinatesWithinBinding(participantOrigin, firstPart.from.coordinate)) {
+    issues.push(issue(path.concat("parts", 0, "from", "coordinate"), "mismatched_origin", "The first journey part must bind to its snapshot participant origin."));
+  }
+  if (fairLocationCoordinate && isRecord(value.destination) && isCoordinateRecord(value.destination.coordinate) && !coordinatesWithinBinding(fairLocationCoordinate, value.destination.coordinate)) {
+    issues.push(issue(path.concat("destination", "coordinate"), "mismatched_destination", "Journey destination must bind to its enclosing Fair Location."));
+  }
+  if (fairLocationCoordinate && isRecord(finalPart) && isRecord(finalPart.to) && isCoordinateRecord(finalPart.to.coordinate) && !coordinatesWithinBinding(fairLocationCoordinate, finalPart.to.coordinate)) {
+    issues.push(issue(path.concat("parts", value.parts.length - 1, "to", "coordinate"), "mismatched_destination", "The final journey part must bind to its enclosing Fair Location."));
+  }
+  validateDetailedJourneyTiming(value, path, issues);
+}
+
+function validateDetailedJourneyTiming(value: Record<string, unknown>, path: Array<string | number>, issues: ResponseValidationIssue[]): void {
+  if (!Array.isArray(value.parts) || value.parts.length === 0) return;
+  const firstPart = value.parts[0];
+  const finalPart = value.parts.at(-1);
+  if (isRecord(firstPart) && typeof value.plannedDepartureAt === "string" && typeof firstPart.plannedDepartureAt === "string" && firstPart.plannedDepartureAt !== value.plannedDepartureAt) {
+    issues.push(issue(path.concat("parts", 0, "plannedDepartureAt"), "incoherent_timing", "The first journey part must start at the journey departure."));
+  }
+  if (isRecord(finalPart) && typeof value.plannedArrivalAt === "string" && typeof finalPart.plannedArrivalAt === "string" && finalPart.plannedArrivalAt !== value.plannedArrivalAt) {
+    issues.push(issue(path.concat("parts", value.parts.length - 1, "plannedArrivalAt"), "incoherent_timing", "The final journey part must end at the journey arrival."));
+  }
+  for (let index = 1; index < value.parts.length; index += 1) {
+    const previous = value.parts[index - 1];
+    const current = value.parts[index];
+    if (!isRecord(previous) || !isRecord(current)) continue;
+    const previousArrival = typeof previous.plannedArrivalAt === "string" ? Date.parse(previous.plannedArrivalAt) : Number.NaN;
+    const currentDeparture = typeof current.plannedDepartureAt === "string" ? Date.parse(current.plannedDepartureAt) : Number.NaN;
+    if (Number.isFinite(previousArrival) && Number.isFinite(currentDeparture) && currentDeparture < previousArrival) {
+      issues.push(issue(path.concat("parts", index, "plannedDepartureAt"), "incoherent_timing", "Journey parts must be temporally ordered without overlap."));
+    }
+    const previousTo = previous.to;
+    const currentFrom = current.from;
+    const sameStation = isRecord(previousTo) && isRecord(currentFrom) && typeof previousTo.stationGlobalId === "string" && typeof currentFrom.stationGlobalId === "string" && previousTo.stationGlobalId === currentFrom.stationGlobalId;
+    const sameCoordinate = isRecord(previousTo) && isRecord(currentFrom) && isCoordinateRecord(previousTo.coordinate) && isCoordinateRecord(currentFrom.coordinate) && coordinatesWithinBinding(previousTo.coordinate, currentFrom.coordinate);
+    if (!sameStation && !sameCoordinate) issues.push(issue(path.concat("parts", index, "from"), "mismatched_sequence", "Journey parts must form a connected ordered sequence."));
+  }
 }
 
 function isFairPairInteger(first: number, second: number, tolerancePercent: number): boolean {

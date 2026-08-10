@@ -105,6 +105,62 @@ test("a stable transit station at a participant origin remains an eligible targe
   assert.equal(validateMeetingCalculationResponse(result).success, true);
 });
 
+test("selected verification Journey inspection data retains participant and Physical Transit Location detail for a Route-Derived Fair Location", async () => {
+  const result = await calculateMeeting(input(), testProvider({ targets: ["a", "b"] }));
+  assert.equal(result.status, "ok");
+  if (result.status !== "ok") return;
+  const location = result.fairLocations.find((candidate) => candidate.physicalIdentity === "station:b");
+  assert.ok(location);
+  const first = location!.journeys[0]!;
+  const second = location!.journeys[1]!;
+  assert.equal(first.participantId, "one");
+  assert.equal(second.participantId, "two");
+  assert.deepEqual(first.origin, { stationGlobalId: null, coordinate: FIRST });
+  assert.deepEqual(second.origin, { stationGlobalId: null, coordinate: SECOND });
+  assert.deepEqual(first.destination, { stationGlobalId: "b", coordinate: TARGET_COORDINATES.b });
+  assert.deepEqual(second.destination, { stationGlobalId: "b", coordinate: TARGET_COORDINATES.b });
+  assert.equal(first.parts.length, 3);
+  assert.equal(second.parts.length, 3);
+  assert.equal(first.parts[1]!.line?.identity, "verification-line");
+  assert.equal(second.parts[1]!.line?.identity, "verification-line");
+  assert.deepEqual(first.parts.at(-1)!.to.coordinate, TARGET_COORDINATES.b);
+  assert.deepEqual(second.parts.at(-1)!.to.coordinate, TARGET_COORDINATES.b);
+  assert.equal(first.plannedDurationMilliseconds, 600_000);
+  assert.equal(second.plannedDurationMilliseconds, 600_000);
+  assert.equal(first.source, "test-verification");
+  assert.equal(second.source, "test-verification");
+});
+
+test("Route-Derived Fair Location ranking uses exact maximum Journey duration rather than rounded minutes", async () => {
+  const result = await calculateMeeting(input(), testProvider({
+    targets: ["a"],
+    reverseTargets: ["b"],
+    bothDirections: true,
+    durations: {
+      a: [600_000, 600_999],
+      b: [600_000, 600_001],
+    },
+  }));
+  assert.equal(result.status, "ok");
+  if (result.status !== "ok") return;
+  assert.deepEqual(result.fairLocations.map((location) => location.physicalIdentity), ["station:b", "station:a"]);
+});
+
+test("Route-Derived Fair Location ranking breaks exact Journey duration ties by Physical Transit Location identity", async () => {
+  const result = await calculateMeeting(input(), testProvider({
+    targets: ["b"],
+    reverseTargets: ["a"],
+    bothDirections: true,
+    durations: {
+      a: [600_000, 600_000],
+      b: [600_000, 600_000],
+    },
+  }));
+  assert.equal(result.status, "ok");
+  if (result.status !== "ok") return;
+  assert.deepEqual(result.fairLocations.map((location) => location.physicalIdentity), ["station:a", "station:b"]);
+});
+
 test("starts at the arithmetic middle and descends only in the source-guided direction", async () => {
   const durations = durationTable([100, 80, 30, 10, 40]);
   const result = await calculateMeeting(input(), testProvider({ targets: ["a", "b", "c", "d", "e"], durations })) as unknown as ExpectedResponse;

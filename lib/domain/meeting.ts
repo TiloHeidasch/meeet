@@ -34,6 +34,7 @@ import type {
   TransitLineReference,
 } from "./types.ts";
 import { MEETING_SEARCH_COVERAGE_METHOD, MEETING_TIME_ZONE } from "./types.ts";
+import { compareFairLocationOrder, fairLocationOrderKey } from "./fair-location-order.ts";
 
 export const MVG_ANCHOR_STATIONS = [
   { id: "de:09162:6", label: "Hauptbahnhof" },
@@ -261,8 +262,8 @@ async function calculateMeetingCore(
     ]);
     const selected = results.map((result) => selectJourney(result.journeys, arrivalAt)) as [CoordinateJourney, CoordinateJourney];
     const journeys: [PlannedParticipantJourney, PlannedParticipantJourney] = [
-      toParticipantJourney(participants[0], selected[0], results[0].source || journeyProvider.descriptor.name),
-      toParticipantJourney(participants[1], selected[1], results[1].source || journeyProvider.descriptor.name),
+      toParticipantJourney(participants[0], selected[0], occurrence.endpoint, results[0].source || journeyProvider.descriptor.name),
+      toParticipantJourney(participants[1], selected[1], occurrence.endpoint, results[1].source || journeyProvider.descriptor.name),
     ];
     return {
       patternId: pattern.id,
@@ -721,12 +722,12 @@ function mergeQualifiedOccurrences(
     }
     merged.set(stationId, { representative: occurrence, sourceRoutePatternIds: new Set([occurrence.patternId]) });
   }
-  return [...merged.entries()].sort(([left], [right]) => left.localeCompare(right)).map(([stationId, value]) => {
+  return [...merged.entries()].map(([stationId, value]) => {
     const representative = value.representative;
     return {
       id: `station:${stationId}`,
       label: representative.endpoint.label ?? `Transit stop ${stationId}`,
-      kind: "station",
+      kind: "station" as const,
       physicalIdentity: `station:${stationId}`,
       coordinate: representative.endpoint.coordinate,
       journeys: representative.journeys,
@@ -735,7 +736,10 @@ function mergeQualifiedOccurrences(
       effectiveTolerancePercent,
       sourceRoutePatternIds: [...value.sourceRoutePatternIds].sort(),
     };
-  });
+  }).sort((left, right) => compareFairLocationOrder(
+    fairLocationOrderKey(left.physicalIdentity, left.journeys),
+    fairLocationOrderKey(right.physicalIdentity, right.journeys),
+  ));
 }
 
 function compareVerifiedOccurrence(left: VerifiedOccurrence, right: VerifiedOccurrence): number {
@@ -756,10 +760,19 @@ function selectJourney(journeys: readonly CoordinateJourney[], arrivalAt: string
   });
 }
 
-function toParticipantJourney(participant: MeetingParticipant, journey: CoordinateJourney, source: string): PlannedParticipantJourney {
+function toParticipantJourney(participant: MeetingParticipant, journey: CoordinateJourney, target: JourneyEndpoint, source: string): PlannedParticipantJourney {
+  const parts = journey.parts.map((part) => ({
+    ...part,
+    from: normalizeJourneyEndpoint(part.from),
+    to: normalizeJourneyEndpoint(part.to),
+    intermediateStops: part.intermediateStops.map(normalizeJourneyEndpoint),
+  }));
   return {
     participantId: participant.id,
     mode: "transit",
+    origin: normalizeJourneyEndpoint(parts[0]!.from),
+    destination: normalizeJourneyEndpoint(target),
+    parts,
     plannedDepartureAt: journey.plannedDepartureAt,
     plannedArrivalAt: journey.plannedArrivalAt,
     plannedDurationMilliseconds: journey.plannedDurationMilliseconds,

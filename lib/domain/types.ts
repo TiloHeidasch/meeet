@@ -115,6 +115,9 @@ export interface RoutePattern {
 export interface PlannedParticipantJourney {
   participantId: string;
   mode: "transit";
+  origin: JourneyEndpoint;
+  destination: JourneyEndpoint;
+  parts: readonly CoordinateJourneyPart[];
   plannedDepartureAt: string;
   plannedArrivalAt: string;
   plannedDurationMilliseconds: number;

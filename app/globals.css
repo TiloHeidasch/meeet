@@ -73,7 +73,10 @@ button:focus-visible, input:focus-visible, select:focus-visible {
   cursor: grab;
 }
 .meeet-origin-marker:active { cursor: grabbing; }
+.pending-orb { display: block; width: 12px; height: 12px; border-radius: 999px; background: var(--coral); box-shadow: 0 0 0 5px rgba(239,120,94,.18); }
+@keyframes meeet-pulse { 50% { transform: scale(.72); opacity: .58; } }
 
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { scroll-behavior: auto !important; animation-duration: .01ms !important; transition-duration: .01ms !important; }
+  .pending-orb { animation: none !important; }
 }
