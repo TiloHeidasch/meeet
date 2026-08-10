@@ -11,6 +11,7 @@ import {
   MVG_DIRECT_NEARBY_URL,
   MVG_DIRECT_ROUTES_URL,
   MvgDirectRoutingProvider,
+  parseMvgCoordinateJourneys,
 } from "../lib/providers/mvg-direct.ts";
 import {
   ProviderConfigurationError,
@@ -104,6 +105,59 @@ test("direct domain capabilities reject bike before geocoding or fetch", async (
   assert.equal((await response.json()).error.code, "INVALID_REQUEST");
   assert.equal(geocodingCalls, 0);
   assert.equal(fetchCalls, 0);
+});
+
+test("MVG walking pathPolyline decodes E5 coordinates in GeoJSON order", () => {
+  const origin = { latitude: 48.13331, longitude: 11.5765 };
+  const destination = { latitude: 48.1334, longitude: 11.5766 };
+  const payload = [{ parts: [{
+    from: { ...origin, plannedDeparture: "2026-07-25T08:00:00.000Z" },
+    to: { ...destination, plannedDeparture: "2026-07-25T08:03:00.000Z" },
+    line: { transportType: "FUSS" },
+    pathPolyline: "e`xdHc`teAGIII",
+  }] }];
+  const journey = parseMvgCoordinateJourneys(payload, {
+    origin,
+    destination,
+    arrivalAt: "2026-07-25T08:03:00.000Z",
+  })[0]!;
+
+  assert.deepEqual(journey.parts[0]!.geometry, {
+    type: "LineString",
+    coordinates: [[11.5765, 48.13331], [11.57655, 48.13335], [11.5766, 48.1334]],
+  });
+});
+
+test("malformed or endpoint-mismatched MVG path geometry degrades to null", () => {
+  const origin = { latitude: 48.13331, longitude: 11.5765 };
+  const destination = { latitude: 48.1334, longitude: 11.5766 };
+  const basePart = {
+    from: { ...origin, plannedDeparture: "2026-07-25T08:00:00.000Z" },
+    to: { ...destination, plannedDeparture: "2026-07-25T08:03:00.000Z" },
+    line: { transportType: "FUSS" },
+    pathPolyline: "e`xdHc`teAGIII",
+  };
+  const malformed = parseMvgCoordinateJourneys([{ parts: [{ ...basePart, pathPolyline: "~" }] }], {
+    origin,
+    destination,
+    arrivalAt: "2026-07-25T08:03:00.000Z",
+  });
+  assert.equal(malformed.length, 1);
+  assert.equal(malformed[0]!.parts[0]!.geometry, null);
+
+  const mismatchedOrigin = { latitude: 48.1335, longitude: 11.5765 };
+  const mismatchedDestination = { latitude: 48.1336, longitude: 11.5766 };
+  const mismatched = parseMvgCoordinateJourneys([{ parts: [{
+    ...basePart,
+    from: { ...mismatchedOrigin, plannedDeparture: basePart.from.plannedDeparture },
+    to: { ...mismatchedDestination, plannedDeparture: basePart.to.plannedDeparture },
+  }] }], {
+    origin: mismatchedOrigin,
+    destination: mismatchedDestination,
+    arrivalAt: "2026-07-25T08:03:00.000Z",
+  });
+  assert.equal(mismatched.length, 1);
+  assert.equal(mismatched[0]!.parts[0]!.geometry, null);
 });
 
 test("direct provider enforces destination and matrix caps", async () => {

@@ -10,7 +10,11 @@ export type ParticipantMapCoordinate = { latitude: number; longitude: number };
 export type MapResultState = "initial" | "ok";
 type PointFeature = { type: "Feature"; id: string; properties: Record<string, string | number>; geometry: { type: "Point"; coordinates: [number, number] } };
 type PointCollection = { type: "FeatureCollection"; features: PointFeature[] };
-type Props = { participants: readonly MapParticipant[]; fairLocations: readonly FairLocation[]; selectedLocationId: string | null; onLocationSelect: (id: string) => void; onParticipantMove: (participantId: string, coordinate: ParticipantMapCoordinate) => void; resultState: MapResultState };
+type RouteGeometry = { type: "LineString"; coordinates: [number, number][] };
+type FocusedJourney = { participantId: string; geometries: readonly RouteGeometry[] } | null;
+type RouteFeature = { type: "Feature"; id: string; properties: { color: string }; geometry: RouteGeometry };
+type RouteCollection = { type: "FeatureCollection"; features: RouteFeature[] };
+type Props = { participants: readonly MapParticipant[]; fairLocations: readonly FairLocation[]; selectedLocationId: string | null; focusedJourney: FocusedJourney; onLocationSelect: (id: string) => void; onParticipantMove: (participantId: string, coordinate: ParticipantMapCoordinate) => void; resultState: MapResultState };
 
 const MUNICH_CENTER: [number, number] = [11.576, 48.137];
 const DEFAULT_MAP_STYLE_URL = "https://tiles.openfreemap.org/styles/liberty";
@@ -22,6 +26,9 @@ function participantData(items: readonly MapParticipant[]): PointCollection {
 }
 function locationData(items: readonly FairLocation[]): PointCollection {
   return { type: "FeatureCollection", features: items.map((p, index) => ({ type: "Feature", id: p.id, properties: { id: p.id, number: index + 1, kind: p.kind }, geometry: { type: "Point", coordinates: [p.coordinate.longitude, p.coordinate.latitude] } })) };
+}
+function focusedJourneyData(journey: FocusedJourney, color: string): RouteCollection {
+  return { type: "FeatureCollection", features: journey?.geometries.map((geometry, index) => ({ type: "Feature", id: `meeet-route-part-${index}`, properties: { color }, geometry })) ?? [] };
 }
 
 function syncParticipantMarkers(map: Map, participants: readonly MapParticipant[], markersRef: MutableRefObject<globalThis.Map<string, Marker>>, inputs: MutableRefObject<{ participants: readonly MapParticipant[]; fairLocations: readonly FairLocation[]; onLocationSelect: (id: string) => void; onParticipantMove: (participantId: string, coordinate: ParticipantMapCoordinate) => void }>) {
@@ -45,7 +52,7 @@ function syncParticipantMarkers(map: Map, participants: readonly MapParticipant[
   });
 }
 
-export default function MapLibreCanvas({ participants, fairLocations, selectedLocationId, onLocationSelect, onParticipantMove, resultState }: Props) {
+export default function MapLibreCanvas({ participants, fairLocations, selectedLocationId, focusedJourney, onLocationSelect, onParticipantMove, resultState }: Props) {
   const containerRef = useRef<HTMLDivElement>(null);
   const mapRef = useRef<Map | null>(null);
   const loadedRef = useRef(false);
@@ -71,6 +78,8 @@ export default function MapLibreCanvas({ participants, fairLocations, selectedLo
         if (!map || !active) return;
         map.addSource("meeet-participants", { type: "geojson", data: participantData(inputsRef.current.participants) });
         syncParticipantMarkers(map, inputsRef.current.participants, participantMarkersRef, inputsRef);
+         map.addSource("meeet-focused-journey", { type: "geojson", data: focusedJourneyData(null, "#276e66") });
+         map.addLayer({ id: "meeet-focused-journey-line", type: "line", source: "meeet-focused-journey", layout: { "line-cap": "round", "line-join": "round" }, paint: { "line-color": ["get", "color"], "line-width": 5, "line-opacity": 0.9 } });
         map.addSource("meeet-fair-locations", { type: "geojson", data: locationData(inputsRef.current.fairLocations) });
         map.addLayer({ id: "meeet-fair-location-points", type: "circle", source: "meeet-fair-locations", paint: { "circle-color": "#f5d873", "circle-radius": 9, "circle-stroke-color": "#202522", "circle-stroke-width": 2 } });
         map.addLayer({ id: "meeet-fair-location-selected", type: "circle", source: "meeet-fair-locations", filter: ["==", ["get", "id"], ""], paint: { "circle-color": "#fffdf8", "circle-radius": 13, "circle-stroke-color": "#a64e39", "circle-stroke-width": 3 } });
@@ -90,11 +99,13 @@ export default function MapLibreCanvas({ participants, fairLocations, selectedLo
     (map.getSource("meeet-participants") as GeoJSONSource | undefined)?.setData(participantData(participants));
     syncParticipantMarkers(map, participants, participantMarkersRef, inputsRef);
     (map.getSource("meeet-fair-locations") as GeoJSONSource | undefined)?.setData(locationData(fairLocations));
+    const focusedColor = participants.find((participant) => participant.id === focusedJourney?.participantId)?.color ?? "#276e66";
+    (map.getSource("meeet-focused-journey") as GeoJSONSource | undefined)?.setData(focusedJourneyData(focusedJourney, focusedColor));
     if (map.getLayer("meeet-fair-location-selected")) map.setFilter("meeet-fair-location-selected", ["==", ["get", "id"], selectedLocationId ?? ""]);
-  }, [participants, fairLocations, selectedLocationId, state]);
+  }, [participants, fairLocations, selectedLocationId, focusedJourney, state]);
 
   const label = resultState === "ok" ? "Interactive Munich map showing two participant origins and sampled station locations" : "Interactive Munich map showing two Munich participant origins";
-  return <section className="relative h-full min-h-[430px] overflow-hidden rounded-[1.75rem] border border-[#cbd7cd] bg-[#dce9df] shadow-[0_18px_50px_rgba(52,74,59,.13)]" aria-label={label} data-map-state={state}>
+  return <section className="relative h-full min-h-[430px] overflow-hidden rounded-[1.75rem] border border-[#cbd7cd] bg-[#dce9df] shadow-[0_18px_50px_rgba(52,74,59,.13)]" aria-label={label} data-map-state={state} data-focused-journey-parts={focusedJourney?.geometries.length ?? 0}>
     <h2 id="map-title" className="sr-only">Munich meeting map</h2><div ref={containerRef} className="!absolute inset-0" aria-label={label} />
     {fairLocations.length > 0 && <div className="sr-only" aria-label="Sampled station markers">{fairLocations.map((location, index) => <button key={location.id} type="button" aria-label={`Sampled station ${index + 1}: ${location.physicalIdentity}`} onClick={() => { onLocationSelect(location.id); window.setTimeout(() => document.getElementById(`fair-location-${location.id}`)?.focus({ preventScroll: false }), 50); }}>Fair location {index + 1}</button>)}</div>}
     {state === "loading" && <div className="absolute inset-0 grid place-items-center bg-[#dce9df] text-sm text-[#526057]" role="status">Loading Munich map…</div>}

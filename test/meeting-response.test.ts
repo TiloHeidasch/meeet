@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import { validateMeetingCalculationResponse } from "../lib/domain/response.ts";
+import type { GeoJsonLineString } from "../lib/domain/types.ts";
 
 const FIXTURE_ARRIVAL = "2026-07-25T10:00:00.000Z";
 const FIXTURE_ORIGINS = {
@@ -18,6 +19,22 @@ const VALID_V2_RESPONSE = createValidV2Response();
 test("response validation accepts detailed Journey inspection data for Route-Derived Fair Locations with Sampled Coverage", () => {
   const result = validateMeetingCalculationResponse(cloneFixture());
   assert.equal(result.success, true);
+});
+
+test("response validation accepts valid Journey part geometry and rejects invalid geometry", () => {
+  const valid = cloneFixture();
+  valid.fairLocations[0]!.journeys[0]!.parts[0]!.geometry = {
+    type: "LineString",
+    coordinates: [[11.5755, 48.1374], [11.5756, 48.1375]],
+  };
+  assert.equal(validateMeetingCalculationResponse(valid).success, true);
+
+  const invalid = cloneFixture();
+  invalid.fairLocations[0]!.journeys[0]!.parts[0]!.geometry = {
+    type: "LineString",
+    coordinates: [[11.5755, 48.1374], [181, 48.1375]],
+  };
+  assert.equal(validateMeetingCalculationResponse(invalid).success, false);
 });
 
 test("Route-Derived Fair Location Journey tuples preserve snapshot participant order", () => {
@@ -270,6 +287,7 @@ function journeyPart(
   plannedDepartureAt: string,
   plannedArrivalAt: string,
   intermediateStops: readonly FixtureEndpoint[] = [],
+  geometry: GeoJsonLineString | null = null,
 ) {
   return {
     kind,
@@ -277,6 +295,7 @@ function journeyPart(
     to,
     intermediateStops,
     line: kind === "transit" ? { identity: "fixture-line", type: "BUS" } : null,
+    geometry,
     plannedDepartureAt,
     plannedArrivalAt,
   };

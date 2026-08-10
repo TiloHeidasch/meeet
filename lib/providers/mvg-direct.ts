@@ -22,6 +22,8 @@ import type {
   RoutePart,
   RouteStationReference,
   TransitLineReference,
+  GeoJsonLineString,
+  LocationCoordinate,
 } from "../domain/types.ts";
 import type {
   CoordinateJourneyProvider,
@@ -29,6 +31,7 @@ import type {
   RoutingProvider,
 } from "../domain/providers.ts";
 import { withRouteAlternativeIdentities } from "../domain/route-candidates.ts";
+import { isWithinOfficialMunichBoundary } from "../domain/boundary.ts";
 import {
   DEFAULT_PROVIDER_TIMEOUT_MS,
   DEFAULT_PROVIDER_MAX_RESPONSE_BYTES,
@@ -76,6 +79,8 @@ export const MVG_DIRECT_MAX_STATION_RESULTS = 100;
 export const MVG_DIRECT_MAX_ROUTE_RESULTS = 100;
 export const MVG_DIRECT_MAX_ROUTE_PARTS = 100;
 export const MVG_DIRECT_MAX_ROUTE_ALTERNATIVES = 20;
+export const MVG_DIRECT_MAX_PATH_POLYLINE_LENGTH = 160_000;
+export const MVG_DIRECT_MAX_PATH_GEOMETRY_POSITIONS = 10_000;
 export const MVG_DIRECT_MAX_LABEL_LENGTH = 512;
 export const MVG_DIRECT_MAX_WALKING_TRANSIT_HANDOFF_OVERLAP_MS = 60_000;
 export const MVG_DIRECT_MAX_SAME_STATION_ENDPOINT_DISPLACEMENT_METRES = 100;
@@ -890,6 +895,7 @@ function parseMvgCoordinateJourney(
     throw new Error("MVG coordinate journey must contain a bounded parts array.");
   }
   const parts: CoordinateJourneyPart[] = [];
+  const pathPolylines: unknown[] = [];
   let previousArrival: number | null = null;
   let temporalInvalidReason: MvgTemporalInvalidReason | null = null;
   const markTemporalInvalid = (reason: MvgTemporalInvalidReason): void => {
@@ -948,9 +954,11 @@ function parseMvgCoordinateJourney(
       to,
       intermediateStops,
       line: line.line,
+      geometry: null,
       plannedDepartureAt: new Date(departure).toISOString(),
       plannedArrivalAt: new Date(arrival).toISOString(),
     });
+    pathPolylines.push(rawPart.pathPolyline);
     previousArrival = arrival;
   }
   const plannedDepartureAt = parts[0].plannedDepartureAt;
@@ -972,6 +980,10 @@ function parseMvgCoordinateJourney(
   if (!coordinatesWithinMvgPrecision(parts[0].from.coordinate, request.origin) || !coordinatesWithinMvgPrecision(parts.at(-1)!.to.coordinate, request.destination)) {
     throw new Error("MVG coordinate journey is not bound to its requested origin and destination.");
   }
+  for (const [index, pathPolyline] of pathPolylines.entries()) {
+    const part = parts[index]!;
+    part.geometry = parseMvgPathPolyline(pathPolyline, part.from.coordinate, part.to.coordinate);
+  }
   if (arrival > arrivalLimit) {
     markTemporalInvalid("arrives-after-arrivalAt");
   }
@@ -988,6 +1000,65 @@ function parseMvgCoordinateJourney(
   return temporalInvalidReason === null
     ? { category: "valid", journey }
     : { category: "temporally-infeasible", journey, reason: temporalInvalidReason };
+}
+
+/** Decode optional MVG path geometry without allowing it to affect journey validity. */
+function parseMvgPathPolyline(
+  value: unknown,
+  from: LocationCoordinate,
+  to: LocationCoordinate,
+): GeoJsonLineString | null {
+  if (typeof value !== "string" || value.length === 0 || value.length > MVG_DIRECT_MAX_PATH_POLYLINE_LENGTH) return null;
+
+  const coordinates: GeoJsonLineString["coordinates"] = [];
+  let index = 0;
+  let latitude = 0;
+  let longitude = 0;
+  while (index < value.length) {
+    const decodedLatitude = decodeMvgPolylineValue(value, index);
+    if (!decodedLatitude) return null;
+    index = decodedLatitude.nextIndex;
+    const decodedLongitude = decodeMvgPolylineValue(value, index);
+    if (!decodedLongitude) return null;
+    index = decodedLongitude.nextIndex;
+    latitude += decodedLatitude.value;
+    longitude += decodedLongitude.value;
+    const coordinate = {
+      latitude: latitude / 100_000,
+      longitude: longitude / 100_000,
+    };
+    if (!isWgs84(coordinate.latitude, coordinate.longitude) || !isWithinOfficialMunichBoundary(coordinate)) return null;
+    coordinates.push([coordinate.longitude, coordinate.latitude]);
+    if (coordinates.length > MVG_DIRECT_MAX_PATH_GEOMETRY_POSITIONS) return null;
+  }
+
+  if (coordinates.length < 2) return null;
+  const first = coordinates[0]!;
+  const last = coordinates.at(-1)!;
+  if (!coordinatesWithinMvgPrecision(from, { latitude: first[1], longitude: first[0] }) ||
+    !coordinatesWithinMvgPrecision(to, { latitude: last[1], longitude: last[0] })) return null;
+  return { type: "LineString", coordinates };
+}
+
+function decodeMvgPolylineValue(
+  value: string,
+  startIndex: number,
+): { value: number; nextIndex: number } | null {
+  let result = 0;
+  let shift = 0;
+  let index = startIndex;
+  while (true) {
+    if (index >= value.length || shift >= 30) return null;
+    const code = value.charCodeAt(index++) - 63;
+    if (code < 0 || code > 63) return null;
+    result += (code & 0x1f) * 2 ** shift;
+    shift += 5;
+    if (code < 0x20) break;
+  }
+  const decoded = result % 2 === 0
+    ? result / 2
+    : -(Math.floor(result / 2) + 1);
+  return Number.isSafeInteger(decoded) ? { value: decoded, nextIndex: index } : null;
 }
 
 function parseTransitStop(value: unknown): JourneyEndpoint {
@@ -1505,7 +1576,7 @@ function firstNumber(
 }
 
 function isWgs84(latitude: number, longitude: number): boolean {
-  return latitude >= -90 && latitude <= 90 && longitude >= -180 && longitude <= 180;
+  return Number.isFinite(latitude) && Number.isFinite(longitude) && latitude >= -90 && latitude <= 90 && longitude >= -180 && longitude <= 180;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

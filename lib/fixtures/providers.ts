@@ -111,6 +111,7 @@ export class FixtureRoutingProvider implements RoutingProvider, CoordinateJourne
       to: transitStops[index + 1],
       intermediateStops: [],
       line: { identity: "fixture-bus", type: "BUS" },
+      geometry: null,
       plannedDepartureAt: new Date(transitStart + ((transitEnd - transitStart) * index) / (transitStops.length - 1)).toISOString(),
       plannedArrivalAt: new Date(transitStart + ((transitEnd - transitStart) * (index + 1)) / (transitStops.length - 1)).toISOString(),
     }));
@@ -123,6 +124,7 @@ export class FixtureRoutingProvider implements RoutingProvider, CoordinateJourne
           to: originStation,
           intermediateStops: [],
           line: null,
+          geometry: null,
           plannedDepartureAt: new Date(departureTimestamp).toISOString(),
           plannedArrivalAt: new Date(transitStart).toISOString(),
         },
@@ -133,6 +135,7 @@ export class FixtureRoutingProvider implements RoutingProvider, CoordinateJourne
           to: { stationGlobalId: null, coordinate: request.destination },
           intermediateStops: [],
           line: null,
+          geometry: null,
           plannedDepartureAt: new Date(transitEnd).toISOString(),
           plannedArrivalAt: new Date(arrivalTimestamp).toISOString(),
         },

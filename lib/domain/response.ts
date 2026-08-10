@@ -10,6 +10,7 @@ import type {
 
 export const MAX_CALCULATION_RESPONSE_BYTES = 2 * 1024 * 1024;
 const MAX_STRING_LENGTH = 512;
+const MAX_GEOMETRY_POSITIONS = 10_000;
 const CONTRACT_VERSION = "meeet-meeting/v2";
 
 export interface ResponseValidationIssue {
@@ -553,7 +554,7 @@ function validateJourneyPart(value: unknown, path: Array<string | number>, issue
     issues.push(issue(path, "invalid_type", "Journey part must be an object."));
     return;
   }
-  requireKeys(value, ["kind", "from", "to", "intermediateStops", "line", "plannedDepartureAt", "plannedArrivalAt"], path, issues);
+  requireKeys(value, ["kind", "from", "to", "intermediateStops", "line", "geometry", "plannedDepartureAt", "plannedArrivalAt"], path, issues);
   if (value.kind !== "transit" && value.kind !== "walking") issues.push(issue(path.concat("kind"), "invalid_value", "Unknown Journey part kind."));
   validateEndpoint(value.from, path.concat("from"), issues, true);
   validateEndpoint(value.to, path.concat("to"), issues, true);
@@ -570,8 +571,31 @@ function validateJourneyPart(value: unknown, path: Array<string | number>, issue
     });
   }
   if (value.kind === "walking" && value.line !== null) issues.push(issue(path.concat("line"), "invalid_value", "Walking parts must not contain a transit line."));
+  validateJourneyPartGeometry(value.geometry, path.concat("geometry"), issues);
   validateIsoInstant(value.plannedDepartureAt, path.concat("plannedDepartureAt"), issues);
   validateIsoInstant(value.plannedArrivalAt, path.concat("plannedArrivalAt"), issues);
+}
+
+function validateJourneyPartGeometry(value: unknown, path: Array<string | number>, issues: ResponseValidationIssue[]): void {
+  if (value === null) return;
+  if (!isRecord(value)) {
+    issues.push(issue(path, "invalid_type", "Journey part geometry must be null or a GeoJSON LineString."));
+    return;
+  }
+  requireKeys(value, ["type", "coordinates"], path, issues);
+  if (value.type !== "LineString") issues.push(issue(path.concat("type"), "invalid_value", "Journey part geometry must be a GeoJSON LineString."));
+  if (!Array.isArray(value.coordinates) || value.coordinates.length < 2 || value.coordinates.length > MAX_GEOMETRY_POSITIONS) {
+    issues.push(issue(path.concat("coordinates"), "invalid_length", "Journey part geometry must contain between two and ten thousand positions."));
+    return;
+  }
+  value.coordinates.forEach((position, index) => {
+    const positionPath = path.concat("coordinates", index);
+    if (!Array.isArray(position) || position.length !== 2 || typeof position[0] !== "number" || typeof position[1] !== "number") {
+      issues.push(issue(positionPath, "invalid_position", "GeoJSON LineString positions must be [longitude, latitude] pairs."));
+      return;
+    }
+    validateWgs84(position[1], position[0], positionPath, issues);
+  });
 }
 
 function validateEndpoint(value: unknown, path: Array<string | number>, issues: ResponseValidationIssue[], requireStationOrNull: boolean): void {

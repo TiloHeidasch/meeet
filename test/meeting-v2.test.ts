@@ -637,6 +637,7 @@ function sourceJourney(request: CoordinateJourneyRequest, targets: readonly stri
     to,
     intermediateStops,
     line: { identity: "test-line", type: "BUS" },
+    geometry: null,
     plannedDepartureAt: new Date(departure).toISOString(),
     plannedArrivalAt: new Date(arrivalTime).toISOString(),
   });
@@ -650,9 +651,9 @@ function sourceJourney(request: CoordinateJourneyRequest, targets: readonly stri
   return {
     transitStops,
     parts: [
-      { kind: "walking", from: origin, to: stops[0]!, intermediateStops: [], line: null, plannedDepartureAt: new Date(departure).toISOString(), plannedArrivalAt: new Date(transitStart).toISOString() },
+      { kind: "walking", from: origin, to: stops[0]!, intermediateStops: [], line: null, geometry: null, plannedDepartureAt: new Date(departure).toISOString(), plannedArrivalAt: new Date(transitStart).toISOString() },
       ...transitParts,
-      { kind: "walking", from: stops.at(-1)!, to: destination, intermediateStops: [], line: null, plannedDepartureAt: new Date(transitEnd).toISOString(), plannedArrivalAt: new Date(arrival).toISOString() },
+      { kind: "walking", from: stops.at(-1)!, to: destination, intermediateStops: [], line: null, geometry: null, plannedDepartureAt: new Date(transitEnd).toISOString(), plannedArrivalAt: new Date(arrival).toISOString() },
     ],
     plannedDepartureAt: new Date(departure).toISOString(),
     plannedArrivalAt: new Date(arrival).toISOString(),
@@ -685,9 +686,9 @@ function verificationJourney(request: CoordinateJourneyRequest, target: string, 
   return {
     transitStops: [originStation, station],
     parts: [
-      { kind: "walking", from: { stationGlobalId: null, coordinate: request.origin }, to: originStation, intermediateStops: [], line: null, plannedDepartureAt: new Date(departure).toISOString(), plannedArrivalAt: new Date(transitDeparture).toISOString() },
-      { kind: "transit", from: originStation, to: station, intermediateStops: [], line: { identity: "verification-line", type: "BUS" }, plannedDepartureAt: new Date(transitDeparture).toISOString(), plannedArrivalAt: new Date(transitArrival).toISOString() },
-      { kind: "walking", from: station, to: { stationGlobalId: null, coordinate: request.destination }, intermediateStops: [], line: null, plannedDepartureAt: new Date(transitArrival).toISOString(), plannedArrivalAt: new Date(arrival).toISOString() },
+      { kind: "walking", from: { stationGlobalId: null, coordinate: request.origin }, to: originStation, intermediateStops: [], line: null, geometry: null, plannedDepartureAt: new Date(departure).toISOString(), plannedArrivalAt: new Date(transitDeparture).toISOString() },
+      { kind: "transit", from: originStation, to: station, intermediateStops: [], line: { identity: "verification-line", type: "BUS" }, geometry: null, plannedDepartureAt: new Date(transitDeparture).toISOString(), plannedArrivalAt: new Date(transitArrival).toISOString() },
+      { kind: "walking", from: station, to: { stationGlobalId: null, coordinate: request.destination }, intermediateStops: [], line: null, geometry: null, plannedDepartureAt: new Date(transitArrival).toISOString(), plannedArrivalAt: new Date(arrival).toISOString() },
     ],
     plannedDepartureAt: new Date(departure).toISOString(),
     plannedArrivalAt: new Date(arrival).toISOString(),

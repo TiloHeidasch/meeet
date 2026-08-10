@@ -67,6 +67,7 @@ export interface CoordinateJourneyPart {
   /** Ordered provider stops between this transit part's endpoints. */
   intermediateStops: readonly JourneyEndpoint[];
   line: TransitLineReference | null;
+  geometry: GeoJsonLineString | null;
   plannedDepartureAt: string;
   plannedArrivalAt: string;
 }
