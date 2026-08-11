@@ -475,7 +475,12 @@ test("MVG accepts only the anonymous first walking identity and rejects other bl
   const displacedNonParticipantFinal = cloneRoute(RIESSER_COORDINATE_ROUTE);
   displacedNonParticipantFinal.parts.at(-1)!.to!.stationGlobalId = "\t";
   displacedNonParticipantFinal.parts.at(-1)!.to!.longitude = request.destination.longitude + 0.00005;
-  assert.throws(() => parseMvgCoordinateJourneys([displacedNonParticipantFinal], request), /not bound/);
+  const displacedNonParticipantParsed = parseMvgCoordinateJourneys([displacedNonParticipantFinal], request)[0]!;
+  assert.equal(displacedNonParticipantParsed.parts.at(-1)!.to.stationGlobalId, null);
+  assert.deepEqual(displacedNonParticipantParsed.parts.at(-1)!.to.coordinate, {
+    latitude: request.destination.latitude,
+    longitude: request.destination.longitude + 0.00005,
+  });
 
   const transitBlank = cloneRoute(RIESSER_COORDINATE_ROUTE);
   transitBlank.parts[1]!.from.stationGlobalId = " ";
@@ -496,7 +501,7 @@ test("MVG accepts exactly one minute walking-transit overlap and rejects larger 
   assert.throws(() => parseMvgCoordinateJourneys([transitOverlap], request), /no temporally feasible/);
 });
 
-test("MVG binds a nearby anonymous participant origin and retains the one-metre identified guard", () => {
+test("MVG binds a nearby anonymous participant origin and accepts an identified endpoint within 100m", () => {
   const request = RIESSER_REQUEST;
   const parsed = parseMvgCoordinateJourneys([RIESSER_COORDINATE_ROUTE], request)[0]!;
   assert.deepEqual(parsed.parts[0]!.from.coordinate, request.origin);
@@ -504,7 +509,12 @@ test("MVG binds a nearby anonymous participant origin and retains the one-metre 
 
   const identifiedOuter = cloneRoute(RIESSER_COORDINATE_ROUTE);
   identifiedOuter.parts[0]!.from.stationGlobalId = "de:09162:anonymous-origin";
-  assert.throws(() => parseMvgCoordinateJourneys([identifiedOuter], request), /not bound/);
+  const identifiedParsed = parseMvgCoordinateJourneys([identifiedOuter], request)[0]!;
+  assert.equal(identifiedParsed.parts[0]!.from.stationGlobalId, "de:09162:anonymous-origin");
+  assert.deepEqual(identifiedParsed.parts[0]!.from.coordinate, {
+    latitude: 48.11435,
+    longitude: 11.51525,
+  });
 });
 
 test("MVG stable station identity preserves continuity across platform coordinate shifts", () => {

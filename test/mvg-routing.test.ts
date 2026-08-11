@@ -157,8 +157,8 @@ test("malformed or endpoint-mismatched MVG path geometry degrades to null", () =
   assert.equal(malformed.length, 1);
   assert.equal(malformed[0]!.parts[0]!.geometry, null);
 
-  const mismatchedOrigin = { latitude: 48.1335, longitude: 11.5765 };
-  const mismatchedDestination = { latitude: 48.1336, longitude: 11.5766 };
+  const mismatchedOrigin = { latitude: 48.1355, longitude: 11.5765 };
+  const mismatchedDestination = { latitude: 48.1356, longitude: 11.5766 };
   const mismatched = parseMvgCoordinateJourneys([{ parts: [{
     ...basePart,
     from: { ...mismatchedOrigin, plannedDeparture: basePart.from.plannedDeparture },
@@ -201,16 +201,21 @@ test("MVG permits a nearby anonymous first participant-origin snap and keeps des
   assert.deepEqual(parsed.parts.at(-1)!.to.coordinate, destination);
 
   const tooFar = structuredClone(route);
-  tooFar.parts[0]!.from.latitude = origin.latitude + 0.0002;
+  tooFar.parts[0]!.from.latitude = origin.latitude + 0.0012;
   assert.throws(() => parseMvgCoordinateJourneys([tooFar], request), /not bound/);
 
   const tooFarDestination = structuredClone(route);
-  tooFarDestination.parts.at(-1)!.to.longitude = destination.longitude + 0.00005;
+  tooFarDestination.parts.at(-1)!.to.longitude = destination.longitude + 0.002;
   assert.throws(() => parseMvgCoordinateJourneys([tooFarDestination], request), /not bound/);
 
   const identified = structuredClone(route);
   identified.parts[0]!.from.stationGlobalId = "anonymous-origin-station";
-  assert.throws(() => parseMvgCoordinateJourneys([identified], request), /not bound/);
+  const identifiedParsed = parseMvgCoordinateJourneys([identified], request)[0]!;
+  assert.equal(identifiedParsed.parts[0]!.from.stationGlobalId, "anonymous-origin-station");
+  assert.deepEqual(identifiedParsed.parts[0]!.from.coordinate, {
+    latitude: origin.latitude + 0.00007,
+    longitude: origin.longitude,
+  });
 
   const transitAnonymous = structuredClone(route);
   (transitAnonymous.parts[1]!.from as Record<string, unknown>).stationGlobalId = null;
@@ -248,7 +253,12 @@ test("MVG binds only a declared final participant origin while keeping the other
   const parsed = parseMvgCoordinateJourneys([route], request)[0]!;
   assert.deepEqual(parsed.parts.at(-1)!.to.coordinate, destination);
 
-  assert.throws(() => parseMvgCoordinateJourneys([route], { ...request, participantOriginEndpoint: "origin" }), /invalid station identity|not bound/);
+  const originParsed = parseMvgCoordinateJourneys([route], { ...request, participantOriginEndpoint: "origin" })[0]!;
+  assert.equal(originParsed.parts.at(-1)!.to.stationGlobalId, null);
+  assert.deepEqual(originParsed.parts.at(-1)!.to.coordinate, {
+    latitude: destination.latitude,
+    longitude: destination.longitude + 0.00005,
+  });
 });
 
 test("direct provider enforces destination and matrix caps", async () => {

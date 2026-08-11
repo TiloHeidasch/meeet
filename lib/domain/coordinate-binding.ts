@@ -6,10 +6,10 @@ import type {
   ParticipantOriginEndpoint,
 } from "./types.ts";
 
-/** Strict binding used for destinations, identified endpoints, and handoffs. */
-export const COORDINATE_BINDING_TOLERANCE_METRES = 1;
-/** Public coordinate journeys may snap only an anonymous participant origin by 10m. */
-export const ANONYMOUS_PARTICIPANT_ORIGIN_SNAP_TOLERANCE_METRES = 10;
+/** Coordinate binding for destinations, identified endpoints, and handoffs allows up to 100m. */
+export const COORDINATE_BINDING_TOLERANCE_METRES = 100;
+/** Public coordinate journeys may snap an anonymous participant origin within 100m. */
+export const ANONYMOUS_PARTICIPANT_ORIGIN_SNAP_TOLERANCE_METRES = 100;
 
 /**
  * Apply the canonical outer-endpoint policy without coupling the domain to a
