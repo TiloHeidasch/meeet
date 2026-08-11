@@ -436,8 +436,8 @@ test("MVG coordinate provider keeps the fixed arrive-by contract and walking par
 
 test("MVG parser preserves safe station ordering and rejects malformed or disconnected routes", () => {
   const request = RIESSER_REQUEST;
-  const journeys = parseMvgCoordinateJourneys(RIESSER_MIXED_COORDINATE_ROUTES, request);
-  assert.equal(journeys.length, 4);
+  const journeys = parseMvgCoordinateJourneys([withoutPlannedHandoffOverlaps(RIESSER_MIXED_COORDINATE_ROUTES[0])], request);
+  assert.equal(journeys.length, 1);
   assert.ok(journeys.every((journey) => Date.parse(journey.plannedArrivalAt) <= Date.parse(request.arrivalAt)));
   const malformed = JSON.parse(JSON.stringify(RIESSER_COORDINATE_ROUTE)) as { parts: Array<{ from: Record<string, unknown> }> };
   malformed.parts[1]!.from.stationGlobalId = "  ";
@@ -448,9 +448,39 @@ test("MVG parser preserves safe station ordering and rejects malformed or discon
   assert.throws(() => parseMvgCoordinateJourneys([disconnected], request), /continuous/);
 });
 
+test("MVG excludes soft planned handoffs, preserves valid timestamps, and filters late routes", () => {
+  const request = RIESSER_REQUEST;
+  assert.deepEqual(parseMvgCoordinateJourneys(RIESSER_MIXED_COORDINATE_ROUTES, request), []);
+  assert.deepEqual(parseMvgCoordinateJourneys([RIESSER_COORDINATE_ROUTE], request), []);
+  assert.deepEqual(parseMvgCoordinateJourneys([
+    withoutPlannedHandoffOverlaps(RIESSER_MIXED_COORDINATE_ROUTES.at(-1)),
+  ], request), []);
+
+  const feasibleRoute = withoutPlannedHandoffOverlaps(RIESSER_MIXED_COORDINATE_ROUTES[0]);
+  const expectedPlannedDeparture = feasibleRoute.parts[1]!.from.plannedDeparture;
+  const feasibleAndLate = parseMvgCoordinateJourneys([
+    feasibleRoute,
+    RIESSER_MIXED_COORDINATE_ROUTES.at(-1)!,
+  ], request);
+  assert.equal(feasibleAndLate.length, 1);
+  assert.equal(feasibleAndLate[0]!.parts[1]!.plannedDepartureAt, expectedPlannedDeparture);
+});
+
+test("MVG keeps valid alternatives when another alternative has a hard temporal overlap", () => {
+  const request = RIESSER_REQUEST;
+  const validRoute = withoutPlannedHandoffOverlaps(RIESSER_MIXED_COORDINATE_ROUTES[0]);
+  const hardRoute = withWalkingTransitOverlap(validRoute, 420_000);
+  const journeys = parseMvgCoordinateJourneys([validRoute, hardRoute], request);
+  assert.equal(journeys.length, 1);
+
+  assert.throws(() => parseMvgCoordinateJourneys([hardRoute], request), /no temporally feasible/);
+  const lateRoute = withoutPlannedHandoffOverlaps(RIESSER_MIXED_COORDINATE_ROUTES.at(-1));
+  assert.throws(() => parseMvgCoordinateJourneys([hardRoute, lateRoute], request), /no temporally feasible/);
+});
+
 test("MVG accepts only the anonymous first walking identity and rejects other blank identities", () => {
   const request = RIESSER_REQUEST;
-  const route = cloneRoute(RIESSER_COORDINATE_ROUTE);
+  const route = withoutPlannedHandoffOverlaps(RIESSER_COORDINATE_ROUTE);
   route.parts[0]!.from.stationGlobalId = "   ";
   const parsed = parseMvgCoordinateJourneys([route], request)[0]!;
   assert.equal(parsed.parts[0]!.from.stationGlobalId, null);
@@ -462,17 +492,17 @@ test("MVG accepts only the anonymous first walking identity and rejects other bl
     destination: { latitude: 48.1047, longitude: 11.56175 },
     participantOriginEndpoint: "destination" as const,
   };
-  const finalBlank = cloneRoute(RIESSER_COORDINATE_ROUTE);
+  const finalBlank = withoutPlannedHandoffOverlaps(RIESSER_COORDINATE_ROUTE);
   finalBlank.parts.at(-1)!.to!.stationGlobalId = "\t";
   const finalParsed = parseMvgCoordinateJourneys([finalBlank], finalOriginRequest)[0]!;
   assert.deepEqual(finalParsed.parts.at(-1)!.to.coordinate, finalOriginRequest.destination);
 
-  const nonParticipantFinalBlank = cloneRoute(RIESSER_COORDINATE_ROUTE);
+  const nonParticipantFinalBlank = withoutPlannedHandoffOverlaps(RIESSER_COORDINATE_ROUTE);
   nonParticipantFinalBlank.parts.at(-1)!.to!.stationGlobalId = "\t";
   const nonParticipantFinalParsed = parseMvgCoordinateJourneys([nonParticipantFinalBlank], request)[0]!;
   assert.deepEqual(nonParticipantFinalParsed.parts.at(-1)!.to.coordinate, request.destination);
 
-  const displacedNonParticipantFinal = cloneRoute(RIESSER_COORDINATE_ROUTE);
+  const displacedNonParticipantFinal = withoutPlannedHandoffOverlaps(RIESSER_COORDINATE_ROUTE);
   displacedNonParticipantFinal.parts.at(-1)!.to!.stationGlobalId = "\t";
   displacedNonParticipantFinal.parts.at(-1)!.to!.longitude = request.destination.longitude + 0.00005;
   const displacedNonParticipantParsed = parseMvgCoordinateJourneys([displacedNonParticipantFinal], request)[0]!;
@@ -482,15 +512,13 @@ test("MVG accepts only the anonymous first walking identity and rejects other bl
     longitude: request.destination.longitude + 0.00005,
   });
 
-  const transitBlank = cloneRoute(RIESSER_COORDINATE_ROUTE);
+  const transitBlank = withoutPlannedHandoffOverlaps(RIESSER_COORDINATE_ROUTE);
   transitBlank.parts[1]!.from.stationGlobalId = " ";
   assert.throws(() => parseMvgCoordinateJourneys([transitBlank], request), /invalid station identity/);
 });
 
-test("MVG accepts exactly one minute walking-transit overlap and rejects larger or transit overlap", () => {
+test("MVG rejects larger walking-transit and transit-transit overlaps", () => {
   const request = RIESSER_REQUEST;
-  const accepted = parseMvgCoordinateJourneys([RIESSER_COORDINATE_ROUTE], request)[0]!;
-  assert.equal(accepted.parts[1]!.plannedDepartureAt, "2026-08-09T14:45:00.000Z");
 
   const larger = cloneRoute(RIESSER_COORDINATE_ROUTE);
   larger.parts[1]!.from.plannedDeparture = "2026-08-09T14:43:00.000Z";
@@ -503,11 +531,11 @@ test("MVG accepts exactly one minute walking-transit overlap and rejects larger 
 
 test("MVG binds a nearby anonymous participant origin and accepts an identified endpoint within 100m", () => {
   const request = RIESSER_REQUEST;
-  const parsed = parseMvgCoordinateJourneys([RIESSER_COORDINATE_ROUTE], request)[0]!;
+  const parsed = parseMvgCoordinateJourneys([withoutPlannedHandoffOverlaps(RIESSER_COORDINATE_ROUTE)], request)[0]!;
   assert.deepEqual(parsed.parts[0]!.from.coordinate, request.origin);
   assert.deepEqual(parsed.parts.at(-1)!.to.coordinate, request.destination);
 
-  const identifiedOuter = cloneRoute(RIESSER_COORDINATE_ROUTE);
+  const identifiedOuter = withoutPlannedHandoffOverlaps(RIESSER_COORDINATE_ROUTE);
   identifiedOuter.parts[0]!.from.stationGlobalId = "de:09162:anonymous-origin";
   const identifiedParsed = parseMvgCoordinateJourneys([identifiedOuter], request)[0]!;
   assert.equal(identifiedParsed.parts[0]!.from.stationGlobalId, "de:09162:anonymous-origin");
@@ -519,24 +547,25 @@ test("MVG binds a nearby anonymous participant origin and accepts an identified 
 
 test("MVG stable station identity preserves continuity across platform coordinate shifts", () => {
   const request = RIESSER_REQUEST;
-  const journey = parseMvgCoordinateJourneys([RIESSER_HBF_COORDINATE_ROUTE], request)[0]!;
+  const journey = parseMvgCoordinateJourneys([withoutPlannedHandoffOverlaps(RIESSER_HBF_COORDINATE_ROUTE)], request)[0]!;
   assert.equal(journey.parts[1]!.to.stationGlobalId, journey.parts[2]!.from.stationGlobalId);
   assert.notDeepEqual(journey.parts[1]!.to.coordinate, journey.parts[2]!.from.coordinate);
 });
 
-test("MVG filters individually infeasible alternatives but fails malformed response rows", () => {
+test("MVG rejects non-arrival temporal invalidity and malformed response rows", () => {
   const request = RIESSER_REQUEST;
-  assert.equal(parseMvgCoordinateJourneys(RIESSER_BUS_OVERLAP_MIXED_COORDINATE_ROUTES, request).length, 4);
+  assert.throws(() => parseMvgCoordinateJourneys(RIESSER_BUS_OVERLAP_MIXED_COORDINATE_ROUTES, request), /no temporally feasible/);
 
+  const validRoute = withoutPlannedHandoffOverlaps(RIESSER_MIXED_COORDINATE_ROUTES[0]);
   const malformedShape = cloneRoute(RIESSER_COORDINATE_ROUTE);
   delete malformedShape.parts[1]!.to;
-  assert.throws(() => parseMvgCoordinateJourneys([...RIESSER_MIXED_COORDINATE_ROUTES.slice(0, 1), malformedShape], request));
+  assert.throws(() => parseMvgCoordinateJourneys([validRoute, malformedShape], request));
   const malformedCoordinate = cloneRoute(RIESSER_COORDINATE_ROUTE);
   malformedCoordinate.parts[1]!.from.latitude = "not-a-coordinate";
-  assert.throws(() => parseMvgCoordinateJourneys([...RIESSER_MIXED_COORDINATE_ROUTES.slice(0, 1), malformedCoordinate], request));
+  assert.throws(() => parseMvgCoordinateJourneys([validRoute, malformedCoordinate], request));
   const malformedIdentity = cloneRoute(RIESSER_COORDINATE_ROUTE);
   malformedIdentity.parts[1]!.from.stationGlobalId = "  ";
-  assert.throws(() => parseMvgCoordinateJourneys([...RIESSER_MIXED_COORDINATE_ROUTES.slice(0, 1), malformedIdentity], request), /invalid station identity/);
+  assert.throws(() => parseMvgCoordinateJourneys([validRoute, malformedIdentity], request), /invalid station identity/);
 });
 
 test("domain continuity accepts stable platform shifts but rejects displaced differing or missing identities", async () => {
@@ -762,6 +791,26 @@ function cloneRoute(value: unknown): {
   };
 }
 
+function withoutPlannedHandoffOverlaps(value: unknown) {
+  const route = cloneRoute(value);
+  for (let index = 1; index < route.parts.length; index += 1) {
+    const previousArrival = route.parts[index - 1]!.to?.plannedDeparture;
+    const currentDeparture = route.parts[index]!.from.plannedDeparture;
+    if (typeof previousArrival === "string" && typeof currentDeparture === "string" && Date.parse(currentDeparture) < Date.parse(previousArrival)) {
+      route.parts[index]!.from.plannedDeparture = previousArrival;
+    }
+  }
+  return route;
+}
+
+function withWalkingTransitOverlap(value: unknown, overlapMilliseconds: number) {
+  const route = cloneRoute(value);
+  const previousArrival = route.parts[0]!.to?.plannedDeparture;
+  if (typeof previousArrival !== "string") throw new Error("Test route is missing a planned handoff timestamp.");
+  route.parts[1]!.from.plannedDeparture = new Date(Date.parse(previousArrival) - overlapMilliseconds).toISOString();
+  return route;
+}
+
 function clone(value: MeetingCalculationResponse): MeetingCalculationResponse {
   return JSON.parse(JSON.stringify(value)) as MeetingCalculationResponse;
 }
@@ -788,7 +837,7 @@ function rawPart(fromId: string, toId: string, fromCoordinate: LocationCoordinat
 
 function adaptRiesserRoute(url: URL): unknown[] {
   const handoffId = url.searchParams.get("viaStationGlobalId") ?? "fixture-origin";
-  const capturedRoutes = handoffId === "de:09162:6" ? [riesserDomainNormalizedRoute()] : RIESSER_BUS_OVERLAP_MIXED_COORDINATE_ROUTES;
+  const capturedRoutes = handoffId === "de:09162:6" ? [riesserDomainNormalizedRoute()] : RIESSER_MIXED_COORDINATE_ROUTES;
   return capturedRoutes.map((capturedRoute) => {
     const route = JSON.parse(JSON.stringify(capturedRoute)) as { parts: Array<{ from: Record<string, unknown>; to: Record<string, unknown> }> };
     route.parts[0]!.from.latitude = Number(url.searchParams.get("originLatitude"));

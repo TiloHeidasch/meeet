@@ -854,6 +854,7 @@ type MvgTemporalInvalidReason =
   | "part-arrival-before-departure"
   | "itinerary-arrival-before-departure"
   | "itinerary-duration-exceeded"
+  | "planned-handoff-infeasible"
   | "arrives-after-arrivalAt";
 
 type MvgCoordinateJourneyParseOutcome =
@@ -862,6 +863,7 @@ type MvgCoordinateJourneyParseOutcome =
       category: "temporally-infeasible";
       journey: CoordinateJourney;
       reason: MvgTemporalInvalidReason;
+      hard: boolean;
     };
 
 /** Parse the coordinate-to-coordinate response used by the canonical search. */
@@ -887,7 +889,7 @@ export function parseMvgCoordinateJourneys(
   const validJourneys = parsedJourneys
     .filter((outcome): outcome is Extract<MvgCoordinateJourneyParseOutcome, { category: "valid" }> => outcome.category === "valid")
     .map((outcome) => outcome.journey);
-  if (value.length > 0 && validJourneys.length === 0) {
+  if (validJourneys.length === 0 && parsedJourneys.some((outcome) => outcome.category === "temporally-infeasible" && outcome.hard)) {
     throw new Error("MVG coordinate journey response contains no temporally feasible journey.");
   }
   return validJourneys;
@@ -905,8 +907,10 @@ function parseMvgCoordinateJourney(
   const pathPolylines: unknown[] = [];
   let previousArrival: number | null = null;
   let temporalInvalidReason: MvgTemporalInvalidReason | null = null;
+  let hardTemporalInvalid = false;
   const markTemporalInvalid = (reason: MvgTemporalInvalidReason): void => {
     temporalInvalidReason ??= reason;
+    if (reason !== "planned-handoff-infeasible" && reason !== "arrives-after-arrivalAt") hardTemporalInvalid = true;
   };
   for (const [index, rawPart] of value.parts.entries()) {
     if (!isRecord(rawPart) || !isRecord(rawPart.from) || !isRecord(rawPart.to)) {
@@ -933,7 +937,7 @@ function parseMvgCoordinateJourney(
     if (plannedDeparture === null || plannedDeparture === undefined || plannedArrival === null || plannedArrival === undefined) {
       throw new Error("MVG coordinate journey part is missing planned timestamps.");
     }
-    let departure = parseProviderTimestamp(plannedDeparture, "departure");
+    const departure = parseProviderTimestamp(plannedDeparture, "departure");
     const arrival = parseProviderTimestamp(plannedArrival, "arrival");
     if (index > 0) {
       const previous = parts[index - 1]!;
@@ -947,11 +951,11 @@ function parseMvgCoordinateJourney(
         const overlap = previousArrival - departure;
         const walkingTransitHandoff = (previous.kind === "walking" && line.kind === "transit") ||
           (previous.kind === "transit" && line.kind === "walking");
-        const validHandoff = walkingTransitHandoff && (sameStation || sameCoordinate) && overlap === MVG_DIRECT_MAX_WALKING_TRANSIT_HANDOFF_OVERLAP_MS;
-        if (!validHandoff) {
-          markTemporalInvalid("disallowed-inter-part-overlap");
+        const softPlannedHandoff = walkingTransitHandoff && (sameStation || sameCoordinate) && overlap === MVG_DIRECT_MAX_WALKING_TRANSIT_HANDOFF_OVERLAP_MS;
+        if (softPlannedHandoff) {
+          markTemporalInvalid("planned-handoff-infeasible");
         } else {
-          departure = previousArrival;
+          markTemporalInvalid("disallowed-inter-part-overlap");
         }
       }
     }
@@ -1012,7 +1016,7 @@ function parseMvgCoordinateJourney(
   };
   return temporalInvalidReason === null
     ? { category: "valid", journey }
-    : { category: "temporally-infeasible", journey, reason: temporalInvalidReason };
+    : { category: "temporally-infeasible", journey, reason: temporalInvalidReason, hard: hardTemporalInvalid };
 }
 
 /** Decode optional MVG path geometry without allowing it to affect journey validity. */

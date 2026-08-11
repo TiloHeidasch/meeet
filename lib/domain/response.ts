@@ -1,5 +1,6 @@
 import { MEETING_SEARCH_COVERAGE_METHOD, MEETING_TIME_ZONE, TOLERANCE_PERCENT_OPTIONS } from "./types.ts";
 import { isWithinOfficialMunichBoundary } from "./boundary.ts";
+import { isWithinCoordinateBindingTolerance } from "./coordinate-binding.ts";
 import { haversineDistanceKm } from "./geo.ts";
 import { compareFairLocationOrder, fairLocationOrderKey, type FairLocationOrderKey } from "./fair-location-order.ts";
 import type {
@@ -481,7 +482,7 @@ function validateDetailedJourney(
   if (fairLocationCoordinate && isRecord(value.destination) && isCoordinateRecord(value.destination.coordinate) && !coordinatesWithinBinding(fairLocationCoordinate, value.destination.coordinate)) {
     issues.push(issue(path.concat("destination", "coordinate"), "mismatched_destination", "Journey destination must bind to its enclosing Fair Location."));
   }
-  if (fairLocationCoordinate && isRecord(finalPart) && isRecord(finalPart.to) && isCoordinateRecord(finalPart.to.coordinate) && !coordinatesWithinBinding(fairLocationCoordinate, finalPart.to.coordinate)) {
+  if (fairLocationCoordinate && isRecord(finalPart) && isRecord(finalPart.to) && isCoordinateRecord(finalPart.to.coordinate) && !isWithinCoordinateBindingTolerance(fairLocationCoordinate, finalPart.to.coordinate)) {
     issues.push(issue(path.concat("parts", value.parts.length - 1, "to", "coordinate"), "mismatched_destination", "The final journey part must bind to its enclosing Fair Location."));
   }
   validateDetailedJourneyTiming(value, path, issues);

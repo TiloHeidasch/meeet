@@ -63,13 +63,25 @@ test("detailed Journey origins and destinations bind to the Physical Transit Loc
   assert.equal(validateMeetingCalculationResponse(wrongOrigin).success, false);
 
   const wrongDestination = cloneFixture();
-  wrongDestination.fairLocations[0]!.journeys[0]!.destination.coordinate = { latitude: 48.147, longitude: 11.5661 };
+  wrongDestination.fairLocations[0]!.journeys[0]!.destination.coordinate = { latitude: 48.149, longitude: 11.5661 };
   assert.equal(validateMeetingCalculationResponse(wrongDestination).success, false);
 
   const wrongFinalPart = cloneFixture();
   const finalPart = wrongFinalPart.fairLocations[0]!.journeys[0]!.parts.at(-1)!;
-  finalPart.to.coordinate = { latitude: 48.147, longitude: 11.5661 };
+  finalPart.to.coordinate = { latitude: 48.149, longitude: 11.5661 };
   assert.equal(validateMeetingCalculationResponse(wrongFinalPart).success, false);
+});
+
+test("final detailed Journey part endpoints use the shared 100m Fair Location binding policy", () => {
+  const withinTolerance = cloneFixture();
+  const validFinalPart = withinTolerance.fairLocations[0]!.journeys[0]!.parts.at(-1)!;
+  validFinalPart.to.coordinate = { latitude: 48.1466, longitude: 11.5661 };
+  assert.equal(validateMeetingCalculationResponse(withinTolerance).success, true);
+
+  const beyondTolerance = cloneFixture();
+  const invalidFinalPart = beyondTolerance.fairLocations[0]!.journeys[0]!.parts.at(-1)!;
+  invalidFinalPart.to.coordinate = { latitude: 48.149, longitude: 11.5661 };
+  assert.equal(validateMeetingCalculationResponse(beyondTolerance).success, false);
 });
 
 test("detailed Journey destination identities must match a colocated Physical Transit Location", () => {

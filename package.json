@@ -14,6 +14,7 @@
     "lint": "eslint",
     "test": "tsx --test --import ./test/server-only-register.mjs test/*.test.ts",
     "test:e2e": "playwright test",
+    "test:e2e:mvg-live": "MEEET_PROVIDER_MODE=mvg-direct-transit playwright test e2e/mvg-live.spec.ts",
     "boundary:refresh": "tsx scripts/refresh-munich-boundary.ts"
   },
   "dependencies": {
