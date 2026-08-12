@@ -1,8 +1,6 @@
 import "server-only";
 
-import {
-  ProviderNotConfiguredError,
-} from "../domain/meeting.ts";
+import { ProviderNotConfiguredError } from "../domain/providers.ts";
 import type {
   GeocodingProvider,
   MeetingProviders,
@@ -16,7 +14,7 @@ import type {
 } from "../domain/types.ts";
 
 const descriptorProvenance: ProviderProvenance = {
-  role: "routing",
+  role: "access",
   provider: "unconfigured-provider",
   deployment: "unknown",
   dataKind: "unknown",

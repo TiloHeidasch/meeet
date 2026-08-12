@@ -1,6 +1,6 @@
 import { HttpProviderError, raceWithAbort } from "./http.ts";
 
-export const MVG_DIRECT_MAX_CONCURRENCY = 4;
+export const MVG_MAX_CONCURRENCY = 4;
 
 class ConcurrencyLimiter {
   private active = 0;
@@ -57,17 +57,17 @@ class ConcurrencyLimiter {
   }
 }
 
-/** Shared by every direct MVG upstream fill and uncached request. */
-export const MVG_DIRECT_LIMITER = new ConcurrencyLimiter(MVG_DIRECT_MAX_CONCURRENCY);
+/** Shared by every MVG location/nearby upstream fill and uncached request. */
+export const MVG_CACHE_LIMITER = new ConcurrencyLimiter(MVG_MAX_CONCURRENCY);
 
 /**
  * Let an individual caller stop waiting without releasing the shared fill's
  * limiter slot before its upstream operation settles.
  */
-export function runMvgDirectCacheFill<T>(
+export function runMvgCacheFill<T>(
   operation: () => Promise<T>,
   signal?: AbortSignal,
 ): Promise<T> {
   const limiterSignal = signal ?? new AbortController().signal;
-  return raceWithAbort(MVG_DIRECT_LIMITER.run(operation, limiterSignal), signal);
+  return raceWithAbort(MVG_CACHE_LIMITER.run(operation, limiterSignal), signal);
 }

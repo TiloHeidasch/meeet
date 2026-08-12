@@ -1,26 +1,14 @@
 import { Suspense } from "react";
 import { connection } from "next/server";
 import MeetPlanner from "@/components/MeetPlanner";
-import { createMeetingProviders } from "@/lib/providers/factory";
 import { readProviderConfig } from "@/lib/providers/config";
 
 async function HomeContent() {
   await connection();
   const providerConfig = readProviderConfig();
-  const meetingProviders = createMeetingProviders();
-  const routingFoundation = providerConfig.mode === "self-hosted-routing"
-    ? meetingProviders.routingFoundation
-    : undefined;
   // Allow-list only UI capability data. URLs, tokens, and provenance stay server-side.
   return <MeetPlanner capability={{
     mode: providerConfig.mode,
-    ...(routingFoundation && {
-      routingFoundation: {
-        state: routingFoundation.state,
-        calculationAvailable: routingFoundation.calculationAvailable,
-        reason: routingFoundation.reason,
-      },
-    }),
   }} />;
 }
 

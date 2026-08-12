@@ -15,12 +15,7 @@ import {
   type FetchImplementation,
   HttpProviderError,
 } from "../lib/providers/http.ts";
-import {
-  MVG_DIRECT_NEARBY_URL,
-  MVG_UPSTREAM_REVALIDATE_SECONDS,
-  MvgDirectRoutingProvider,
-  runMvgDirectCacheFill,
-} from "../lib/providers/mvg-direct.ts";
+import { MVG_UPSTREAM_REVALIDATE_SECONDS } from "../lib/providers/mvg-constants.ts";
 
 const A = { latitude: 48.1374, longitude: 11.5755 };
 
@@ -124,33 +119,6 @@ test("location search hides upstream failures behind a generic response", async 
   }
 });
 
-test("nearby MVG requests use a shared cache bucket and no-store raw fetch", async () => {
-  const requests: Array<{ url: URL; init?: RequestInit }> = [];
-  const fetchImplementation: FetchImplementation = async (input, init) => {
-    requests.push({ url: new URL(String(input)), init });
-    return Response.json({ stations: [] });
-  };
-  const provider = new MvgDirectRoutingProvider(fetchImplementation);
-  const nearbyCoordinate = { latitude: 48.13745, longitude: 11.57555 };
-  const response = await provider.getTravelTimeMatrix({
-    departureAt: "2026-07-25T08:00:00.000Z",
-    participants: [{ participantId: "one", origin: nearbyCoordinate, mode: "transit" }],
-    destinations: [{ id: "destination", coordinate: A, sampleKind: "center" }],
-  });
-
-  assert.equal(response.travelTimes[0]?.status, "unreachable");
-  const nearbyRequests = requests.filter(({ url }) => url.toString().startsWith(MVG_DIRECT_NEARBY_URL));
-  assert.equal(nearbyRequests.length, 2);
-  assert.equal(
-    new Set(nearbyRequests.map(({ url }) => `${url.searchParams.get("latitude")}:${url.searchParams.get("longitude")}`)).size,
-    1,
-  );
-  assert.ok(nearbyRequests.every(({ init }) =>
-    init?.cache === "no-store" && init.next === undefined && init.redirect === "error",
-  ));
-  assert.equal(requests.some(({ url }) => url.pathname.endsWith("/routes")), false);
-});
-
 test("location cache fills share the limiter and retain active slots after caller abort", async () => {
   let started = 0;
   let fifthStarted = false;
@@ -187,39 +155,6 @@ test("location cache fills share the limiter and retain active slots after calle
   assert.equal(results.filter((result) => result.status === "rejected").length, 1);
   assert.equal(started, 5);
   assert.equal(fifthStarted, true);
-});
-
-test("MVG routes do not receive a Next cache option", async () => {
-  const requests: Array<{ url: URL; init?: RequestInit }> = [];
-  const fetchImplementation: FetchImplementation = async (input, init) => {
-    const url = new URL(String(input));
-    requests.push({ url, init });
-    if (url.pathname.endsWith("/nearby")) {
-      const latitude = Number(url.searchParams.get("latitude"));
-      const longitude = Number(url.searchParams.get("longitude"));
-      return Response.json({ stations: [{ globalId: `${latitude}:${longitude}`, latitude, longitude }] });
-    }
-    return Response.json([{
-      parts: [{
-        from: { stationGlobalId: url.searchParams.get("originStationGlobalId") },
-        to: {
-          stationGlobalId: url.searchParams.get("destinationStationGlobalId"),
-          plannedDeparture: "2026-07-25T08:20:00.000+00:00",
-        },
-        line: { transportType: "BUS" },
-      }],
-    }]);
-  };
-  const provider = new MvgDirectRoutingProvider(fetchImplementation);
-  await provider.getTravelTimeMatrix({
-    departureAt: "2026-07-25T08:00:00.000Z",
-    participants: [{ participantId: "one", origin: A, mode: "transit" }],
-    destinations: [{ id: "destination", coordinate: { ...A, longitude: A.longitude + 0.001 }, sampleKind: "center" }],
-  });
-  const routeRequest = requests.find(({ url }) => url.pathname.endsWith("/routes"));
-  assert.ok(routeRequest);
-  assert.equal(routeRequest.init?.cache, "no-store");
-  assert.equal(routeRequest.init?.next, undefined);
 });
 
 test("declared oversized location responses cancel their body before failing", async () => {
@@ -322,83 +257,6 @@ test("HTTP early failures cancel response bodies without masking the primary err
       error instanceof HttpProviderError && error.kind === "http",
   );
   assert.equal(cleanupFailure.canceled(), 1);
-});
-
-test("aborted production-style cache fills retain four limiter slots until settlement", async () => {
-  let active = 0;
-  let maximumActive = 0;
-  let started = 0;
-  let releaseFill: (() => void) | undefined;
-  const fillReleased = new Promise<void>((resolve) => {
-    releaseFill = resolve;
-  });
-  const callers = Array.from({ length: 4 }, () => new AbortController());
-  const fills = callers.map((caller) =>
-    runMvgDirectCacheFill(async () => {
-      active += 1;
-      started += 1;
-      maximumActive = Math.max(maximumActive, active);
-      await fillReleased;
-      active -= 1;
-      return "filled";
-    }, caller.signal),
-  );
-  const fillResultsPromise = Promise.allSettled(fills);
-
-  await expectActive(() => active, 4);
-  callers.forEach((caller) => caller.abort());
-  let fifthStarted = false;
-  const fifth = runMvgDirectCacheFill(async () => {
-    fifthStarted = true;
-    active += 1;
-    maximumActive = Math.max(maximumActive, active);
-    active -= 1;
-    return "fifth";
-  }, new AbortController().signal);
-  await new Promise((resolve) => setTimeout(resolve, 10));
-  assert.equal(fifthStarted, false);
-  releaseFill?.();
-  const fillResults = await fillResultsPromise;
-  assert.ok(fillResults.every((result) =>
-    result.status === "rejected" &&
-    result.reason instanceof HttpProviderError &&
-    result.reason.kind === "aborted",
-  ));
-  assert.equal(await fifth, "fifth");
-  assert.equal(started, 4);
-  assert.ok(maximumActive <= 4);
-});
-
-test("configured direct HTTP honors effective timeout and response-size limits", async () => {
-  const limited = new MvgDirectRoutingProvider(
-    { timeoutMs: 1_000, maxResponseBytes: 32 },
-    async () => new Response("x".repeat(100), { headers: { "content-type": "application/json" } }),
-  );
-  await assert.rejects(
-    limited.getTravelTimeMatrix({
-      departureAt: "2026-07-25T08:00:00.000Z",
-      participants: [{ participantId: "one", origin: A, mode: "transit" }],
-      destinations: [{ id: "destination", coordinate: A, sampleKind: "center" }],
-    }),
-    (error: unknown) =>
-      error instanceof HttpProviderError && error.kind === "response-too-large",
-  );
-
-  const timedOut = new MvgDirectRoutingProvider(
-    { timeoutMs: 5, maxResponseBytes: 1_024, matrixDeadlineMs: 1_000 },
-    async (_input, init) => new Promise<Response>((_resolve, reject) => {
-      init?.signal?.addEventListener("abort", () => reject(new Error("aborted")), { once: true });
-    }),
-  );
-  await assert.rejects(
-    timedOut.getTravelTimeMatrix({
-      departureAt: "2026-07-25T08:00:00.000Z",
-      participants: [{ participantId: "one", origin: A, mode: "transit" }],
-      destinations: [{ id: "destination", coordinate: A, sampleKind: "center" }],
-    }),
-    (error: unknown) =>
-      error instanceof HttpProviderError && error.kind === "timeout",
-  );
 });
 
 function createTrackedResponse(

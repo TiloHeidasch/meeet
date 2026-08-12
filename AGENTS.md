@@ -2,33 +2,33 @@
 
 ## Product guardrails
 
-- Keep the intentional `meeet` spelling. Build mobile-first; add desktop adaptations second.
-- The MVP is Munich-only and must use MVG data. Do not imply broader geographic or transit-data coverage.
-- The core flow supports exactly two participants placed on a map and calculates their public-transport travel times.
-- Use Route-Guided Fair Location Search: sample local planned-time minima at transit stations from direct and anchor-station-constrained routes, disclose sampled/local coverage, and never imply a complete set or fair corridor. The default travel-time tolerance is ±10%; POI discovery is out of scope for this MVP.
-- Start with a selected tolerance of ±5%, ±10%, or ±15%; if no discovered local minimum qualifies, increase it by 5 percentage points until one does. A search with no transit-station target is an explicit no-result.
+- Keep Munich as the only supported geographic boundary.
+- The canonical calculation contract is `meeet-meeting/v3` with exactly two
+  transit Participants, two origins, a Search Start Time, and selected 5/10/15%
+  tolerance.
+- MVV GTFS is the sole schedule and transit-routing authority. MVG location and
+  nearby access are seed resolution only; never add journey, route, realtime,
+  POI, or pedestrian-navigation behavior to the scheduled calculation.
+- Preserve station-area/boarding-stop identity, planned service-day semantics,
+  provenance, explicit no-result, and red/blue/fair/unclassified cell rules.
+- Do not escalate or silently change the selected tolerance.
 
-## Current codebase
+## Change triggers
 
-- The application entrypoints are `app/page.tsx`, `app/layout.tsx`, and `app/globals.css`.
-- Use npm (`package-lock.json` is committed): `npm run dev`, `npm run lint`, `npm run build`, and `npm run start`. There is no test command.
-- TypeScript is strict; `@/*` resolves from the repository root. Styling is Tailwind CSS v4.
-- `app/layout.tsx` uses `next/font/google`; builds can require font network access or a populated cache.
+- Changes to scheduled routing, artifacts, access seeds, or the v3 validator
+  require focused scheduled tests and strict typechecking.
+- Changes to the calculation endpoint must preserve v3-only rejection of old
+  request shapes and the no-MVG-route guard.
+- UI, client-safe response consumption, styling, and browser tests belong to
+  the visual/client migration lane; do not edit them from a server lane.
 
-## Next.js constraint
+## Engineering guardrails
 
-- This project uses a breaking-change-prone Next.js version. Before changing Next.js code, read the relevant guide in `node_modules/next/dist/docs/` and follow its deprecation notices.
-
-## Agent skills
-
-### Issue tracker
-
-Issues are tracked in this repository's GitHub Issues. See `docs/agents/issue-tracker.md`.
-
-### Triage labels
-
-The default canonical triage labels are used. See `docs/agents/triage-labels.md`.
-
-### Domain docs
-
-This is a single-context layout. See `docs/agents/domain.md`.
+- Keep server-only provider credentials and schedule artifacts out of client
+  bundles.
+- Keep Node 24 artifact compatibility, full-feed memory capacity, API deadline,
+  and concurrency limits explicit in deployment changes.
+- Use TDD for contract retirement and tamper seams; run affected tests,
+  `npx tsc --noEmit`, and `git diff --check` before handoff.
+- Preserve the intentional `meeet` spelling and the repository's strict
+  TypeScript settings.

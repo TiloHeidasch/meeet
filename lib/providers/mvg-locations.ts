@@ -6,15 +6,15 @@ import {
   createHttpJsonClient,
   type FetchImplementation,
 } from "./http.ts";
-import { runMvgDirectCacheFill } from "./mvg-limiter.ts";
+import { runMvgCacheFill } from "./mvg-limiter.ts";
 import {
-  MVG_DIRECT_LOCATIONS_URL,
+  MVG_LOCATIONS_URL,
   MVG_UPSTREAM_REVALIDATE_SECONDS,
 } from "./mvg-constants.ts";
 import {
-  MVG_DIRECT_MAX_RESPONSE_BYTES,
-  MVG_DIRECT_TIMEOUT_MS,
-} from "./mvg-direct.ts";
+  DEFAULT_PROVIDER_MAX_RESPONSE_BYTES,
+  DEFAULT_PROVIDER_TIMEOUT_MS,
+} from "./config.ts";
 
 export interface LocationSearchResult {
   label: string;
@@ -24,14 +24,14 @@ export interface LocationSearchResult {
 
 export const MVG_LOCATION_SEARCH_MAX_QUERY_LENGTH = 80;
 export const MVG_LOCATION_SEARCH_MAX_RESULTS = 20;
-export const MVG_LOCATION_SEARCH_TIMEOUT_MS = MVG_DIRECT_TIMEOUT_MS;
-export const MVG_LOCATION_SEARCH_MAX_RESPONSE_BYTES = MVG_DIRECT_MAX_RESPONSE_BYTES;
+export const MVG_LOCATION_SEARCH_TIMEOUT_MS = DEFAULT_PROVIDER_TIMEOUT_MS;
+export const MVG_LOCATION_SEARCH_MAX_RESPONSE_BYTES = DEFAULT_PROVIDER_MAX_RESPONSE_BYTES;
 
 export function runMvgLocationCacheFill<T>(
   operation: () => Promise<T>,
   signal?: AbortSignal,
 ): Promise<T> {
-  return runMvgDirectCacheFill(operation, signal);
+  return runMvgCacheFill(operation, signal);
 }
 
 export async function searchMvgLocations(
@@ -80,7 +80,7 @@ async function searchMvgLocationsWithFetch(
   timeoutMs = MVG_LOCATION_SEARCH_TIMEOUT_MS,
   maxResponseBytes = MVG_LOCATION_SEARCH_MAX_RESPONSE_BYTES,
 ): Promise<LocationSearchResult[]> {
-  const url = new URL(MVG_DIRECT_LOCATIONS_URL);
+  const url = new URL(MVG_LOCATIONS_URL);
   url.searchParams.set("query", query);
   const client = createHttpJsonClient(
     url.toString(),

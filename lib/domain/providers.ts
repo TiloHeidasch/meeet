@@ -6,12 +6,8 @@ import type {
   MeetingPointOfInterest,
   ProviderDescriptor,
   ResolvedLocation,
-  CoordinateJourneyRequest,
-  CoordinateJourneyResult,
   RoutingMatrixRequest,
   RoutingMatrixResponse,
-  RouteAlternativeDiscoveryRequest,
-  RouteAlternativeDiscoveryResult,
   MapConfigurationProvenance,
   RoutingProviderCapabilities,
   RoutingFoundationCapability,
@@ -19,9 +15,31 @@ import type {
   PointToPointRoutingRequest,
   PointToPointRoutingResult,
   SelfHostedRoutingAdapterDescriptor,
+  LocationCoordinate,
 } from "./types.ts";
 import type { RouteEnumerationInput, RouteEnumerationResult } from "./route-first/index.ts";
 import { TRAVEL_MODES } from "./types.ts";
+import type { ScheduledRoutingArtifact } from "./scheduled-routing/models.ts";
+
+export class ProviderUnavailableError extends Error {
+  readonly providerRole: "geocoding" | "routing" | "access" | "poi";
+
+  constructor(providerRole: "geocoding" | "routing" | "access" | "poi") {
+    super(`The ${providerRole} provider is unavailable.`);
+    this.name = "ProviderUnavailableError";
+    this.providerRole = providerRole;
+  }
+}
+
+export class ProviderNotConfiguredError extends Error {
+  readonly providerRole: "geocoding" | "routing" | "access" | "poi";
+
+  constructor(providerRole: "geocoding" | "routing" | "access" | "poi") {
+    super(`The ${providerRole} provider is not configured.`);
+    this.name = "ProviderNotConfiguredError";
+    this.providerRole = providerRole;
+  }
+}
 
 export const FULL_ROUTING_PROVIDER_CAPABILITIES: RoutingProviderCapabilities = {
   supportedModes: TRAVEL_MODES,
@@ -53,25 +71,6 @@ export interface RoutingProvider {
   getTravelTimeMatrix(request: RoutingMatrixRequest): Promise<RoutingMatrixResponse>;
 }
 
-/** Separate bounded boundary for finite provider-returned route alternatives. */
-export interface RouteAlternativeProvider {
-  readonly descriptor: ProviderDescriptor;
-  discoverRouteAlternatives(
-    request: RouteAlternativeDiscoveryRequest,
-  ): Promise<RouteAlternativeDiscoveryResult>;
-}
-
-/**
- * Canonical meeting-search seam. It is deliberately separate from the
- * route-first point-to-point subsystem.
- */
-export interface CoordinateJourneyProvider {
-  readonly descriptor: ProviderDescriptor;
-  getCoordinateJourneys(
-    request: CoordinateJourneyRequest,
-  ): Promise<CoordinateJourneyResult>;
-}
-
 /** Domain boundary for bounded route-first point-to-point adapters. */
 export interface PointToPointRoutingProvider {
   readonly descriptor: SelfHostedRoutingAdapterDescriptor;
@@ -91,15 +90,46 @@ export interface PoiProvider {
   ): Promise<readonly MeetingPointOfInterest[]>;
 }
 
+export interface ScheduledAccessSeedProvenance {
+  readonly source: "mvg-nearby" | "fixture-static";
+  readonly endpoint: string;
+  readonly distanceMeters: number;
+  readonly walkingSeconds: number;
+  readonly note: string;
+}
+
+export interface ScheduledAccessSeedCandidate {
+  readonly seedId: string;
+  readonly mvgStationId: string;
+  readonly stationAreaId: string;
+  readonly boardingStopId?: string;
+  readonly coordinate: LocationCoordinate;
+  readonly accessSeconds: number;
+  readonly provenance: ScheduledAccessSeedProvenance;
+}
+
+export interface ScheduledAccessSeedRequest {
+  readonly origin: LocationCoordinate;
+  readonly schedule: ScheduledRoutingArtifact;
+  readonly signal?: AbortSignal;
+}
+
+/** Nearby access only; implementations must not expose or call journey routing. */
+export interface ScheduledAccessSeedProvider {
+  readonly descriptor: ProviderDescriptor;
+  resolveAccessSeeds(request: ScheduledAccessSeedRequest): Promise<readonly ScheduledAccessSeedCandidate[]>;
+}
+
 export interface MeetingProviders {
-  geocoding: GeocodingProvider;
-  routing: RoutingProvider;
-  poi: PoiProvider;
-  routeAlternatives?: RouteAlternativeProvider;
-  /** Coordinate-to-coordinate provider used by the canonical meeting search. */
-  journey?: CoordinateJourneyProvider;
+  geocoding?: GeocodingProvider;
+  routing?: RoutingProvider;
+  poi?: PoiProvider;
   /** Route-first snapshot identity; calculation does not consume it yet. */
   routingSnapshot?: RoutingSnapshot;
   routingFoundation?: RoutingFoundationCapability;
   mapConfiguration?: MapConfigurationProvenance;
+  scheduledArtifact?: ScheduledRoutingArtifact;
+  scheduledAccess?: ScheduledAccessSeedProvider;
+  scheduledConcurrency?: number;
+  scheduledDeadlineMs?: number;
 }

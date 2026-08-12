@@ -28,142 +28,6 @@ export interface MeetingParticipant {
   mode: TravelMode;
 }
 
-/** Normalized server input for the canonical two-participant meeting search. */
-export interface MeetingCalculationInput {
-  participants: readonly [MeetingParticipant, MeetingParticipant];
-  tolerancePercent: TolerancePercent;
-  arrivalAt: string;
-}
-
-export type MeetingSearchDirection =
-  | "participant-1-to-participant-2"
-  | "participant-2-to-participant-1";
-
-export type RoutePatternSearchKind = "direct" | "anchor";
-export type RoutePatternKind = "transit" | "walk-only";
-export type RouteCandidateKind = "station" | "walking-endpoint" | "origin";
-export type ParticipantOriginEndpoint = "origin" | "destination";
-
-export interface CoordinateJourneyRequest {
-  origin: LocationCoordinate;
-  destination: LocationCoordinate;
-  arrivalAt: string;
-  participantOriginEndpoint: ParticipantOriginEndpoint;
-  viaStationGlobalId?: string;
-  viaDwellTimeInMinutes?: 10;
-  signal?: AbortSignal;
-}
-
-export type JourneyPartKind = "transit" | "walking";
-
-export interface JourneyEndpoint {
-  stationGlobalId: string | null;
-  coordinate: LocationCoordinate;
-  label?: string;
-}
-
-export interface CoordinateJourneyPart {
-  kind: JourneyPartKind;
-  from: JourneyEndpoint;
-  to: JourneyEndpoint;
-  /** Ordered provider stops between this transit part's endpoints. */
-  intermediateStops: readonly JourneyEndpoint[];
-  line: TransitLineReference | null;
-  geometry: GeoJsonLineString | null;
-  plannedDepartureAt: string;
-  plannedArrivalAt: string;
-}
-
-/** A provider-normalized, planned-time journey. Realtime is intentionally absent. */
-export interface CoordinateJourney {
-  transitStops: readonly JourneyEndpoint[];
-  parts: readonly CoordinateJourneyPart[];
-  plannedDepartureAt: string;
-  plannedArrivalAt: string;
-  plannedDurationMilliseconds: number;
-}
-
-export interface CoordinateJourneyResult {
-  journeys: readonly CoordinateJourney[];
-  source: string;
-}
-
-export interface RoutePatternProvenance {
-  direction: MeetingSearchDirection;
-  searchKind: RoutePatternSearchKind;
-  anchorStationGlobalId: string | null;
-}
-
-export interface MeetingSourceQueryProvenance {
-  direction: MeetingSearchDirection;
-  searchKind: RoutePatternSearchKind;
-  originParticipantId: string;
-  destinationParticipantId: string;
-  anchorStationGlobalId: string | null;
-  viaDwellTimeInMinutes: 10 | null;
-  arrivalAt: string;
-  journeyCount: number;
-  source: string;
-}
-
-export interface RoutePattern {
-  id: string;
-  kind: RoutePatternKind;
-  transitStops: readonly JourneyEndpoint[];
-  lines: readonly TransitLineReference[];
-  parts: readonly CoordinateJourneyPart[];
-  provenance: readonly RoutePatternProvenance[];
-}
-
-export interface PlannedParticipantJourney {
-  participantId: string;
-  mode: "transit";
-  origin: JourneyEndpoint;
-  destination: JourneyEndpoint;
-  parts: readonly CoordinateJourneyPart[];
-  plannedDepartureAt: string;
-  plannedArrivalAt: string;
-  plannedDurationMilliseconds: number;
-  source: string;
-}
-
-export interface FairLocation {
-  id: string;
-  label: string;
-  kind: RouteCandidateKind;
-  physicalIdentity: string;
-  coordinate: LocationCoordinate;
-  journeys: readonly [PlannedParticipantJourney, PlannedParticipantJourney];
-  differenceMilliseconds: number;
-  selectedTolerancePercent: TolerancePercent;
-  effectiveTolerancePercent: number;
-  sourceRoutePatternIds: readonly string[];
-}
-
-export const MEETING_SEARCH_COVERAGE_METHOD = "midpoint-directed-local-minimum/v1" as const;
-
-export type MeetingSearchCoverageTermination =
-  | "local-minima-discovered"
-  | "no-transit-station-targets";
-
-export interface MeetingPatternSearchCoverage {
-  routePatternId: string;
-  eligibleStationOccurrenceCount: number;
-  startTransitStopIndex: number | null;
-  evaluatedTransitStopIndexes: readonly number[];
-  discoveredLocalMinimumTransitStopIndexes: readonly number[];
-  termination: MeetingSearchCoverageTermination;
-}
-
-export interface MeetingSearchCoverage {
-  method: typeof MEETING_SEARCH_COVERAGE_METHOD;
-  exhaustive: false;
-  evaluatedStationOccurrenceCount: number;
-  discoveredLocalMinimumOccurrenceCount: number;
-  termination: MeetingSearchCoverageTermination;
-  patterns: readonly MeetingPatternSearchCoverage[];
-}
-
 export type GeoJsonPosition = [number, number];
 
 /** A stop-sequence geometry returned for a detailed venue route. */
@@ -234,65 +98,10 @@ export interface RoutingProviderCapabilities {
   maxMatrixEntries: number;
 }
 
-/** A stable MVG station reference; coordinates are optional on route payloads. */
-export interface RouteStationReference {
-  id: string;
-  coordinate: LocationCoordinate | null;
-}
-
 export interface TransitLineReference {
   /** Stable provider line identity, falling back to its normalized type. */
   identity: string;
   type: string;
-}
-
-export interface RoutePart {
-  from: RouteStationReference;
-  to: RouteStationReference;
-  plannedDepartureAt: string;
-  plannedArrivalAt: string;
-  effectiveDepartureAt: string;
-  effectiveArrivalAt: string;
-  line: TransitLineReference;
-}
-
-export interface RouteAlternative {
-  /** Provider-supplied identity when available; otherwise the structural path identity. */
-  providerItineraryId: string | null;
-  origin: RouteStationReference;
-  destination: RouteStationReference;
-  parts: readonly RoutePart[];
-  plannedDepartureAt: string;
-  plannedArrivalAt: string;
-  effectiveDepartureAt: string;
-  effectiveArrivalAt: string;
-  usedRealtime: boolean;
-  itineraryIdentity: string;
-  structuralPathIdentity: string;
-}
-
-export interface RouteAlternativeDiscoveryRequest {
-  origin: LocationCoordinate;
-  destination: LocationCoordinate;
-  departureAt: string;
-  signal?: AbortSignal;
-}
-
-export interface RouteAlternativeDiscoveryResult {
-  originStation: RouteStationReference | null;
-  destinationStation: RouteStationReference | null;
-  alternatives: readonly RouteAlternative[];
-}
-
-export type LegacyRouteCandidateKind = "route-part-endpoint" | "fixed-hub";
-
-export interface RouteCandidate {
-  id: string;
-  kind: LegacyRouteCandidateKind;
-  coordinate: LocationCoordinate;
-  label: string;
-  station: RouteStationReference | null;
-  alternativeIdentity: string | null;
 }
 
 export interface GridCell {
@@ -300,6 +109,7 @@ export interface GridCell {
   row: number;
   column: number;
   center: LocationCoordinate;
+  representativePoint: LocationCoordinate;
   vertices: readonly LocationCoordinate[];
   geometry: GeoJsonMultiPolygon;
   sampleDestinationIds: readonly string[];
@@ -535,7 +345,7 @@ export interface SelfHostedRoutingAdapterDescriptor {
 }
 
 export interface ProviderProvenance {
-  role: "geocoding" | "routing" | "poi";
+  role: "geocoding" | "routing" | "access" | "poi";
   provider: string;
   deployment: ProviderDeploymentKind;
   dataKind: ProviderDataKind;
@@ -562,14 +372,6 @@ export interface ResolvedLocation extends MeetingLocation {
   source: string;
 }
 
-export interface MeetingRequestSnapshot {
-  participants: readonly [MeetingParticipant, MeetingParticipant];
-  arrivalAt: string;
-  selectedTolerancePercent: TolerancePercent;
-  effectiveTolerancePercent: number;
-  timeZone: MeetingTimeZone;
-}
-
 export interface OfficialBoundaryMetadata {
   name: string;
   sourceUrl: string;
@@ -582,40 +384,6 @@ export interface OfficialBoundaryMetadata {
   attribution: string;
   legalBoundary: false;
 }
-
-export interface MeetingCalculationMetadata {
-  routing: ProviderDescriptor;
-  boundary: OfficialBoundaryMetadata;
-  provenance: {
-    routing: ProviderProvenance;
-    boundary: OfficialBoundaryMetadata;
-  };
-}
-
-export interface MeetingCalculationOkResponse {
-  contractVersion: "meeet-meeting/v2";
-  status: "ok";
-  fairLocations: readonly FairLocation[];
-  routePatterns: readonly RoutePattern[];
-  sourceQueries: readonly MeetingSourceQueryProvenance[];
-  requestSnapshot: MeetingRequestSnapshot;
-  metadata: MeetingCalculationMetadata;
-  searchCoverage: MeetingSearchCoverage;
-}
-
-export interface MeetingCalculationNoResultResponse {
-  contractVersion: "meeet-meeting/v2";
-  status: "no-result";
-  reason: "no-transit-station-targets";
-  fairLocations: readonly [];
-  routePatterns: readonly RoutePattern[];
-  sourceQueries: readonly MeetingSourceQueryProvenance[];
-  requestSnapshot: MeetingRequestSnapshot;
-  metadata: MeetingCalculationMetadata;
-  searchCoverage: MeetingSearchCoverage;
-}
-
-export type MeetingCalculationResponse = MeetingCalculationOkResponse | MeetingCalculationNoResultResponse;
 
 export type {
   AccessibleTargetInterval,

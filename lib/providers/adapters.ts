@@ -380,12 +380,14 @@ function createGenericProvenance(
 }
 
 export {
+  createIsolatedSelfHostedRoutingAdapters,
   GraphHopperPointToPointProvider,
   GraphHopperRoutingProvider,
   OtpGraphqlRoutingProvider,
   OtpGraphqlTransitProvider,
 } from "./self-hosted-routing.ts";
 export type {
+  IsolatedSelfHostedRoutingAdapters,
   PointToPointRoute,
   PointToPointRouteStep,
   PointToPointRoutingRequest,

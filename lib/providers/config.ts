@@ -2,7 +2,7 @@ import "server-only";
 
 import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
-import { basename, dirname, resolve } from "node:path";
+import { basename, dirname, isAbsolute, resolve } from "node:path";
 import type {
   FeedProvenance,
   GeoJsonGeometry,
@@ -24,12 +24,21 @@ export const MIN_PROVIDER_TIMEOUT_MS = 250;
 export const MAX_PROVIDER_TIMEOUT_MS = 10_000;
 export const DEFAULT_PROVIDER_MAX_RESPONSE_BYTES = 512 * 1024;
 export const MAX_PROVIDER_MAX_RESPONSE_BYTES = 2 * 1024 * 1024;
+export const DEFAULT_SCHEDULED_CONCURRENCY = 1;
+export const MIN_SCHEDULED_CONCURRENCY = 1;
+/** Single-request admission remains mandatory until a versioned capacity policy certifies otherwise. */
+export const MAX_SCHEDULED_CONCURRENCY = 1;
+export const DEFAULT_SCHEDULED_DEADLINE_MS = 90_000;
+export const MIN_SCHEDULED_DEADLINE_MS = 1_000;
+export const MAX_SCHEDULED_DEADLINE_MS = 90_000;
+export const DEFAULT_SCHEDULED_MIN_MEMORY_GIB = 4;
+export const MIN_SCHEDULED_MIN_MEMORY_GIB = 4;
 const ROUTING_MANIFEST_FILENAME = "meeet-routing-manifest.json";
 const ROUTING_ATTESTATION_FILENAME = "deployment-attestation.json";
 const ACCESS_ENVELOPE_FILENAME = "munich-access-envelope-15km.geojson";
 
-export type ProviderMode = "fixture" | "configured" | "mvg-direct-transit";
-export type RoutingProviderMode = ProviderMode | "self-hosted-routing";
+export type ProviderMode = "fixture" | "configured";
+export type RoutingProviderMode = ProviderMode;
 
 export type ProviderEnvironment = Readonly<Record<string, string | undefined>>;
 
@@ -53,7 +62,10 @@ export interface ProviderConfig {
   mapAttribution: string | null;
   geocodingSource: ConfiguredSourceMetadata | null;
   poiSource: ConfiguredSourceMetadata | null;
-  selfHostedRouting: SelfHostedRoutingConfig | null;
+  scheduledArtifactPath: string | null;
+  scheduledConcurrency: number;
+  scheduledDeadlineMs: number;
+  scheduledMinMemoryGiB: number;
 }
 
 export interface SelfHostedRoutingConfig {
@@ -102,66 +114,38 @@ export function readProviderConfig(
   if (
     requestedMode &&
     requestedMode !== "fixture" &&
-    requestedMode !== "configured" &&
-    requestedMode !== "mvg-direct-transit" &&
-    requestedMode !== "self-hosted-routing"
+    requestedMode !== "configured"
   ) {
     throw new ProviderConfigurationError(
-      "MEEET_PROVIDER_MODE must be fixture, configured, mvg-direct-transit, or self-hosted-routing.",
+      "MEEET_PROVIDER_MODE must be fixture or configured.",
     );
   }
+  const mode: RoutingProviderMode = requestedMode === "fixture"
+    ? "fixture"
+    : "configured";
+  rejectLegacyScheduledProviderSettings(env);
   const hasSelfHostedRoutingSettings = hasAnySelfHostedRoutingSetting(env);
-  if (hasSelfHostedRoutingSettings && requestedMode !== "self-hosted-routing") {
-    throw new ProviderConfigurationError(
-      "Self-hosted OTP/GraphHopper settings require MEEET_PROVIDER_MODE=self-hosted-routing.",
-    );
-  }
+  if (hasSelfHostedRoutingSettings) throw new ProviderConfigurationError("OTP/GraphHopper settings are not part of the v3 scheduled provider contract.");
 
-  // Direct MVG routing has a fixed server-side origin. Provider endpoint,
-  // token, and source metadata variables are rejected in this mode rather
-  // than allowing an alternate integration to be silently ignored.
-  const endpoints =
-    requestedMode === "mvg-direct-transit"
-      ? { routingGatewayUrl: null, geocodingUrl: null, poiUrl: null }
-      : {
-          routingGatewayUrl: readOptionalUrl(
-            env.MEEET_ROUTING_GATEWAY_URL,
-            "MEEET_ROUTING_GATEWAY_URL",
-            allowHttpProviderEndpoints,
-          ),
-          geocodingUrl: readOptionalUrl(
-            env.MEEET_GEOCODING_ENDPOINT,
-            "MEEET_GEOCODING_ENDPOINT",
-            allowHttpProviderEndpoints,
-          ),
-          poiUrl: readOptionalUrl(
-            env.MEEET_POI_ENDPOINT,
-            "MEEET_POI_ENDPOINT",
-            allowHttpProviderEndpoints,
-          ),
-        };
-  const hasConfiguredEndpoint = Object.values(endpoints).some(Boolean);
-  const mode: RoutingProviderMode =
-    requestedMode === "mvg-direct-transit"
-      ? "mvg-direct-transit"
-      : requestedMode === "fixture"
-      ? "fixture"
-      : requestedMode === "self-hosted-routing"
-      ? "self-hosted-routing"
-      : !requestedMode && !hasConfiguredEndpoint
-      ? "mvg-direct-transit"
-      : "configured";
-  if (mode === "mvg-direct-transit") {
-    rejectDirectProviderConfiguration(env);
-    const deployment = env.MEEET_PROVIDER_DEPLOYMENT?.trim();
-    if (deployment && deployment !== "unknown") {
-      throw new ProviderConfigurationError(
-        "MEEET_PROVIDER_DEPLOYMENT must be omitted or unknown in mvg-direct-transit mode.",
-      );
-    }
-  }
+  const endpoints = {
+    routingGatewayUrl: readOptionalUrl(
+      env.MEEET_ROUTING_GATEWAY_URL,
+      "MEEET_ROUTING_GATEWAY_URL",
+      allowHttpProviderEndpoints,
+    ),
+    geocodingUrl: readOptionalUrl(
+      env.MEEET_GEOCODING_ENDPOINT,
+      "MEEET_GEOCODING_ENDPOINT",
+      allowHttpProviderEndpoints,
+    ),
+    poiUrl: readOptionalUrl(
+      env.MEEET_POI_ENDPOINT,
+      "MEEET_POI_ENDPOINT",
+      allowHttpProviderEndpoints,
+    ),
+  };
   const deployment = readDeployment(env.MEEET_PROVIDER_DEPLOYMENT);
-  if (requestedMode === "fixture" && (hasConfiguredEndpoint || hasSelfHostedRoutingSettings)) {
+  if (requestedMode === "fixture" && (hasSelfHostedRoutingSettings)) {
     throw new ProviderConfigurationError(
       "MEEET_PROVIDER_MODE=fixture cannot be combined with configured provider endpoints or self-hosted routing settings.",
     );
@@ -170,19 +154,6 @@ export function readProviderConfig(
     throw new ProviderConfigurationError(
       "Configured provider mode cannot use fixture deployment metadata.",
     );
-  }
-  if (mode === "self-hosted-routing") {
-    if (deployment !== "self-hosted") {
-      throw new ProviderConfigurationError(
-        "MEEET_PROVIDER_MODE=self-hosted-routing requires MEEET_PROVIDER_DEPLOYMENT=self-hosted.",
-      );
-    }
-    if (endpoints.routingGatewayUrl || env.MEEET_ROUTING_GATEWAY_TOKEN?.trim()) {
-      throw new ProviderConfigurationError(
-        "self-hosted-routing cannot be combined with MEEET_ROUTING_GATEWAY_URL or MEEET_ROUTING_GATEWAY_TOKEN.",
-      );
-    }
-    rejectSelfHostedOperatorProvenance(env);
   }
   const routingFeeds = endpoints.routingGatewayUrl
     ? {
@@ -196,20 +167,14 @@ export function readProviderConfig(
   const poiSource = endpoints.poiUrl
     ? readConfiguredSourceMetadata(env, "MEEET_POI")
     : null;
-  const selfHostedRouting = mode === "self-hosted-routing"
-    ? readSelfHostedRoutingConfig(env)
-    : null;
 
   return {
     mode,
     ...endpoints,
     routingGatewayToken:
-      mode === "mvg-direct-transit" || mode === "self-hosted-routing"
-        ? null
-        : readOptionalSecret(env.MEEET_ROUTING_GATEWAY_TOKEN),
-    geocodingToken:
-      mode === "mvg-direct-transit" ? null : readOptionalSecret(env.MEEET_GEOCODING_TOKEN),
-    poiToken: mode === "mvg-direct-transit" ? null : readOptionalSecret(env.MEEET_POI_TOKEN),
+      readOptionalSecret(env.MEEET_ROUTING_GATEWAY_TOKEN),
+    geocodingToken: readOptionalSecret(env.MEEET_GEOCODING_TOKEN),
+    poiToken: readOptionalSecret(env.MEEET_POI_TOKEN),
     deployment,
     timeoutMs: readBoundedInteger(
       env.MEEET_PROVIDER_TIMEOUT_MS,
@@ -235,8 +200,82 @@ export function readProviderConfig(
     mapAttribution: readOptionalString(env.NEXT_PUBLIC_MAP_ATTRIBUTION),
     geocodingSource,
     poiSource,
-    selfHostedRouting,
+    scheduledArtifactPath: readOptionalScheduledArtifactPath(env.MEEET_SCHEDULE_ARTIFACT_PATH),
+    scheduledConcurrency: readBoundedInteger(env.MEEET_SCHEDULED_CONCURRENCY, DEFAULT_SCHEDULED_CONCURRENCY, MIN_SCHEDULED_CONCURRENCY, MAX_SCHEDULED_CONCURRENCY, "MEEET_SCHEDULED_CONCURRENCY"),
+    scheduledDeadlineMs: readBoundedInteger(env.MEEET_SCHEDULED_DEADLINE_MS, DEFAULT_SCHEDULED_DEADLINE_MS, MIN_SCHEDULED_DEADLINE_MS, MAX_SCHEDULED_DEADLINE_MS, "MEEET_SCHEDULED_DEADLINE_MS"),
+    scheduledMinMemoryGiB: readScheduledMinMemoryGiB(env.MEEET_SCHEDULED_MIN_MEMORY_GIB, mode),
   };
+}
+
+const LEGACY_SCHEDULED_PROVIDER_PREFIXES = [
+  "MEEET_ROUTING_GATEWAY_",
+  "MEEET_ROUTING_MVG_",
+  "MEEET_ROUTING_MVV_",
+  "MEEET_POI_",
+  "MEEET_GEOCODING_",
+] as const;
+
+function rejectLegacyScheduledProviderSettings(env: ProviderEnvironment): void {
+  const configuredKeys = Object.keys(env).filter((key) =>
+    LEGACY_SCHEDULED_PROVIDER_PREFIXES.some((prefix) => key.startsWith(prefix)) &&
+    Boolean(env[key]?.trim()),
+  );
+  if (configuredKeys.length > 0) {
+    throw new ProviderConfigurationError(
+      `Legacy scheduled provider settings are not supported by meeet-meeting/v3: ${configuredKeys.join(", ")}. Use the MVV schedule artifact, MVG nearby access, and map configuration only.`,
+    );
+  }
+}
+
+function readScheduledMinMemoryGiB(
+  value: string | undefined,
+  mode: RoutingProviderMode,
+): number {
+  if (!value?.trim()) {
+    if (mode === "fixture") return DEFAULT_SCHEDULED_MIN_MEMORY_GIB;
+    throw new ProviderConfigurationError(
+      "MEEET_SCHEDULED_MIN_MEMORY_GIB is required for configured scheduled deployments and must be at least 4 GiB.",
+    );
+  }
+  const parsed = Number(value.trim());
+  if (!Number.isFinite(parsed) || parsed < MIN_SCHEDULED_MIN_MEMORY_GIB) {
+    throw new ProviderConfigurationError(
+      `MEEET_SCHEDULED_MIN_MEMORY_GIB must be a finite numeric capacity of at least ${MIN_SCHEDULED_MIN_MEMORY_GIB} GiB.`,
+    );
+  }
+  return parsed;
+}
+
+/**
+ * Loads the route-first manifest for isolated adapter tests/tooling only.
+ * This is deliberately separate from the active v3 meeting provider config.
+ */
+export function readIsolatedSelfHostedRoutingConfig(
+  env: ProviderEnvironment,
+): SelfHostedRoutingConfig {
+  if (env.MEEET_PROVIDER_MODE?.trim() !== "self-hosted-routing") {
+    throw new ProviderConfigurationError(
+      "Isolated self-hosted routing requires MEEET_PROVIDER_MODE=self-hosted-routing.",
+    );
+  }
+  if (readDeployment(env.MEEET_PROVIDER_DEPLOYMENT) !== "self-hosted") {
+    throw new ProviderConfigurationError(
+      "Isolated self-hosted routing requires MEEET_PROVIDER_DEPLOYMENT=self-hosted.",
+    );
+  }
+  if (env.MEEET_ROUTING_GATEWAY_URL?.trim() || env.MEEET_ROUTING_GATEWAY_TOKEN?.trim()) {
+    throw new ProviderConfigurationError(
+      "Isolated self-hosted routing cannot use the scheduled routing gateway.",
+    );
+  }
+  rejectSelfHostedOperatorProvenance(env);
+  return readSelfHostedRoutingConfig(env);
+}
+
+function readOptionalScheduledArtifactPath(value: string | undefined): string | null {
+  if (!value?.trim()) return null;
+  if (!isAbsolute(value.trim())) throw new ProviderConfigurationError("MEEET_SCHEDULE_ARTIFACT_PATH must be absolute.");
+  return resolve(value.trim());
 }
 
 const SELF_HOSTED_ROUTING_KEYS = [
@@ -633,24 +672,6 @@ function readRequiredProfile(value: string | undefined, name: string): string {
     throw new ProviderConfigurationError(`${name} contains unsupported profile characters.`);
   }
   return profile;
-}
-
-function rejectDirectProviderConfiguration(env: ProviderEnvironment): void {
-  const configuredKeys = Object.keys(env).filter(
-    (key) =>
-      (key.startsWith("MEEET_ROUTING_") ||
-        key.startsWith("MEEET_GEOCODING_") ||
-        key.startsWith("MEEET_POI_") ||
-        key.startsWith("MEEET_OTP_") ||
-        key.startsWith("MEEET_GRAPHHOPPER_")) &&
-      !key.startsWith("MEEET_ROUTING_INTEGRATION_") &&
-      Boolean(env[key]?.trim()),
-  );
-  if (configuredKeys.length > 0) {
-    throw new ProviderConfigurationError(
-      `mvg-direct-transit cannot be combined with configured provider settings: ${configuredKeys.join(", ")}.`,
-    );
-  }
 }
 
 function rejectSelfHostedOperatorProvenance(env: ProviderEnvironment): void {
