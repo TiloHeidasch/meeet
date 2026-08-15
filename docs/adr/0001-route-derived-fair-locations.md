@@ -17,11 +17,15 @@ For each Participant, the scheduled router returns station-area arrival fields
 for the grid and final ready fields for every boarding stop. Station-area
 arrival fields do not claim a boarding-stop identity; station-area markers
 select the fastest eligible boarding-stop ready field with a deterministic tie
-break. The current meeting surface remains the Munich-clipped grid: each cell
-is evaluated at its center using a geometric final station-to-center walking
-estimate. A cell is fair when both elapsed planned arrivals satisfy the
-selected tolerance; otherwise it is red or blue according to the faster
-Participant. If neither side is reachable the cell is unclassified.
+break. The response retains its Munich-clipped grid, whose cells are evaluated
+at their centers using a geometric final station-to-center walking estimate,
+but the client no longer renders those cells as the meeting surface. It derives
+a nearest-station-area territory for every calculated station area using a
+local projected coordinate system, then clips the territories to the complete
+official Munich boundary, retaining holes and disconnected components. A
+territory takes its nearest station area's red, blue, fair, or unclassified
+classification. Only classified territories are filled; unclassified territory
+is deliberately left without a red, blue, or fair surface claim.
 
 The v3 response also exposes one station-area meeting-place candidate for
 every canonical station area whose coordinate is inside the official Munich
@@ -40,10 +44,12 @@ station-area candidates.
   required end-to-end.
 - Schedule identity, feed identity, timezone, compiled identity, search start,
   tolerance, and seed counts are cross-bound in the response validator.
-- The surface is a bounded planned-time approximation: cell-center final
-  walking is disclosed as geometric estimation, not navigation.
-- The grid remains the current surface; station-area markers are the added
-  meeting-place candidates.
+- The scheduled calculation remains a bounded planned-time approximation:
+  cell-center final walking is disclosed as geometric estimation, not
+  navigation.
+- The grid remains a response calculation artifact. The rendered meeting
+  surface is a Munich-clipped nearest-station-area territory partition, while
+  station-area markers remain the meeting-place candidates.
 - A selected tolerance is never escalated.
 - Munich clipping and station-area/boarding-stop identity are enforced by the
   server contract.
