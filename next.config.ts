@@ -2,6 +2,7 @@ import type { NextConfig } from "next";
 
 const nextConfig: NextConfig = {
   cacheComponents: true,
+  output: "standalone",
   // Routing inputs, generated manifests, deployment evidence, and tests are
   // mounted or executed outside the Next runtime. Keep the dynamic server-only
   // loader from turning those deployment assets into route trace inputs.

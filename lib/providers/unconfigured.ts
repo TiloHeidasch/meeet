@@ -14,7 +14,7 @@ import type {
 } from "../domain/types.ts";
 
 const descriptorProvenance: ProviderProvenance = {
-  role: "access",
+  role: "routing",
   provider: "unconfigured-provider",
   deployment: "unknown",
   dataKind: "unknown",

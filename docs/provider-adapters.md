@@ -28,29 +28,15 @@ paths remain server-only.
 - The full-feed binary/window memory profile, 90-second API budget, and
   concurrency guard are deployment gates. A local artifact compiled under a
   different Node major is not production release evidence.
-- Declare numeric `MEEET_SCHEDULED_MIN_MEMORY_GIB=4` for one-at-a-time,
-  two-participant full-feed requests. Configured mode rejects a missing or
-  smaller declaration; fixture mode uses the deterministic 4 GiB default. This
-  is a conservative Node 24 deployment minimum based on the observed 2.88 GiB
-  Node 26 peak, not Node 24 capacity evidence, and does not replace the Node 24
-  two-participant smoke.
-- `MEEET_SCHEDULED_CONCURRENCY` is capped at exactly `1`; any other value is
-  rejected. This single-request policy remains until a future explicitly
-  versioned and certified capacity policy changes it. Node 24 certification is
-  not implied by this configuration.
 
 ## Modes
 
 `MEEET_PROVIDER_MODE=fixture` uses deterministic offline MVV-schedule and
-nearby-access fixtures. `configured` deployments load the compiled schedule
-artifact and MVG nearby-access provider explicitly. These are the only active
-meeting modes; OTP/GraphHopper route-first modules are isolated historical
-tooling and cannot be selected as a v3 meeting provider.
+nearby-access fixtures. Other deployments must configure the compiled schedule
+artifact and nearby access provider explicitly. Missing or invalid schedule
+configuration is an unavailable provider, never a fallback to another transit
+source.
 
 Location search remains a separate bounded MVG endpoint integration. Its
 coordinates are used to resolve nearby access seeds to exact MVV station-area
 or boarding-stop identities; unknown identities are excluded.
-
-Legacy routing-gateway, geocoding, and POI endpoint/token/provenance settings
-are rejected by the active v3 configuration surface rather than silently
-accepted or ignored.

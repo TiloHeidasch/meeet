@@ -26,10 +26,9 @@ export const DEFAULT_PROVIDER_MAX_RESPONSE_BYTES = 512 * 1024;
 export const MAX_PROVIDER_MAX_RESPONSE_BYTES = 2 * 1024 * 1024;
 export const DEFAULT_SCHEDULED_CONCURRENCY = 1;
 export const MIN_SCHEDULED_CONCURRENCY = 1;
-/** Single-request admission remains mandatory until a versioned capacity policy certifies otherwise. */
 export const MAX_SCHEDULED_CONCURRENCY = 1;
 export const DEFAULT_SCHEDULED_DEADLINE_MS = 90_000;
-export const MIN_SCHEDULED_DEADLINE_MS = 1_000;
+export const MIN_SCHEDULED_DEADLINE_MS = 90_000;
 export const MAX_SCHEDULED_DEADLINE_MS = 90_000;
 export const DEFAULT_SCHEDULED_MIN_MEMORY_GIB = 4;
 export const MIN_SCHEDULED_MIN_MEMORY_GIB = 4;
@@ -38,9 +37,38 @@ const ROUTING_ATTESTATION_FILENAME = "deployment-attestation.json";
 const ACCESS_ENVELOPE_FILENAME = "munich-access-envelope-15km.geojson";
 
 export type ProviderMode = "fixture" | "configured";
-export type RoutingProviderMode = ProviderMode;
+export type RoutingProviderMode = ProviderMode | "self-hosted-routing";
 
 export type ProviderEnvironment = Readonly<Record<string, string | undefined>>;
+
+export type ScheduledCapabilityUnavailableReason = "schedule-artifact-not-configured";
+export interface ScheduledCapability {
+  readonly scheduled: {
+    readonly configurationAvailable: boolean;
+    readonly unavailableReason: ScheduledCapabilityUnavailableReason | null;
+  };
+}
+
+/**
+ * Pure capability disclosure. It intentionally reads only allow-listed mode and
+ * path settings; it never reads an artifact, validates a manifest, or creates a
+ * provider.
+ */
+export function readScheduledCapability(
+  env: ProviderEnvironment = process.env,
+): ScheduledCapability {
+  const mode = env.MEEET_PROVIDER_MODE?.trim() || "configured";
+  const configurationAvailable = mode === "fixture" ||
+    ((mode === "configured" || mode === "self-hosted-routing") && Boolean(env.MEEET_SCHEDULE_ARTIFACT_PATH?.trim()));
+  return {
+    scheduled: {
+      configurationAvailable,
+      unavailableReason: configurationAvailable ? null : "schedule-artifact-not-configured",
+    },
+  };
+}
+
+export const getScheduledCapability = readScheduledCapability;
 
 export interface ProviderConfig {
   mode: RoutingProviderMode;
@@ -62,6 +90,7 @@ export interface ProviderConfig {
   mapAttribution: string | null;
   geocodingSource: ConfiguredSourceMetadata | null;
   poiSource: ConfiguredSourceMetadata | null;
+  selfHostedRouting: SelfHostedRoutingConfig | null;
   scheduledArtifactPath: string | null;
   scheduledConcurrency: number;
   scheduledDeadlineMs: number;
@@ -114,18 +143,19 @@ export function readProviderConfig(
   if (
     requestedMode &&
     requestedMode !== "fixture" &&
-    requestedMode !== "configured"
+    requestedMode !== "configured" &&
+    requestedMode !== "self-hosted-routing"
   ) {
     throw new ProviderConfigurationError(
-      "MEEET_PROVIDER_MODE must be fixture or configured.",
+      "MEEET_PROVIDER_MODE must be fixture, configured, or self-hosted-routing.",
     );
   }
-  const mode: RoutingProviderMode = requestedMode === "fixture"
-    ? "fixture"
-    : "configured";
-  rejectLegacyScheduledProviderSettings(env);
   const hasSelfHostedRoutingSettings = hasAnySelfHostedRoutingSetting(env);
-  if (hasSelfHostedRoutingSettings) throw new ProviderConfigurationError("OTP/GraphHopper settings are not part of the v3 scheduled provider contract.");
+  if (hasSelfHostedRoutingSettings && requestedMode !== "self-hosted-routing") {
+    throw new ProviderConfigurationError(
+      "Self-hosted OTP/GraphHopper settings require MEEET_PROVIDER_MODE=self-hosted-routing.",
+    );
+  }
 
   const endpoints = {
     routingGatewayUrl: readOptionalUrl(
@@ -144,8 +174,14 @@ export function readProviderConfig(
       allowHttpProviderEndpoints,
     ),
   };
+  const hasConfiguredEndpoint = Object.values(endpoints).some(Boolean);
+  const mode: RoutingProviderMode = requestedMode === "fixture"
+    ? "fixture"
+    : requestedMode === "self-hosted-routing"
+    ? "self-hosted-routing"
+    : "configured";
   const deployment = readDeployment(env.MEEET_PROVIDER_DEPLOYMENT);
-  if (requestedMode === "fixture" && (hasSelfHostedRoutingSettings)) {
+  if (requestedMode === "fixture" && (hasConfiguredEndpoint || hasSelfHostedRoutingSettings)) {
     throw new ProviderConfigurationError(
       "MEEET_PROVIDER_MODE=fixture cannot be combined with configured provider endpoints or self-hosted routing settings.",
     );
@@ -154,6 +190,19 @@ export function readProviderConfig(
     throw new ProviderConfigurationError(
       "Configured provider mode cannot use fixture deployment metadata.",
     );
+  }
+  if (mode === "self-hosted-routing") {
+    if (deployment !== "self-hosted") {
+      throw new ProviderConfigurationError(
+        "MEEET_PROVIDER_MODE=self-hosted-routing requires MEEET_PROVIDER_DEPLOYMENT=self-hosted.",
+      );
+    }
+    if (endpoints.routingGatewayUrl || env.MEEET_ROUTING_GATEWAY_TOKEN?.trim()) {
+      throw new ProviderConfigurationError(
+        "self-hosted-routing cannot be combined with MEEET_ROUTING_GATEWAY_URL or MEEET_ROUTING_GATEWAY_TOKEN.",
+      );
+    }
+    rejectSelfHostedOperatorProvenance(env);
   }
   const routingFeeds = endpoints.routingGatewayUrl
     ? {
@@ -167,12 +216,17 @@ export function readProviderConfig(
   const poiSource = endpoints.poiUrl
     ? readConfiguredSourceMetadata(env, "MEEET_POI")
     : null;
+  const selfHostedRouting = mode === "self-hosted-routing"
+    ? readSelfHostedRoutingConfig(env)
+    : null;
 
   return {
     mode,
     ...endpoints,
     routingGatewayToken:
-      readOptionalSecret(env.MEEET_ROUTING_GATEWAY_TOKEN),
+      mode === "self-hosted-routing"
+        ? null
+        : readOptionalSecret(env.MEEET_ROUTING_GATEWAY_TOKEN),
     geocodingToken: readOptionalSecret(env.MEEET_GEOCODING_TOKEN),
     poiToken: readOptionalSecret(env.MEEET_POI_TOKEN),
     deployment,
@@ -200,76 +254,45 @@ export function readProviderConfig(
     mapAttribution: readOptionalString(env.NEXT_PUBLIC_MAP_ATTRIBUTION),
     geocodingSource,
     poiSource,
+    selfHostedRouting,
     scheduledArtifactPath: readOptionalScheduledArtifactPath(env.MEEET_SCHEDULE_ARTIFACT_PATH),
-    scheduledConcurrency: readBoundedInteger(env.MEEET_SCHEDULED_CONCURRENCY, DEFAULT_SCHEDULED_CONCURRENCY, MIN_SCHEDULED_CONCURRENCY, MAX_SCHEDULED_CONCURRENCY, "MEEET_SCHEDULED_CONCURRENCY"),
-    scheduledDeadlineMs: readBoundedInteger(env.MEEET_SCHEDULED_DEADLINE_MS, DEFAULT_SCHEDULED_DEADLINE_MS, MIN_SCHEDULED_DEADLINE_MS, MAX_SCHEDULED_DEADLINE_MS, "MEEET_SCHEDULED_DEADLINE_MS"),
-    scheduledMinMemoryGiB: readScheduledMinMemoryGiB(env.MEEET_SCHEDULED_MIN_MEMORY_GIB, mode),
+    scheduledConcurrency: readScheduledConcurrency(env.MEEET_SCHEDULED_CONCURRENCY),
+    scheduledDeadlineMs: readScheduledDeadline(env.MEEET_SCHEDULED_DEADLINE_MS),
+    scheduledMinMemoryGiB: readScheduledMinMemoryGiB(env.MEEET_SCHEDULED_MIN_MEMORY_GIB),
   };
 }
 
-const LEGACY_SCHEDULED_PROVIDER_PREFIXES = [
-  "MEEET_ROUTING_GATEWAY_",
-  "MEEET_ROUTING_MVG_",
-  "MEEET_ROUTING_MVV_",
-  "MEEET_POI_",
-  "MEEET_GEOCODING_",
-] as const;
-
-function rejectLegacyScheduledProviderSettings(env: ProviderEnvironment): void {
-  const configuredKeys = Object.keys(env).filter((key) =>
-    LEGACY_SCHEDULED_PROVIDER_PREFIXES.some((prefix) => key.startsWith(prefix)) &&
-    Boolean(env[key]?.trim()),
+function readScheduledConcurrency(value: string | undefined): number {
+  return readBoundedInteger(
+    value,
+    DEFAULT_SCHEDULED_CONCURRENCY,
+    MIN_SCHEDULED_CONCURRENCY,
+    MAX_SCHEDULED_CONCURRENCY,
+    "MEEET_SCHEDULED_CONCURRENCY",
   );
-  if (configuredKeys.length > 0) {
-    throw new ProviderConfigurationError(
-      `Legacy scheduled provider settings are not supported by meeet-meeting/v3: ${configuredKeys.join(", ")}. Use the MVV schedule artifact, MVG nearby access, and map configuration only.`,
-    );
-  }
 }
 
-function readScheduledMinMemoryGiB(
-  value: string | undefined,
-  mode: RoutingProviderMode,
-): number {
+function readScheduledDeadline(value: string | undefined): number {
+  return readBoundedInteger(
+    value,
+    DEFAULT_SCHEDULED_DEADLINE_MS,
+    MIN_SCHEDULED_DEADLINE_MS,
+    MAX_SCHEDULED_DEADLINE_MS,
+    "MEEET_SCHEDULED_DEADLINE_MS",
+  );
+}
+
+function readScheduledMinMemoryGiB(value: string | undefined): number {
   if (!value?.trim()) {
-    if (mode === "fixture") return DEFAULT_SCHEDULED_MIN_MEMORY_GIB;
-    throw new ProviderConfigurationError(
-      "MEEET_SCHEDULED_MIN_MEMORY_GIB is required for configured scheduled deployments and must be at least 4 GiB.",
-    );
+    return DEFAULT_SCHEDULED_MIN_MEMORY_GIB;
   }
   const parsed = Number(value.trim());
-  if (!Number.isFinite(parsed) || parsed < MIN_SCHEDULED_MIN_MEMORY_GIB) {
+  if (!Number.isInteger(parsed) || parsed < MIN_SCHEDULED_MIN_MEMORY_GIB) {
     throw new ProviderConfigurationError(
       `MEEET_SCHEDULED_MIN_MEMORY_GIB must be a finite numeric capacity of at least ${MIN_SCHEDULED_MIN_MEMORY_GIB} GiB.`,
     );
   }
   return parsed;
-}
-
-/**
- * Loads the route-first manifest for isolated adapter tests/tooling only.
- * This is deliberately separate from the active v3 meeting provider config.
- */
-export function readIsolatedSelfHostedRoutingConfig(
-  env: ProviderEnvironment,
-): SelfHostedRoutingConfig {
-  if (env.MEEET_PROVIDER_MODE?.trim() !== "self-hosted-routing") {
-    throw new ProviderConfigurationError(
-      "Isolated self-hosted routing requires MEEET_PROVIDER_MODE=self-hosted-routing.",
-    );
-  }
-  if (readDeployment(env.MEEET_PROVIDER_DEPLOYMENT) !== "self-hosted") {
-    throw new ProviderConfigurationError(
-      "Isolated self-hosted routing requires MEEET_PROVIDER_DEPLOYMENT=self-hosted.",
-    );
-  }
-  if (env.MEEET_ROUTING_GATEWAY_URL?.trim() || env.MEEET_ROUTING_GATEWAY_TOKEN?.trim()) {
-    throw new ProviderConfigurationError(
-      "Isolated self-hosted routing cannot use the scheduled routing gateway.",
-    );
-  }
-  rejectSelfHostedOperatorProvenance(env);
-  return readSelfHostedRoutingConfig(env);
 }
 
 function readOptionalScheduledArtifactPath(value: string | undefined): string | null {

@@ -8,8 +8,11 @@ import test from "node:test";
 import { isCanonicalUtcInstant, validateRoutingSnapshot } from "../lib/domain/routing-snapshot.ts";
 import type { FetchImplementation } from "../lib/providers/http.ts";
 import {
+  createMeetingProviders,
+  createSelfHostedRoutingAdapters,
+} from "../lib/providers/factory.ts";
+import {
   ProviderConfigurationError,
-  readIsolatedSelfHostedRoutingConfig,
   readProviderConfig,
 } from "../lib/providers/config.ts";
 import type { GeoJsonMultiPolygon, GeoJsonPolygon } from "../lib/domain/types.ts";
@@ -17,7 +20,6 @@ import {
   GraphHopperRoutingProvider,
   OtpGraphqlRoutingProvider,
   OTP_PAGE_SIZE,
-  createIsolatedSelfHostedRoutingAdapters,
   isLineStringWithinRoutingAccessEnvelope,
   isPointInRoutingAccessEnvelope,
 } from "../lib/providers/self-hosted-routing.ts";
@@ -29,13 +31,14 @@ const DEPARTURE = "2026-07-25T08:00:00.000Z";
 const ORIGIN = { latitude: 48.1374, longitude: 11.5755 };
 const DESTINATION = { latitude: 48.145, longitude: 11.58 };
 
-test("isolated self-hosted adapters load a generated manifest without entering the v3 provider factory", () => {
+test("self-hosted config loads a generated manifest and exposes an unavailable calculation foundation", () => {
   const fixture = manifestFixture();
   try {
-    const config = readIsolatedSelfHostedRoutingConfig(selfHostedEnvironment(fixture.path));
-    assert.equal(config.manifestPath, fixture.path);
-    assert.equal(config.snapshot.contractVersion, "meeet-routing-manifest/v1");
-    assert.deepEqual(Object.keys(config.snapshot).sort(), [
+    const config = readProviderConfig(selfHostedEnvironment(fixture.path));
+    assert.equal(config.mode, "self-hosted-routing");
+    assert.equal(config.selfHostedRouting?.manifestPath, fixture.path);
+    assert.equal(config.selfHostedRouting?.snapshot.contractVersion, "meeet-routing-manifest/v1");
+    assert.deepEqual(Object.keys(config.selfHostedRouting?.snapshot ?? {}).sort(), [
       "accessEnvelope",
       "artifacts",
       "config",
@@ -50,13 +53,26 @@ test("isolated self-hosted adapters load a generated manifest without entering t
       "profiles",
       "realtime",
     ]);
-    assert.equal(config.snapshot.artifacts.graph.contentHash, GRAPH_HASH);
-    assert.equal(config.snapshot.artifacts.input.id, "routing-inputs/example");
-    assert.equal(config.snapshot.accessEnvelope.extentKm, 15);
-    assert.equal(config.snapshot.engines.otp.digest, `sha256:${OTP_IMAGE_HASH}`);
-    assert.equal(config.snapshot.feeds.find((feed) => feed.name === "MVV")?.role, "authoritative-schedule");
+    assert.equal(config.selfHostedRouting?.snapshot.artifacts.graph.contentHash, GRAPH_HASH);
+    assert.equal(config.selfHostedRouting?.snapshot.artifacts.input.id, "routing-inputs/example");
+    assert.equal(config.selfHostedRouting?.snapshot.accessEnvelope.extentKm, 15);
+    assert.equal(config.selfHostedRouting?.snapshot.engines.otp.digest, `sha256:${OTP_IMAGE_HASH}`);
+    assert.equal(config.selfHostedRouting?.snapshot.feeds.find((feed) => feed.name === "MVV")?.role, "authoritative-schedule");
 
-    const adapters = createIsolatedSelfHostedRoutingAdapters(config);
+    const providers = createMeetingProviders(selfHostedEnvironment(fixture.path));
+    const routing = providers.routing;
+    assert.ok(routing);
+    assert.equal(routing.descriptor.name, "self-hosted-route-first-foundation");
+    assert.equal(providers.routingFoundation?.state, "configured-foundation");
+    assert.equal(providers.routingFoundation?.calculationAvailable, false);
+    assert.equal(providers.routingFoundation?.applicationState.mvv.applied, true);
+    assert.equal(providers.routingFoundation?.applicationState.mvg.applied, false);
+    assert.equal(providers.routingFoundation?.applicationState.realtime.applied, false);
+    assert.deepEqual(routing.capabilities.supportedModes, []);
+    assert.equal(routing.descriptor.liveData, false);
+    assert.equal(providers.routingSnapshot?.manifestId, "example-manifest");
+
+    const adapters = createSelfHostedRoutingAdapters(config);
     assert.equal(adapters.transit.descriptor.engine, "otp");
     assert.equal(adapters.bikeCar.descriptor.engine, "graphhopper");
     assert.equal(adapters.transit.descriptor.snapshot.engine, "otp");
@@ -151,9 +167,9 @@ test("self-hosted configuration requires a manifest and permits HTTP only on loo
   const fixture = manifestFixture();
   try {
     const missingManifest = selfHostedEnvironment(join(fixture.directory, "missing.json"));
-    assert.throws(() => readIsolatedSelfHostedRoutingConfig(missingManifest), ProviderConfigurationError);
+    assert.throws(() => readProviderConfig(missingManifest), ProviderConfigurationError);
     assert.throws(
-      () => readIsolatedSelfHostedRoutingConfig(selfHostedEnvironment(fixture.path, { MEEET_ROUTING_MVG_ATTRIBUTION: "operator claim" })),
+      () => readProviderConfig(selfHostedEnvironment(fixture.path, { MEEET_ROUTING_MVG_ATTRIBUTION: "operator claim" })),
       /manifest|environment claims/,
     );
 
@@ -162,7 +178,7 @@ test("self-hosted configuration requires a manifest and permits HTTP only on loo
       NODE_ENV: "development",
       MEEET_OTP_GRAPHQL_URL: "http://10.0.0.5/otp/gtfs/v1",
     });
-    assert.throws(() => readIsolatedSelfHostedRoutingConfig(nonLoopback), /loopback/);
+    assert.throws(() => readProviderConfig(nonLoopback), /loopback/);
 
     const loopback = selfHostedEnvironment(fixture.path, {
       MEEET_ALLOW_HTTP_PROVIDER_ENDPOINTS: "true",
@@ -170,17 +186,14 @@ test("self-hosted configuration requires a manifest and permits HTTP only on loo
       MEEET_OTP_GRAPHQL_URL: "http://127.0.0.1/otp/gtfs/v1",
       MEEET_GRAPHHOPPER_URL: "http://localhost/route",
     });
-    assert.equal(readIsolatedSelfHostedRoutingConfig(loopback).otpGraphqlUrl, "http://127.0.0.1/otp/gtfs/v1");
+    assert.equal(readProviderConfig(loopback).selfHostedRouting?.otpGraphqlUrl, "http://127.0.0.1/otp/gtfs/v1");
   } finally {
     fixture.cleanup();
   }
 });
 
 test("routing integration gate variables do not alter application provider mode", () => {
-  assert.equal(readProviderConfig({
-    MEEET_ROUTING_INTEGRATION_REQUIRED: "false",
-    MEEET_SCHEDULED_MIN_MEMORY_GIB: "4",
-  }).mode, "configured");
+  assert.equal(readProviderConfig({ MEEET_ROUTING_INTEGRATION_REQUIRED: "false" }).mode, "configured");
 });
 
 test("OTP 2.6 Relay planConnection parses paginated edges, routing errors, and exact geometry/timing", async () => {
@@ -242,7 +255,7 @@ test("OTP 2.6 Relay planConnection parses paginated edges, routing errors, and e
         },
       });
     };
-    const config = readIsolatedSelfHostedRoutingConfig(selfHostedEnvironment(fixture.path));
+    const config = readProviderConfig(selfHostedEnvironment(fixture.path));
     const provider = new OtpGraphqlRoutingProvider(config, fetchImplementation);
     const result = await provider.route({ origin: ORIGIN, destination: DESTINATION, departureAt: DEPARTURE, mode: "transit" });
     assert.equal(calls, 2);
@@ -267,7 +280,7 @@ test("OTP 2.6 Relay planConnection parses paginated edges, routing errors, and e
 test("OTP timing rejects overlapping legs and missing leg geometry", async () => {
   const fixture = manifestFixture();
   try {
-    const config = readIsolatedSelfHostedRoutingConfig(selfHostedEnvironment(fixture.path));
+    const config = readProviderConfig(selfHostedEnvironment(fixture.path));
     const request = { origin: ORIGIN, destination: DESTINATION, departureAt: DEPARTURE, mode: "transit" as const };
     const overlapping = otpItinerary("2026-07-25T08:30:00.000Z");
     const overlappingLegs = overlapping.legs as Array<Record<string, unknown>>;
@@ -293,7 +306,7 @@ test("OTP timing rejects overlapping legs and missing leg geometry", async () =>
 test("OTP timestamps reject epoch or malformed scalars and incomplete realtime estimates", async () => {
   const fixture = manifestFixture();
   try {
-    const config = readIsolatedSelfHostedRoutingConfig(selfHostedEnvironment(fixture.path));
+    const config = readProviderConfig(selfHostedEnvironment(fixture.path));
     const request = { origin: ORIGIN, destination: DESTINATION, departureAt: DEPARTURE, mode: "transit" as const };
     const providerFor = (node: Record<string, unknown>) => new OtpGraphqlRoutingProvider(config, async () => Response.json({
       data: { planConnection: { edges: [{ node }], pageInfo: { hasNextPage: false, endCursor: null }, routingErrors: [] } },
@@ -333,7 +346,7 @@ test("GraphHopper /route preserves integer milliseconds and rejects broken path 
         ],
       }],
     });
-    const config = readIsolatedSelfHostedRoutingConfig(selfHostedEnvironment(fixture.path));
+    const config = readProviderConfig(selfHostedEnvironment(fixture.path));
     const provider = new GraphHopperRoutingProvider(config, fetchImplementation);
     const result = await provider.route({ origin: ORIGIN, destination: DESTINATION, departureAt: DEPARTURE, mode: "bike" });
     assert.equal(result.routes[0].durationMilliseconds, 600_001);
@@ -379,7 +392,7 @@ test("GraphHopper /route preserves integer milliseconds and rejects broken path 
 test("self-hosted adapters fail closed on GraphQL routing errors, malformed payloads, and response limits", async () => {
   const fixture = manifestFixture();
   try {
-    const config = readIsolatedSelfHostedRoutingConfig(selfHostedEnvironment(fixture.path, { MEEET_PROVIDER_MAX_RESPONSE_BYTES: "16384" }));
+    const config = readProviderConfig(selfHostedEnvironment(fixture.path, { MEEET_PROVIDER_MAX_RESPONSE_BYTES: "16384" }));
     const routingError = new OtpGraphqlRoutingProvider(config, async () => Response.json({
       data: { planConnection: { edges: [], pageInfo: { hasNextPage: false, endCursor: null }, routingErrors: [{ code: "NO_PATH" }] } },
     }));
@@ -481,7 +494,7 @@ test(
         calls += 1;
         return fetch(input, init);
       };
-      const config = readIsolatedSelfHostedRoutingConfig(selfHostedEnvironment(fixture.path, {
+      const config = readProviderConfig(selfHostedEnvironment(fixture.path, {
         MEEET_OTP_GRAPHQL_URL: endpoint,
         ...(endpointUrl.protocol === "http:"
           ? { MEEET_ALLOW_HTTP_PROVIDER_ENDPOINTS: "true", NODE_ENV: "development" }

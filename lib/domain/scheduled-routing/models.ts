@@ -1,3 +1,5 @@
+import type { GeoJsonMultiPolygon } from "../types.ts";
+
 /**
  * The scheduled-routing domain deliberately has its own models.  It is an
  * immutable, service-day based timetable model and is not a v2 meeting API
@@ -12,6 +14,18 @@ export const SECONDS_PER_DAY = 86_400;
 export const ROUTING_HORIZON_SECONDS = SECONDS_PER_DAY;
 export const WALKING_SECONDS_ROUNDING_RULE =
   "ceil(distanceMetres / velocityMetresPerSecond), with zero distance taking zero seconds";
+
+export type ScheduledDeadlinePhase =
+  | "meeting-start"
+  | "meeting-access"
+  | "meeting-surface"
+  | "meeting-result"
+  | "routing-window"
+  | "routing-scan"
+  | "surface-cells";
+
+/** Optional phase checkpoint; callers may inject the admission deadline check. */
+export type ScheduledDeadlineCheck = (phase: ScheduledDeadlinePhase) => void;
 
 export interface ScheduledCoordinate {
   readonly latitude: number;
@@ -161,9 +175,11 @@ export interface ScheduledAccessSeed {
 
 export interface ScheduledSurfaceCell {
   readonly id: string;
-  /** Point used by the final geometric segment; always retained inside the clipped cell. */
+  /** Legacy rectangular center retained for grid identity; routing uses the disclosed point below. */
   readonly center: ScheduledCoordinate;
-  readonly representativePoint?: ScheduledCoordinate;
+  /** Deterministic point strictly inside the clipped cell used for final walking. */
+  readonly representativePoint: ScheduledCoordinate;
+  readonly geometry?: GeoJsonMultiPolygon;
 }
 
 export interface StationArrivalField {
@@ -233,15 +249,13 @@ export interface ScheduledSurfaceInput {
   readonly walkingVelocityMetersPerSecond: number;
   readonly transferRadiusMeters?: number;
   readonly participantIds?: readonly [string, string];
-  /** Observable phase deadline; synchronous primitive loops are not preemptible. */
-  readonly deadlineChecker?: () => void;
+  readonly deadlineCheck?: ScheduledDeadlineCheck;
 }
 
 export interface ScheduledRoutingOptions {
   readonly walkingVelocityMetersPerSecond?: number;
   readonly transferRadiusMeters?: number;
-  /** Observable phase deadline; synchronous primitive loops are not preemptible. */
-  readonly deadlineChecker?: () => void;
+  readonly deadlineCheck?: ScheduledDeadlineCheck;
 }
 
 export interface ScheduledRoutingResult {

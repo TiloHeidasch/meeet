@@ -47,7 +47,7 @@ export class MvgScheduledAccessSeedProvider implements ScheduledAccessSeedProvid
       role: "access",
       provider: "mvg-nearby-scheduled-access",
       deployment: "unknown",
-      dataKind: "unknown",
+      dataKind: "access",
       liveData: false,
       sourceUrl: MVG_NEARBY_URL,
       license: null,
@@ -60,7 +60,7 @@ export class MvgScheduledAccessSeedProvider implements ScheduledAccessSeedProvid
     this.descriptor = {
       name: "mvg-nearby-scheduled-access",
       deployment: "unknown",
-      dataKind: "unknown",
+      dataKind: "access",
       liveData: false,
       asOf: "mvg-bgw-pt-v3-nearby",
       notes: provenance.notes,
@@ -88,17 +88,18 @@ function createSeeds(
 ): readonly ScheduledAccessSeedCandidate[] {
   const stationAreas = new Set(request.schedule.stationAreas.map((area) => area.id));
   const boardingToArea = new Map(request.schedule.boardingStops.map((stop) => [stop.id, stop.stationAreaId]));
-  const candidates: Array<{ station: MvgNearbyStation; stationAreaId: string; distanceMeters: number; accessSeconds: number }> = [];
+  const candidates: Array<{ station: MvgNearbyStation; stationAreaId: string; boardingStopId?: string; distanceMeters: number; accessSeconds: number }> = [];
   const seenStationIds = new Set<string>();
   for (const station of stations) {
     if (seenStationIds.has(station.id)) continue;
     const stationAreaId = stationAreas.has(station.id) ? station.id : boardingToArea.get(station.id);
     if (stationAreaId === undefined) continue;
+    const boardingStopId = boardingToArea.has(station.id) ? station.id : undefined;
     const distanceMeters = haversineDistanceKm(request.origin, station) * 1_000;
     if (distanceMeters > MVG_NEARBY_MAX_RADIUS_METERS) continue;
     seenStationIds.add(station.id);
     const accessSeconds = walkingSeconds(request.origin, station, walkingVelocityMetersPerSecond);
-    candidates.push({ station, stationAreaId, distanceMeters, accessSeconds });
+    candidates.push({ station, stationAreaId, ...(boardingStopId === undefined ? {} : { boardingStopId }), distanceMeters, accessSeconds });
   }
   return candidates
     .sort((left, right) => left.distanceMeters - right.distanceMeters || left.station.id.localeCompare(right.station.id))
@@ -107,7 +108,7 @@ function createSeeds(
       seedId: `mvg-access:${candidate.station.id}`,
       mvgStationId: candidate.station.id,
       stationAreaId: candidate.stationAreaId,
-      ...(candidate.station.id !== candidate.stationAreaId ? { boardingStopId: candidate.station.id } : {}),
+      ...(candidate.boardingStopId === undefined ? {} : { boardingStopId: candidate.boardingStopId }),
       coordinate: { latitude: candidate.station.latitude, longitude: candidate.station.longitude },
       accessSeconds: candidate.accessSeconds,
       provenance: {

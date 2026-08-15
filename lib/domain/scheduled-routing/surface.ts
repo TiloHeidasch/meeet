@@ -7,6 +7,7 @@ import {
   type CellArrivalField,
   type ScheduledAccessSeed,
   type ScheduledCellClassification,
+  type ScheduledDeadlineCheck,
   type ScheduledClassifiedCell,
   type ScheduledParticipantSurface,
   type ScheduledRoutingArtifact,
@@ -24,6 +25,9 @@ import {
   routeScheduledEarliestArrivals,
   walkingSeconds,
 } from "./router.ts";
+import { isScheduledInteriorRepresentativePoint } from "./grid.ts";
+
+const SURFACE_CELL_CHECKPOINT = 16;
 
 /** Calculate a two-participant scheduled arrival surface from station seeds. */
 export function calculateScheduledSurface(input: ScheduledSurfaceInput): ScheduledSurfaceResult {
@@ -32,22 +36,22 @@ export function calculateScheduledSurface(input: ScheduledSurfaceInput): Schedul
   const window = createScheduledRoutingWindow(input.schedule, input.searchStartAt, {
     walkingVelocityMetersPerSecond: input.walkingVelocityMetersPerSecond,
     transferRadiusMeters,
-    deadlineChecker: input.deadlineChecker,
+    deadlineCheck: input.deadlineCheck,
   });
   validateInput(input);
   const participantIds = input.participantIds ?? ["participant-1", "participant-2"];
   const cells = [...input.cells].sort((left, right) => left.id.localeCompare(right.id));
   const routes = input.accessSeedSets.map((seeds) => {
     if (seeds.length === 0) return null;
-    return routeScheduledEarliestArrivals(input.schedule, seeds, input.searchStartAt, {}, window);
+    return routeScheduledEarliestArrivals(input.schedule, seeds, input.searchStartAt, { deadlineCheck: input.deadlineCheck }, window);
   });
   const firstRoute = routes[0];
   const secondRoute = routes[1];
   const searchStartAt = window.searchStartAt;
   const searchStartEpochSeconds = window.searchStartEpochSeconds;
   const participantSurfaces: [ScheduledParticipantSurface, ScheduledParticipantSurface] = [
-    createParticipantSurface(participantIds[0], input.schedule, firstRoute, cells, input.walkingVelocityMetersPerSecond, searchStartEpochSeconds, input.deadlineChecker),
-    createParticipantSurface(participantIds[1], input.schedule, secondRoute, cells, input.walkingVelocityMetersPerSecond, searchStartEpochSeconds, input.deadlineChecker),
+    createParticipantSurface(participantIds[0], input.schedule, firstRoute, cells, input.walkingVelocityMetersPerSecond, searchStartEpochSeconds, input.deadlineCheck),
+    createParticipantSurface(participantIds[1], input.schedule, secondRoute, cells, input.walkingVelocityMetersPerSecond, searchStartEpochSeconds, input.deadlineCheck),
   ];
   const firstReachable = firstRoute?.reachableStationAreaCount ?? 0;
   const secondReachable = secondRoute?.reachableStationAreaCount ?? 0;
@@ -56,6 +60,7 @@ export function calculateScheduledSurface(input: ScheduledSurfaceInput): Schedul
   const classifiedCells = noResult
     ? cells.map((cell) => unclassifiedCell(cell.id))
     : cells.map((cell, index) => {
+        if (index % SURFACE_CELL_CHECKPOINT === 0) input.deadlineCheck?.("surface-cells");
         const first = participantSurfaces[0].cellArrivals[index];
         const second = participantSurfaces[1].cellArrivals[index];
         if (first === undefined || second === undefined) throw new Error("Cell surface assembly lost a cell.");
@@ -104,18 +109,18 @@ function createParticipantSurface(
   cells: readonly ScheduledSurfaceCell[],
   velocityMetersPerSecond: number,
   searchStartEpochSeconds: number,
-  deadlineChecker?: () => void,
+  deadlineCheck?: ScheduledDeadlineCheck,
 ): ScheduledParticipantSurface {
   const stationArrivals = route?.stationArrivals ?? schedule.stationAreas.map((area) => ({ stationAreaId: area.id, arrivalAt: null, elapsedSeconds: null }));
   const areas = new Map(schedule.stationAreas.map((area) => [area.id, area]));
-  const cellArrivals: CellArrivalField[] = cells.map((cell) => {
-    deadlineChecker?.();
+  const cellArrivals: CellArrivalField[] = cells.map((cell, index) => {
+    if (index % SURFACE_CELL_CHECKPOINT === 0) deadlineCheck?.("surface-cells");
     let bestElapsed: number | null = null;
     for (const stationArrival of stationArrivals) {
       if (stationArrival.elapsedSeconds === null) continue;
       const area = areas.get(stationArrival.stationAreaId);
       if (area === undefined) throw new Error("Station arrival references an unknown area.");
-      const finalWalkSeconds = walkingSeconds(area.coordinate, cell.representativePoint ?? cell.center, velocityMetersPerSecond);
+      const finalWalkSeconds = walkingSeconds(area.coordinate, cell.representativePoint, velocityMetersPerSecond);
       const elapsedSeconds = stationArrival.elapsedSeconds + finalWalkSeconds;
       if (elapsedSeconds > ROUTING_HORIZON_SECONDS) continue;
       if (bestElapsed === null || elapsedSeconds < bestElapsed) bestElapsed = elapsedSeconds;
@@ -170,6 +175,8 @@ function validateInput(input: ScheduledSurfaceInput): void {
     if (cell.id.trim() === "" || ids.has(cell.id)) throw new RangeError("Surface cell IDs must be unique and non-empty.");
     ids.add(cell.id);
     validateCoordinate(cell.center, "Surface cell center");
+    validateCoordinate(cell.representativePoint, "Surface cell representative point");
+    if (cell.geometry !== undefined && !isScheduledInteriorRepresentativePoint(cell.representativePoint, cell.geometry)) throw new RangeError("Surface cell representative point must be strictly inside its clipped geometry.");
   }
   validateAccessSeeds(input.accessSeedSets[0]);
   validateAccessSeeds(input.accessSeedSets[1]);
@@ -178,6 +185,7 @@ function validateInput(input: ScheduledSurfaceInput): void {
 function validateAccessSeeds(seeds: readonly ScheduledAccessSeed[]): void {
   for (const seed of seeds) {
     if (seed.stationAreaId.trim() === "") throw new RangeError("Access seed stationAreaId must not be empty.");
+    if (seed.boardingStopId !== undefined && seed.boardingStopId.trim() === "") throw new RangeError("Access seed boardingStopId must not be empty.");
     if (!Number.isSafeInteger(seed.accessSeconds) || seed.accessSeconds < 0 || seed.accessSeconds > ROUTING_HORIZON_SECONDS) throw new RangeError("Access seed accessSeconds must be a whole number within the routing horizon.");
   }
 }

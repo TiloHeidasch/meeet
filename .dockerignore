@@ -1,0 +1,43 @@
+# Dependencies and generated output
+node_modules
+.next
+out
+.artifacts/
+artifacts/
+*.zip
+*.pbf
+*.osm
+*.gtfs
+coverage
+playwright-report
+test-results
+*.tsbuildinfo
+
+# Routing inputs, manifests, generated data, and deployment credentials. The
+# application only needs the checked-in Munich boundary assets below; schedule
+# artifacts and routing inputs are mounted from the host or compiled separately.
+routing/
+data/*
+!data/official/
+!data/official/**
+deploy/
+**/*credentials*
+**/*secret*
+**/*.v8.bin
+**/*scheduled-artifact*.json
+
+# Repository metadata and local state
+.git
+.gitignore
+.slim
+.DS_Store
+
+# Local and production secrets
+.env*
+!.env.example
+
+# Files not needed to build the Next runtime
+docs
+e2e
+test
+*.log

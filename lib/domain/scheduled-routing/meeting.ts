@@ -3,7 +3,7 @@ import "server-only";
 import type { BoundedMunichGrid } from "../types.ts";
 import { ProviderNotConfiguredError, ProviderUnavailableError, type ScheduledAccessSeedProvider, type ScheduledAccessSeedCandidate } from "../providers.ts";
 import { calculateScheduledSurface } from "./surface.ts";
-import { createScheduledSurfaceGrid } from "./grid.ts";
+import { createScheduledSurfaceGrid, deriveInteriorRepresentativePoint } from "./grid.ts";
 import {
   DEFAULT_TRANSFER_RADIUS_METERS,
   DEFAULT_WALKING_VELOCITY_METERS_PER_SECOND,
@@ -12,6 +12,7 @@ import type {
   ScheduledAccessSeed,
   ScheduledRoutingArtifact,
   ScheduledSurfaceCell,
+  ScheduledDeadlineCheck,
 } from "./models.ts";
 import type { ScheduledMeetingRequest, ScheduledMeetingParticipantInput } from "../../validation/meeting-v3.ts";
 import type {
@@ -26,8 +27,7 @@ export interface ScheduledMeetingProviderBundle {
   readonly grid?: BoundedMunichGrid;
   readonly walkingVelocityMetersPerSecond?: number;
   readonly transferRadiusMeters?: number;
-  /** Deadline checks are phase boundaries; the synchronous router cannot be preempted mid-scan. */
-  readonly deadlineAtEpochMilliseconds?: number;
+  readonly deadlineCheck?: ScheduledDeadlineCheck;
 }
 
 export type ScheduledParticipantResponse = ScheduledMeetingParticipantDto;
@@ -39,7 +39,7 @@ export async function calculateScheduledMeeting(
   providers: ScheduledMeetingProviderBundle,
   signal?: AbortSignal,
 ): Promise<ScheduledMeetingResponse> {
-  checkDeadline(providers.deadlineAtEpochMilliseconds);
+  providers.deadlineCheck?.("meeting-start");
   const artifact = providers.artifact;
   if (artifact === undefined) throw new ProviderNotConfiguredError("routing");
   const access = providers.access;
@@ -55,36 +55,41 @@ export async function calculateScheduledMeeting(
       schedule: artifact,
       signal,
     })));
-    checkDeadline(providers.deadlineAtEpochMilliseconds);
     seedSets = [resolvedSeeds[0] ?? [], resolvedSeeds[1] ?? []];
   } catch (error) {
     if (error instanceof ProviderNotConfiguredError || error instanceof ProviderUnavailableError) throw error;
     throw new ProviderUnavailableError("routing");
   }
+  providers.deadlineCheck?.("meeting-access");
   const scheduledSeedSets: [readonly ScheduledAccessSeed[], readonly ScheduledAccessSeed[]] = [
     seedSets[0].map(toScheduledAccessSeed),
     seedSets[1].map(toScheduledAccessSeed),
   ];
+  providers.deadlineCheck?.("meeting-surface");
+  const surfaceCells = grid.cells.map(toSurfaceCell);
+  const surfaceCellById = new Map(surfaceCells.map((cell) => [cell.id, cell]));
   const surface = calculateScheduledSurface({
     schedule: artifact,
     accessSeedSets: scheduledSeedSets,
     searchStartAt: request.searchStartAt,
     selectedTolerancePercent: request.tolerancePercent,
-    cells: grid.cells.map(toSurfaceCell),
+    cells: surfaceCells,
     walkingVelocityMetersPerSecond,
     transferRadiusMeters,
     participantIds: [request.participants[0].id, request.participants[1].id],
-    deadlineChecker: () => checkDeadline(providers.deadlineAtEpochMilliseconds),
+    deadlineCheck: providers.deadlineCheck,
   });
-  checkDeadline(providers.deadlineAtEpochMilliseconds);
+  providers.deadlineCheck?.("meeting-surface");
   const classificationById = new Map(surface.cells.map((cell) => [cell.cellId, cell]));
   const cells = grid.cells.map((cell) => {
     const classification = classificationById.get(cell.id);
     if (classification === undefined) throw new Error(`Scheduled surface lost grid cell ${cell.id}.`);
+    const surfaceCell = surfaceCellById.get(cell.id);
+    if (surfaceCell === undefined) throw new Error(`Scheduled surface lost grid cell ${cell.id}.`);
     return {
       id: cell.id,
       geometry: cell.geometry,
-      representativePoint: cell.representativePoint ?? cell.center,
+      representativePoint: surfaceCell.representativePoint,
       classification: classification.classification,
       redArrivalSeconds: classification.redArrivalSeconds,
       blueArrivalSeconds: classification.blueArrivalSeconds,
@@ -92,6 +97,7 @@ export async function calculateScheduledMeeting(
       withinSelectedTolerance: classification.withinSelectedTolerance,
     };
   });
+  providers.deadlineCheck?.("meeting-result");
   return deepFreeze({
     contractVersion: "meeet-meeting/v3",
     status: surface.status,
@@ -130,12 +136,6 @@ export async function calculateScheduledMeeting(
   });
 }
 
-function checkDeadline(deadlineAtEpochMilliseconds: number | undefined): void {
-  if (deadlineAtEpochMilliseconds !== undefined && Date.now() > deadlineAtEpochMilliseconds) {
-    throw new ProviderUnavailableError("routing");
-  }
-}
-
 function participantResponse(
   participant: ScheduledMeetingParticipantInput,
   color: "red" | "blue",
@@ -145,11 +145,20 @@ function participantResponse(
 }
 
 function toScheduledAccessSeed(candidate: ScheduledAccessSeedCandidate): ScheduledAccessSeed {
-  return { stationAreaId: candidate.stationAreaId, ...(candidate.boardingStopId ? { boardingStopId: candidate.boardingStopId } : {}), accessSeconds: candidate.accessSeconds };
+  return {
+    stationAreaId: candidate.stationAreaId,
+    ...(candidate.boardingStopId === undefined ? {} : { boardingStopId: candidate.boardingStopId }),
+    accessSeconds: candidate.accessSeconds,
+  };
 }
 
 function toSurfaceCell(cell: BoundedMunichGrid["cells"][number]): ScheduledSurfaceCell {
-  return { id: cell.id, center: cell.center, representativePoint: cell.representativePoint ?? cell.center };
+  return {
+    id: cell.id,
+    center: cell.center,
+    representativePoint: deriveInteriorRepresentativePoint(cell.geometry, cell.center),
+    geometry: cell.geometry,
+  };
 }
 
 function deepFreeze<T>(value: T): T {

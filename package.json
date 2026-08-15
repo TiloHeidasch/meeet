@@ -10,6 +10,7 @@
     "build": "next build",
     "build:verify-trace": "node scripts/build-and-verify-traces.mjs",
     "certify:route-first:inactive": "node scripts/certify-route-first-inactive.mjs",
+    "deploy:preflight": "node deploy/preflight-production.mjs",
     "start": "next start",
     "schedule:compile:mvv": "NODE_OPTIONS=--conditions=react-server tsx scripts/compile-mvv-schedule.ts",
     "lint": "eslint",

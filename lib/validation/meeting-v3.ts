@@ -7,6 +7,7 @@ import type {
   ScheduledSurfaceMetadata,
 } from "../domain/scheduled-routing/models.ts";
 import type { GeoJsonMultiPolygon, ProviderDescriptor } from "../domain/types.ts";
+import { isScheduledInteriorRepresentativePoint } from "../domain/scheduled-routing/grid.ts";
 import type { ScheduledAccessSeedProvenance } from "../domain/providers.ts";
 
 export interface ScheduledMeetingParticipantInput {
@@ -223,7 +224,8 @@ function parseTolerance(value: unknown, issues: ScheduledValidationIssue[]): 5 |
 }
 
 function parseSearchStartAt(value: unknown, issues: ScheduledValidationIssue[]): string | undefined {
-  if (typeof value !== "string" || !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{3})?(?:Z|[+-]\d{2}:\d{2})$/.test(value)) {
+  const fractionalMatch = typeof value === "string" ? /\.(\d+)(?=(?:Z|[+-]\d{2}:\d{2})$)/.exec(value) : null;
+  if (typeof value !== "string" || (fractionalMatch !== null && /[1-9]/.test(fractionalMatch[1] ?? ""))) {
     issues.push(issue(["searchStartAt"], "invalid_datetime", "searchStartAt must be an offset-aware ISO instant with whole-second precision."));
     return undefined;
   }
@@ -245,6 +247,7 @@ function validateCell(value: unknown, index: number, issues: ScheduledValidation
   if (typeof value.id !== "string" || value.id.trim() === "") issues.push(issue([...path, "id"], "invalid_value", "Cell id must be non-empty."));
   if (!isMultiPolygon(value.geometry)) issues.push(issue([...path, "geometry"], "invalid_geometry", "Cell geometry must be a valid non-empty GeoJSON MultiPolygon."));
   if (!isCoordinate(value.representativePoint)) issues.push(issue([...path, "representativePoint"], "invalid_coordinate", "Cell representativePoint must be a valid coordinate."));
+  else if (isMultiPolygon(value.geometry) && !isScheduledInteriorRepresentativePoint(value.representativePoint, value.geometry)) issues.push(issue([...path, "representativePoint"], "invalid_coordinate", "Cell representativePoint must be strictly inside its clipped geometry."));
   if (value.classification !== "red" && value.classification !== "blue" && value.classification !== "fair" && value.classification !== "unclassified") issues.push(issue([...path, "classification"], "invalid_enum", "Cell classification is invalid."));
   if (!isNullableWholeSecond(value.redArrivalSeconds)) issues.push(issue([...path, "redArrivalSeconds"], "invalid_value", "redArrivalSeconds must be a whole second or null."));
   if (!isNullableWholeSecond(value.blueArrivalSeconds)) issues.push(issue([...path, "blueArrivalSeconds"], "invalid_value", "blueArrivalSeconds must be a whole second or null."));
@@ -389,7 +392,7 @@ function validateResponseMetadata(value: Record<string, unknown>, issues: Schedu
     const providerPath = [...path, "accessProvider"];
     addUnknownKeys(value.accessProvider, ["name", "deployment", "dataKind", "liveData", "asOf", "notes", "provenance"], providerPath, issues);
     if (isRecord(value.accessProvider.provenance)) addUnknownKeys(value.accessProvider.provenance, ["role", "provider", "deployment", "dataKind", "liveData", "sourceUrl", "license", "attribution", "version", "retrievedAt", "notes", "feeds"], [...providerPath, "provenance"], issues);
-    if (!isScheduledAccessProviderDescriptor(value.accessProvider)) issues.push(issue(providerPath, "invalid_value", "Access provider metadata must describe non-live MVG seed access only."));
+    if (!isScheduledAccessProviderDescriptor(value.accessProvider)) issues.push(issue(providerPath, "invalid_value", "Access provider metadata must describe non-live nearby access, not scheduled routing."));
   }
 }
 
@@ -413,7 +416,7 @@ function isScheduledSeedDto(value: unknown): value is ScheduledMeetingAccessSeed
 }
 
 function isScheduledCellDto(value: unknown): value is ScheduledMeetingCellDto {
-  return isRecord(value) && typeof value.id === "string" && isMultiPolygon(value.geometry) && isCoordinate(value.representativePoint) && (value.classification === "red" || value.classification === "blue" || value.classification === "fair" || value.classification === "unclassified") && isNullableWholeSecond(value.redArrivalSeconds) && isNullableWholeSecond(value.blueArrivalSeconds) && (value.fasterParticipant === null || value.fasterParticipant === "red" || value.fasterParticipant === "blue") && typeof value.withinSelectedTolerance === "boolean";
+  return isRecord(value) && typeof value.id === "string" && isMultiPolygon(value.geometry) && isCoordinate(value.representativePoint) && isScheduledInteriorRepresentativePoint(value.representativePoint, value.geometry) && (value.classification === "red" || value.classification === "blue" || value.classification === "fair" || value.classification === "unclassified") && isNullableWholeSecond(value.redArrivalSeconds) && isNullableWholeSecond(value.blueArrivalSeconds) && (value.fasterParticipant === null || value.fasterParticipant === "red" || value.fasterParticipant === "blue") && typeof value.withinSelectedTolerance === "boolean";
 }
 
 function isScheduledMetadataDto(value: unknown): value is ScheduledMeetingMetadataDto {
@@ -429,10 +432,30 @@ function isSurfaceMetadata(value: unknown): value is ScheduledMeetingMetadataDto
   return value.contractVersion === "meeet-scheduled-routing/v1" && typeof value.scheduleContentHash === "string" && typeof value.compiledArtifactId === "string" && typeof value.feedId === "string" && value.timeZone === MEETING_TIME_ZONE && typeof value.searchStartAt === "string" && value.routingHorizonSeconds === 86_400 && (value.selectedTolerancePercent === 5 || value.selectedTolerancePercent === 10 || value.selectedTolerancePercent === 15) && typeof value.walkingVelocityMetersPerSecond === "number" && typeof value.walkingSecondsRoundingRule === "string" && typeof value.transferRadiusMeters === "number" && Array.isArray(value.accessSeedCounts) && value.accessSeedCounts.length === 2 && value.accessSeedCounts.every((count) => Number.isSafeInteger(count) && count >= 0) && Number.isSafeInteger(value.stationAreaCount) && Number.isSafeInteger(value.boardingStopCount) && Number.isSafeInteger(value.connectionCount) && value.coverage === "scheduled-service-day-local-radius/v1" && value.representativePointBasis === "inside-clipped-cell/v1";
 }
 
+function isProviderDescriptor(value: unknown): value is ProviderDescriptor {
+  return isRecord(value) && typeof value.name === "string" && (value.deployment === "fixture" || value.deployment === "self-hosted" || value.deployment === "managed" || value.deployment === "unknown") && (value.dataKind === "demo-static" || value.dataKind === "scheduled" || value.dataKind === "access" || value.dataKind === "live" || value.dataKind === "unknown") && typeof value.liveData === "boolean" && typeof value.asOf === "string" && typeof value.notes === "string" && isRecord(value.provenance);
+}
+
 function isScheduledAccessProviderDescriptor(value: unknown): value is ProviderDescriptor {
-  if (!isRecord(value) || typeof value.name !== "string" || (value.deployment !== "fixture" && value.deployment !== "self-hosted" && value.deployment !== "managed" && value.deployment !== "unknown") || (value.dataKind !== "demo-static" && value.dataKind !== "unknown") || value.liveData !== false || typeof value.asOf !== "string" || typeof value.notes !== "string" || !isRecord(value.provenance)) return false;
+  if (!isProviderDescriptor(value)) return false;
   const provenance = value.provenance;
-  return typeof provenance.provider === "string" && provenance.role === "access" && provenance.deployment === value.deployment && provenance.dataKind === value.dataKind && provenance.liveData === value.liveData && provenance.version === value.asOf && provenance.notes === value.notes && provenance.feeds === null;
+  return value.liveData === false &&
+    (value.dataKind === "access" || value.dataKind === "demo-static") &&
+    isRecord(provenance) &&
+    provenance.role === "access" &&
+    typeof provenance.provider === "string" &&
+    provenance.deployment === value.deployment &&
+    provenance.dataKind === value.dataKind &&
+    provenance.liveData === false &&
+    (provenance.sourceUrl === null || typeof provenance.sourceUrl === "string") &&
+    (provenance.license === null || (isRecord(provenance.license) && typeof provenance.license.name === "string" && typeof provenance.license.url === "string")) &&
+    typeof provenance.attribution === "string" &&
+    typeof provenance.version === "string" &&
+    typeof provenance.retrievedAt === "string" &&
+    typeof provenance.notes === "string" &&
+    provenance.version === value.asOf &&
+    provenance.notes === value.notes &&
+    provenance.feeds === null;
 }
 
 function isAcquisition(value: unknown): value is GtfsAcquisitionRecord {
@@ -451,7 +474,7 @@ function isCoordinate(value: unknown): value is { readonly latitude: number; rea
   return isRecord(value) && typeof value.latitude === "number" && Number.isFinite(value.latitude) && value.latitude >= -90 && value.latitude <= 90 && typeof value.longitude === "number" && Number.isFinite(value.longitude) && value.longitude >= -180 && value.longitude <= 180;
 }
 
-function isMultiPolygon(value: unknown): value is { readonly type: "MultiPolygon"; readonly coordinates: readonly unknown[] } {
+function isMultiPolygon(value: unknown): value is GeoJsonMultiPolygon {
   if (!isRecord(value) || value.type !== "MultiPolygon" || !Array.isArray(value.coordinates) || value.coordinates.length === 0) return false;
   return value.coordinates.every((polygon) => {
     if (!Array.isArray(polygon) || polygon.length === 0) return false;

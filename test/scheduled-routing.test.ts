@@ -18,10 +18,21 @@ import {
   type ScheduledMaterializedConnection,
   type ScheduledRoutingArtifact,
 } from "../lib/domain/scheduled-routing/index.ts";
-import { isPointInGeoJsonGeometry, toGeoJsonPosition } from "../lib/domain/geo.ts";
-import { createScheduledSurfaceGrid } from "../lib/domain/scheduled-routing/grid.ts";
+import {
+  createScheduledSurfaceGrid,
+  deriveInteriorRepresentativePoint,
+  isScheduledInteriorRepresentativePoint,
+} from "../lib/domain/scheduled-routing/grid.ts";
+import type { GeoJsonMultiPolygon } from "../lib/domain/types.ts";
+import { ScheduledCalculationDeadlineError } from "../lib/domain/scheduled-admission.ts";
 
 const SEARCH_START = "2026-08-11T08:05:00+02:00";
+
+function deadlineAtPhase(target: string): (phase?: string) => void {
+  return (phase?: string): void => {
+    if (phase === target) throw new ScheduledCalculationDeadlineError(`deadline-${target}`);
+  };
+}
 
 const ACQUISITION = {
   sourceUrl: "https://example.test/mvv-feed.zip",
@@ -493,10 +504,10 @@ test("cross-stream zero-time transfers remain routable across consecutive servic
 test("surface uses station arrivals plus a geographic final segment and classifies integer tolerance boundaries", () => {
   const schedule = fixture();
   const cells = [
-    { id: "at-a", center: { latitude: 48.1, longitude: 11.5 } },
-    { id: "midpoint", center: { latitude: 48.1, longitude: 11.505 } },
-    { id: "at-b", center: { latitude: 48.1, longitude: 11.51 } },
-    { id: "unserved", center: { latitude: 48.1, longitude: 11.53 } },
+    { id: "at-a", center: { latitude: 48.1, longitude: 11.5 }, representativePoint: { latitude: 48.1, longitude: 11.5 } },
+    { id: "midpoint", center: { latitude: 48.1, longitude: 11.505 }, representativePoint: { latitude: 48.1, longitude: 11.505 } },
+    { id: "at-b", center: { latitude: 48.1, longitude: 11.51 }, representativePoint: { latitude: 48.1, longitude: 11.51 } },
+    { id: "unserved", center: { latitude: 48.1, longitude: 11.53 }, representativePoint: { latitude: 48.1, longitude: 11.53 } },
   ];
   const result = calculateScheduledSurface({
     schedule,
@@ -517,38 +528,44 @@ test("surface uses station arrivals plus a geographic final segment and classifi
   assert.equal(result.cells.find((cell) => cell.cellId === "midpoint")?.classification, "fair");
   assert.equal(result.cells.find((cell) => cell.cellId === "unserved")?.classification, "blue");
 
-  const noSeeds = calculateScheduledSurface({ schedule, accessSeedSets: [[], []], searchStartAt: SEARCH_START, selectedTolerancePercent: 10, cells: [{ id: "empty", center: { latitude: 48.1, longitude: 11.5 } }], walkingVelocityMetersPerSecond: 100, transferRadiusMeters: 100 });
+  const noSeeds = calculateScheduledSurface({ schedule, accessSeedSets: [[], []], searchStartAt: SEARCH_START, selectedTolerancePercent: 10, cells: [{ id: "empty", center: { latitude: 48.1, longitude: 11.5 }, representativePoint: { latitude: 48.1, longitude: 11.5 } }], walkingVelocityMetersPerSecond: 100, transferRadiusMeters: 100 });
   assert.equal(noSeeds.status, "no-result");
   assert.equal(noSeeds.reason, "no-access-seeds");
   assert.equal(noSeeds.cells[0]?.classification, "unclassified");
-  const oneSeed = calculateScheduledSurface({ schedule, accessSeedSets: [[{ stationAreaId: "station-a", accessSeconds: 0 }], []], searchStartAt: SEARCH_START, selectedTolerancePercent: 10, cells: [{ id: "one-sided", center: { latitude: 48.1, longitude: 11.5 } }], walkingVelocityMetersPerSecond: 100, transferRadiusMeters: 100 });
+  const oneSeed = calculateScheduledSurface({ schedule, accessSeedSets: [[{ stationAreaId: "station-a", accessSeconds: 0 }], []], searchStartAt: SEARCH_START, selectedTolerancePercent: 10, cells: [{ id: "one-sided", center: { latitude: 48.1, longitude: 11.5 }, representativePoint: { latitude: 48.1, longitude: 11.5 } }], walkingVelocityMetersPerSecond: 100, transferRadiusMeters: 100 });
   assert.equal(oneSeed.status, "no-result");
   assert.deepEqual(oneSeed.cells.map((cell) => cell.classification), ["unclassified"]);
 });
 
-test("surface formula uses the disclosed representative point rather than the rectangular center", () => {
+test("scheduled routing checks injected deadlines at window, scan, and surface phases", () => {
   const schedule = fixture();
-  const result = calculateScheduledSurface({
-    schedule,
-    accessSeedSets: [[{ stationAreaId: "station-a", accessSeconds: 0 }], [{ stationAreaId: "station-b", accessSeconds: 0 }]],
-    searchStartAt: SEARCH_START,
-    selectedTolerancePercent: 10,
-    cells: [{ id: "disclosed-point", center: { latitude: 48.1, longitude: 11.53 }, representativePoint: { latitude: 48.1, longitude: 11.5 } }],
-    walkingVelocityMetersPerSecond: 100,
-    transferRadiusMeters: 100,
-  });
-  assert.equal(result.participants[0].cellArrivals[0]?.elapsedSeconds, 0);
-  assert.equal(result.cells[0]?.classification, "red");
+  assert.throws(
+    () => createScheduledRoutingWindow(schedule, SEARCH_START, { deadlineCheck: deadlineAtPhase("routing-window") }),
+    ScheduledCalculationDeadlineError,
+  );
+
+  const window = createScheduledRoutingWindow(schedule, SEARCH_START, { walkingVelocityMetersPerSecond: 100, transferRadiusMeters: 100 });
+  assert.throws(
+    () => routeScheduledEarliestArrivals(schedule, [{ stationAreaId: "station-a", accessSeconds: 0 }], SEARCH_START, { deadlineCheck: deadlineAtPhase("routing-scan"), walkingVelocityMetersPerSecond: 100, transferRadiusMeters: 100 }, window),
+    ScheduledCalculationDeadlineError,
+  );
+
+  assert.throws(
+    () => calculateScheduledSurface({
+      schedule,
+      accessSeedSets: [[{ stationAreaId: "station-a", accessSeconds: 0 }], [{ stationAreaId: "station-b", accessSeconds: 0 }]],
+      searchStartAt: SEARCH_START,
+      selectedTolerancePercent: 10,
+      cells: [{ id: "deadline-cell", center: { latitude: 48.1, longitude: 11.505 }, representativePoint: { latitude: 48.1, longitude: 11.505 } }],
+      walkingVelocityMetersPerSecond: 100,
+      transferRadiusMeters: 100,
+      deadlineCheck: deadlineAtPhase("surface-cells"),
+    }),
+    ScheduledCalculationDeadlineError,
+  );
 });
 
-test("expired deadline checks abort window, bucket, and surface phases", () => {
-  const schedule = fixture();
-  assert.throws(() => createScheduledRoutingWindow(schedule, SEARCH_START, { deadlineChecker: () => { throw new Error("expired-window"); } }), /expired-window/);
-  assert.throws(() => routeScheduledEarliestArrivals(schedule, [{ stationAreaId: "station-a", accessSeconds: 0 }], SEARCH_START, { deadlineChecker: () => { throw new Error("expired-bucket"); } }), /expired-bucket/);
-  assert.throws(() => calculateScheduledSurface({ schedule, accessSeedSets: [[{ stationAreaId: "station-a", accessSeconds: 0 }], [{ stationAreaId: "station-b", accessSeconds: 0 }]], searchStartAt: SEARCH_START, selectedTolerancePercent: 10, cells: [{ id: "expired", center: { latitude: 48.1, longitude: 11.5 } }], walkingVelocityMetersPerSecond: 100, deadlineChecker: () => { throw new Error("expired-surface"); } }), /expired-surface/);
-});
-
-test("exact boarding-stop seeds do not fall back to every stop in the station area", () => {
+test("exact boarding-stop seeds board only the resolved stop while area seeds retain station-area access", () => {
   const schedule = fixture();
   const stopRestrictedSchedule = {
     ...schedule,
@@ -570,17 +587,40 @@ test("exact boarding-stop seeds do not fall back to every stop in the station ar
   assert.notEqual(areaSeed.stationArrivals.find((arrival) => arrival.stationAreaId === "station-c")?.arrivalAt, null);
 });
 
-test("clipped cells retain an interior representative point instead of a boundary vertex", () => {
+test("surface evaluates the disclosed representative point rather than an outside rectangular center", () => {
+  const schedule = fixture();
+  const result = calculateScheduledSurface({
+    schedule,
+    accessSeedSets: [[{ stationAreaId: "station-a", accessSeconds: 0 }], [{ stationAreaId: "station-b", accessSeconds: 0 }]],
+    searchStartAt: SEARCH_START,
+    selectedTolerancePercent: 10,
+    cells: [{ id: "disclosed-point", center: { latitude: 48.1, longitude: 11.53 }, representativePoint: { latitude: 48.1, longitude: 11.5 } }],
+    walkingVelocityMetersPerSecond: 100,
+    transferRadiusMeters: 100,
+  });
+  assert.equal(result.participants[0]?.cellArrivals[0]?.elapsedSeconds, 0);
+  assert.equal(result.cells[0]?.classification, "red");
+});
+
+test("scheduled clipped cells use strict interior representatives for boundary and concave geometries", () => {
   const grid = createScheduledSurfaceGrid();
-  const clipped = grid.cells.find((cell) =>
-    !isPointInGeoJsonGeometry(toGeoJsonPosition(cell.center), cell.geometry),
-  );
-  assert.ok(clipped);
-  assert.notDeepEqual(clipped.representativePoint, clipped.vertices[0]);
-  assert.equal(
-    isPointInGeoJsonGeometry(toGeoJsonPosition(clipped.representativePoint), clipped.geometry),
-    true,
-  );
+  assert.equal(grid.cells.every((cell) => isScheduledInteriorRepresentativePoint(cell.center, cell.geometry)), true);
+
+  const concaveGeometry: GeoJsonMultiPolygon = {
+    type: "MultiPolygon",
+    coordinates: [[[
+      [11.5, 48.1],
+      [11.54, 48.1],
+      [11.54, 48.11],
+      [11.51, 48.11],
+      [11.51, 48.14],
+      [11.5, 48.14],
+      [11.5, 48.1],
+    ]]],
+  };
+  const representative = deriveInteriorRepresentativePoint(concaveGeometry, { latitude: 48.125, longitude: 11.525 });
+  assert.equal(isScheduledInteriorRepresentativePoint(representative, concaveGeometry), true);
+  assert.notDeepEqual(representative, { latitude: 48.1, longitude: 11.5 });
 });
 
 test("zero and inclusive tolerance boundaries stay deterministic", () => {

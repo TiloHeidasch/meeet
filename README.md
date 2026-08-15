@@ -14,6 +14,32 @@ cp .env.example .env.local
 npm run dev
 ```
 
+## Production deployment
+
+The one-server production deployment is exposed only through a remotely managed
+Cloudflare Tunnel. See [docs/application-deployment.md](docs/application-deployment.md)
+for pinned image setup, MVV artifact rotation, tunnel configuration, smoke
+checks, preflight requirements, and rollback procedures. Production requires
+Docker Engine 28+ (API v1.48+) and Docker Compose v2.33.0+; GHCR publishes
+runner and compiler images for both `linux/amd64` and `linux/arm64`.
+Authenticate to GHCR with a least-privilege read-packages credential, put the
+workflow's digest-pinned `MEEET_IMAGE` and `MEEET_COMPILER_IMAGE` references in
+the ignored env file, then preflight, pull both exact images, verify their
+matching revision labels, and start:
+
+```bash
+npm run deploy:preflight -- deploy/production.env
+docker compose --env-file deploy/production.env -f compose.production.yml pull meeet
+COMPILER_IMAGE="$(node deploy/read-compiler-image.mjs deploy/production.env)"
+docker pull "$COMPILER_IMAGE"
+node deploy/verify-production-images.mjs deploy/production.env
+docker compose --env-file deploy/production.env -f compose.production.yml pull cloudflared
+docker compose --env-file deploy/production.env -f compose.production.yml up -d
+```
+
+The server does not build images; use `deploy/read-compiler-image.mjs` for
+compiler runs.
+
 The server accepts only the `meeet-meeting/v3` calculation contract. A request
 contains two transit Participants, Munich origins, a whole-second
 `searchStartAt`, and a selected 5%, 10%, or 15% tolerance. Responses disclose
@@ -32,20 +58,12 @@ npm run schedule:compile:mvv -- --input /absolute/path/feed.zip --output /absolu
 ```
 
 Set `MEEET_SCHEDULE_ARTIFACT_PATH` to the manifest. Production artifacts must
-be compiled under Node 24, and deployment must provide the declared memory,
-90-second API budget, and concurrency capacity for the full-feed window.
-
-`MEEET_SCHEDULED_MIN_MEMORY_GIB` is a numeric configured deployment capacity
-declaration with a conservative minimum of **4 GiB**. Fixture mode uses a
-deterministic 4 GiB default. This is grounded in an observed 2.88 GiB Node 26
-peak; it is not Node 24 capacity evidence. `MEEET_SCHEDULED_CONCURRENCY=1` is
-the only supported value until a future explicitly versioned and certified
-capacity policy changes it. `MEEET_SCHEDULED_DEADLINE_MS=90000` remains the API
-budget until a Node 24 smoke proves release capacity.
-
-The declaration does not replace the separate Node 24 two-participant smoke
-condition. Legacy routing-gateway, geocoding, and POI endpoint/token/provenance
-settings are rejected by active v3 configuration rather than ignored.
+be compiled under Node 24. Scheduled calculation admits exactly one
+two-participant request per process and enforces a 90-second deadline
+independently of the framework budget. Configured deployments must declare the
+conservative 4 GiB minimum runtime memory with `MEEET_SCHEDULED_MIN_MEMORY_GIB`.
+Release still requires an external Node 24 two-participant capacity smoke within
+the 90-second budget; the local artifact is not evidence for that gate.
 
 ## Validation
 

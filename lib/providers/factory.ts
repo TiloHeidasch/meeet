@@ -1,6 +1,11 @@
 import "server-only";
 
-import type { MeetingProviders } from "../domain/providers.ts";
+import type { MeetingProviders, PointToPointRoutingProvider } from "../domain/providers.ts";
+import {
+  CalculationUnavailableRoutingProvider,
+  GraphHopperRoutingProvider,
+  OtpGraphqlRoutingProvider,
+} from "./self-hosted-routing.ts";
 import {
   readProviderConfig,
   type ProviderConfig,
@@ -18,15 +23,49 @@ export function createMeetingProviders(
     return withMapConfiguration({
       scheduledArtifact: FIXTURE_SCHEDULED_ARTIFACT,
       scheduledAccess: FIXTURE_SCHEDULED_ACCESS_PROVIDER,
-      scheduledConcurrency: config.scheduledConcurrency,
-      scheduledDeadlineMs: config.scheduledDeadlineMs,
     }, config);
+  }
+  if (config.mode === "self-hosted-routing") {
+    if (!config.selfHostedRouting) throw new Error("Self-hosted routing manifest configuration is missing.");
+    return withMapConfiguration(withScheduledArtifact({
+      scheduledAccess: new MvgScheduledAccessSeedProvider(config),
+      routing: new CalculationUnavailableRoutingProvider(config.selfHostedRouting.snapshot),
+      routingSnapshot: config.selfHostedRouting.snapshot,
+      routingFoundation: {
+        state: "configured-foundation",
+        calculationAvailable: false,
+        reason: "calculation-not-migrated",
+        supportedModes: ["transit", "bike", "car"],
+        snapshot: config.selfHostedRouting.snapshot,
+        applicationState: config.selfHostedRouting.applicationState,
+      },
+    }, config.scheduledArtifactPath), config);
   }
   return withMapConfiguration(withScheduledArtifact({
     scheduledAccess: new MvgScheduledAccessSeedProvider(config),
-    scheduledConcurrency: config.scheduledConcurrency,
-    scheduledDeadlineMs: config.scheduledDeadlineMs,
   }, config.scheduledArtifactPath), config);
+}
+
+export interface SelfHostedRoutingAdapters {
+  transit: PointToPointRoutingProvider;
+  bikeCar: PointToPointRoutingProvider;
+  snapshot: NonNullable<ProviderConfig["selfHostedRouting"]>["snapshot"];
+  engineSnapshots: NonNullable<ProviderConfig["selfHostedRouting"]>["engineSnapshots"];
+}
+
+export function createSelfHostedRoutingAdapters(
+  config: ProviderConfig,
+  fetchImplementation?: typeof fetch,
+): SelfHostedRoutingAdapters {
+  if (config.mode !== "self-hosted-routing" || !config.selfHostedRouting) {
+    throw new Error("Self-hosted routing adapters require self-hosted-routing provider configuration.");
+  }
+  return {
+    transit: new OtpGraphqlRoutingProvider(config.selfHostedRouting, fetchImplementation),
+    bikeCar: new GraphHopperRoutingProvider(config.selfHostedRouting, fetchImplementation),
+    snapshot: config.selfHostedRouting.snapshot,
+    engineSnapshots: config.selfHostedRouting.engineSnapshots,
+  };
 }
 
 function withMapConfiguration(

@@ -109,7 +109,6 @@ export interface GridCell {
   row: number;
   column: number;
   center: LocationCoordinate;
-  representativePoint: LocationCoordinate;
   vertices: readonly LocationCoordinate[];
   geometry: GeoJsonMultiPolygon;
   sampleDestinationIds: readonly string[];
@@ -139,7 +138,7 @@ export type ProviderDeploymentKind =
   | "managed"
   | "unknown";
 
-export type ProviderDataKind = "demo-static" | "scheduled" | "live" | "unknown";
+export type ProviderDataKind = "demo-static" | "scheduled" | "access" | "live" | "unknown";
 
 export interface ProviderDescriptor {
   name: string;

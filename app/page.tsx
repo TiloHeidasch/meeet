@@ -1,15 +1,12 @@
 import { Suspense } from "react";
 import { connection } from "next/server";
 import MeetPlanner from "@/components/MeetPlanner";
-import { readProviderConfig } from "@/lib/providers/config";
+import { readScheduledCapability } from "@/lib/providers/config";
 
 async function HomeContent() {
   await connection();
-  const providerConfig = readProviderConfig();
-  // Allow-list only UI capability data. URLs, tokens, and provenance stay server-side.
-  return <MeetPlanner capability={{
-    mode: providerConfig.mode,
-  }} />;
+  // Read only the allow-listed capability; do not initialize or load the artifact for page render.
+  return <MeetPlanner capability={readScheduledCapability()} />;
 }
 
 function HomeLoading() {

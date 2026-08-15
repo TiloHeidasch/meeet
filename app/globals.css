@@ -22,3 +22,9 @@ button, input, select { font: inherit; } button { cursor: pointer; } button:focu
 @keyframes spin { to { transform: rotate(360deg); } }
 @media (min-width: 760px) { .planner-inner { padding: 24px 32px 25px; }.planner-grid { grid-template-columns: minmax(350px, 430px) minmax(0, 1fr); align-items: stretch; gap: 30px; min-height: calc(100vh - 95px); }.planner-copy { order: 1; padding: 42px 0 0; }.map-column { order: 2; min-height: 690px; }.map-frame { min-height: 690px; }.search-options { grid-template-columns: 1fr 1fr; }.planner-footer { padding-left: 460px; } }
 @media (prefers-reduced-motion: reduce) { *, *::before, *::after { animation-duration: .01ms !important; transition-duration: .01ms !important; } }
+
+/* MapLibre's stylesheet supplies a 300px default root height. The planner's
+   map is an intentional full-frame surface, so keep every MapLibre layer
+   pinned to that frame. */
+.map-frame .maplibregl-map { position: absolute !important; inset: 0 !important; width: 100% !important; height: 100% !important; }
+.map-frame .maplibregl-canvas-container, .map-frame .maplibregl-canvas { position: absolute !important; inset: 0 !important; width: 100% !important; height: 100% !important; }

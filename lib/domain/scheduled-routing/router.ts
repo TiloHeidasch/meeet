@@ -6,6 +6,7 @@ import {
   type ScheduledAccessSeed,
   type ScheduledBoardingStop,
   type ScheduledConnection,
+  type ScheduledDeadlineCheck,
   type ScheduledRoutingArtifact,
   type ScheduledRoutingOptions,
   type ScheduledRoutingResult,
@@ -23,6 +24,7 @@ import {
 
 export const DEFAULT_WALKING_VELOCITY_METERS_PER_SECOND = 1.4;
 export const DEFAULT_TRANSFER_RADIUS_METERS = 250;
+const ROUTING_CONNECTION_CHECKPOINT = 2_048;
 
 export interface ScheduledMaterializedConnection {
   readonly instanceId: string;
@@ -43,6 +45,7 @@ export interface ScheduledSpatialIndex {
 interface ResolvedRoutingOptions {
   readonly walkingVelocityMetersPerSecond: number;
   readonly transferRadiusMeters: number;
+  readonly deadlineCheck?: ScheduledDeadlineCheck;
 }
 
 export interface ScheduledRoutingWindow {
@@ -54,21 +57,13 @@ export interface ScheduledRoutingWindow {
   readonly transferRadiusMeters: number;
   readonly connections: readonly ScheduledMaterializedConnection[];
   readonly spatialIndex: ScheduledSpatialIndex;
-  readonly deadlineChecker?: () => void;
-}
-
-export class ScheduledDeadlineExceededError extends Error {
-  constructor() {
-    super("The scheduled calculation deadline was exceeded.");
-    this.name = "ScheduledDeadlineExceededError";
-  }
+  readonly deadlineCheck?: ScheduledDeadlineCheck;
 }
 
 /** Narrow instrumentation seam for deterministic routing-window tests. */
 export interface ScheduledRoutingWindowInstrumentation {
   readonly onCandidateServiceDate?: (serviceDate: string) => void;
   readonly serviceDateAnchor?: (serviceDate: string, timeZone: string) => number;
-  readonly onDeadlineCheck?: () => void;
 }
 
 /**
@@ -84,14 +79,15 @@ export function routeScheduledEarliestArrivals(
   suppliedWindow?: ScheduledRoutingWindow,
 ): ScheduledRoutingResult {
   const window = suppliedWindow ?? createScheduledRoutingWindow(schedule, searchStartAt, options);
-  window.deadlineChecker?.();
   if (window.schedule !== schedule) throw new RangeError("A routing window belongs to a different schedule artifact.");
   const parsedStart = parseOffsetInstant(searchStartAt, schedule.timeZone);
   if (parsedStart.epochSeconds !== window.searchStartEpochSeconds) throw new RangeError("A routing window belongs to a different search start.");
   const resolvedOptions: ResolvedRoutingOptions = {
     walkingVelocityMetersPerSecond: window.walkingVelocityMetersPerSecond,
     transferRadiusMeters: window.transferRadiusMeters,
+    deadlineCheck: options.deadlineCheck ?? window.deadlineCheck,
   };
+  resolvedOptions.deadlineCheck?.("routing-scan");
   const stationById = new Map(schedule.stationAreas.map((area) => [area.id, area]));
   const stopById = new Map(schedule.boardingStops.map((stop) => [stop.id, stop]));
 
@@ -99,7 +95,10 @@ export function routeScheduledEarliestArrivals(
   const earliestArrivalByArea = new Map<string, number>();
   const reachableConnectionKeys = new Set<string>();
   const continuationByPreviousKey = new Map<string, ScheduledMaterializedConnection>();
-  for (const connection of window.connections) {
+  for (let connectionIndex = 0; connectionIndex < window.connections.length; connectionIndex += 1) {
+    if (connectionIndex % ROUTING_CONNECTION_CHECKPOINT === 0) resolvedOptions.deadlineCheck?.("routing-scan");
+    const connection = window.connections[connectionIndex];
+    if (connection === undefined) continue;
     if (connection.previousContinuationKey !== null) continuationByPreviousKey.set(connection.previousContinuationKey, connection);
   }
 
@@ -116,7 +115,7 @@ export function routeScheduledEarliestArrivals(
   };
 
   for (const seed of accessSeeds) {
-    window.deadlineChecker?.();
+    resolvedOptions.deadlineCheck?.("routing-scan");
     const area = stationById.get(seed.stationAreaId);
     if (area === undefined) throw new RangeError(`Access seed references unknown station area ${seed.stationAreaId}.`);
     validateWholeNonNegative(seed.accessSeconds, "Access seed accessSeconds");
@@ -143,7 +142,7 @@ export function routeScheduledEarliestArrivals(
   // enqueued and processed at most once in that bucket.
   let bucketStart = 0;
   while (bucketStart < window.connections.length) {
-    window.deadlineChecker?.();
+    resolvedOptions.deadlineCheck?.("routing-scan");
     const firstConnection = window.connections[bucketStart];
     if (firstConnection === undefined) break;
     const departureEpochSeconds = firstConnection.departureEpochSeconds;
@@ -151,6 +150,7 @@ export function routeScheduledEarliestArrivals(
     while (bucketEnd < window.connections.length && window.connections[bucketEnd]?.departureEpochSeconds === departureEpochSeconds) bucketEnd += 1;
     const byFromStop = new Map<string, ScheduledMaterializedConnection[]>();
     for (let index = bucketStart; index < bucketEnd; index += 1) {
+      if ((index - bucketStart) % ROUTING_CONNECTION_CHECKPOINT === 0) resolvedOptions.deadlineCheck?.("routing-scan");
       const connection = window.connections[index];
       if (connection === undefined) continue;
       const current = byFromStop.get(connection.source.fromStopId) ?? [];
@@ -173,10 +173,12 @@ export function routeScheduledEarliestArrivals(
       for (const connection of byFromStop.get(stopId) ?? []) enqueueConnection(connection);
     };
     for (let index = bucketStart; index < bucketEnd; index += 1) {
+      if ((index - bucketStart) % ROUTING_CONNECTION_CHECKPOINT === 0) resolvedOptions.deadlineCheck?.("routing-scan");
       const connection = window.connections[index];
       if (connection !== undefined) enqueueConnection(connection);
     }
     for (let queueIndex = 0; queueIndex < queue.length; queueIndex += 1) {
+      if (queueIndex % ROUTING_CONNECTION_CHECKPOINT === 0) resolvedOptions.deadlineCheck?.("routing-scan");
       const connection = queue[queueIndex];
       if (connection === undefined || processed.has(connection.connectionKey)) continue;
       processed.add(connection.connectionKey);
@@ -224,19 +226,17 @@ export function createScheduledRoutingWindow(
   const resolvedOptions: ResolvedRoutingOptions = {
     walkingVelocityMetersPerSecond: options.walkingVelocityMetersPerSecond ?? DEFAULT_WALKING_VELOCITY_METERS_PER_SECOND,
     transferRadiusMeters: options.transferRadiusMeters ?? DEFAULT_TRANSFER_RADIUS_METERS,
+    deadlineCheck: options.deadlineCheck,
   };
   validateRoutingOptions(resolvedOptions);
-  options.deadlineChecker?.();
+  resolvedOptions.deadlineCheck?.("routing-window");
   const parsedStart = parseOffsetInstant(searchStartAt, schedule.timeZone);
   validateScheduledSearchWindow(schedule, parsedStart.epochSeconds);
   const horizonEndEpochSeconds = parsedStart.epochSeconds + ROUTING_HORIZON_SECONDS;
-  const connections = materializeConnections(schedule, parsedStart.epochSeconds, horizonEndEpochSeconds, {
-    ...instrumentation,
-    onDeadlineCheck: () => {
-      options.deadlineChecker?.();
-      instrumentation.onDeadlineCheck?.();
-    },
-  });
+  const connections = materializeConnections(schedule, parsedStart.epochSeconds, horizonEndEpochSeconds, instrumentation, resolvedOptions.deadlineCheck);
+  resolvedOptions.deadlineCheck?.("routing-window");
+  const spatialIndex = buildSpatialIndex(schedule.boardingStops, resolvedOptions.transferRadiusMeters);
+  resolvedOptions.deadlineCheck?.("routing-window");
   return Object.freeze({
     schedule,
     searchStartAt: parsedStart.canonicalAt,
@@ -245,8 +245,8 @@ export function createScheduledRoutingWindow(
     walkingVelocityMetersPerSecond: resolvedOptions.walkingVelocityMetersPerSecond,
     transferRadiusMeters: resolvedOptions.transferRadiusMeters,
     connections: Object.freeze(connections),
-    spatialIndex: buildSpatialIndex(schedule.boardingStops, resolvedOptions.transferRadiusMeters),
-    deadlineChecker: options.deadlineChecker,
+    spatialIndex,
+    deadlineCheck: resolvedOptions.deadlineCheck,
   });
 }
 
@@ -290,30 +290,36 @@ function materializeConnections(
   searchStartEpochSeconds: number,
   horizonEndEpochSeconds: number,
   instrumentation: ScheduledRoutingWindowInstrumentation,
+  deadlineCheck?: ScheduledDeadlineCheck,
 ): ScheduledMaterializedConnection[] {
+  deadlineCheck?.("routing-window");
   const [firstCandidateDate, lastCandidateDate] = serviceDateRangeForSearch(searchStartEpochSeconds, schedule.timeZone, schedule.maximumServiceDayTimeSeconds);
   const streams: ScheduledConnectionDateStream[] = [];
   let serviceDate = firstCandidateDate;
   while (serviceDate <= lastCandidateDate) {
-    instrumentation.onDeadlineCheck?.();
+    deadlineCheck?.("routing-window");
     instrumentation.onCandidateServiceDate?.(serviceDate);
     const activeServiceIds = activeServiceIdsForDate(schedule, serviceDate);
     const anchorEpochSeconds = (instrumentation.serviceDateAnchor ?? serviceDateAnchorEpochSeconds)(serviceDate, schedule.timeZone);
     if (activeServiceIds.size > 0) {
-      streams.push(createScheduledConnectionDateStream(schedule.connections, serviceDate, anchorEpochSeconds, activeServiceIds, searchStartEpochSeconds, horizonEndEpochSeconds));
+      streams.push(createScheduledConnectionDateStream(schedule.connections, serviceDate, anchorEpochSeconds, activeServiceIds, searchStartEpochSeconds, horizonEndEpochSeconds, deadlineCheck));
     }
     serviceDate = addServiceDays(serviceDate, 1);
   }
   const heap = new ScheduledConnectionMinHeap();
   streams.forEach((stream, streamIndex) => {
+    deadlineCheck?.("routing-window");
     const connection = stream.next();
     if (connection !== null) heap.push({ connection, stream, streamIndex });
   });
   const results: ScheduledMaterializedConnection[] = [];
+  let mergedConnections = 0;
   while (heap.size > 0) {
+    if (mergedConnections % ROUTING_CONNECTION_CHECKPOINT === 0) deadlineCheck?.("routing-window");
     const entry = heap.pop();
     if (entry === null) break;
     results.push(entry.connection);
+    mergedConnections += 1;
     const next = entry.stream.next();
     if (next !== null) heap.push({ connection: next, stream: entry.stream, streamIndex: entry.streamIndex });
   }
@@ -331,6 +337,7 @@ function createScheduledConnectionDateStream(
   activeServiceIds: ReadonlySet<string>,
   searchStartEpochSeconds: number,
   horizonEndEpochSeconds: number,
+  deadlineCheck?: ScheduledDeadlineCheck,
 ): ScheduledConnectionDateStream {
   const firstServiceDaySecond = Math.max(0, searchStartEpochSeconds - anchorEpochSeconds);
   const lastServiceDaySecond = horizonEndEpochSeconds - anchorEpochSeconds;
@@ -338,12 +345,15 @@ function createScheduledConnectionDateStream(
   const endConnectionIndex = lastServiceDaySecond < 0 ? connectionIndex : firstConnectionIndexAfter(connections, lastServiceDaySecond);
   const previousByTrip = new Map<string, ScheduledConnection>();
   const includedKeys = new Set<string>();
+  let scannedConnections = 0;
 
   return {
     next: () => {
       while (connectionIndex < endConnectionIndex) {
+        if (scannedConnections % ROUTING_CONNECTION_CHECKPOINT === 0) deadlineCheck?.("routing-window");
         const source = connections[connectionIndex];
         connectionIndex += 1;
+        scannedConnections += 1;
         if (source === undefined || !activeServiceIds.has(source.serviceId)) continue;
         const departureEpochSeconds = anchorEpochSeconds + source.departureTimeSeconds;
         const arrivalEpochSeconds = anchorEpochSeconds + source.arrivalTimeSeconds;

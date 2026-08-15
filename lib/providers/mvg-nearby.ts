@@ -1,17 +1,14 @@
 import "server-only";
 
-import { cacheLife } from "next/cache";
 import { haversineDistanceKm } from "../domain/geo.ts";
 import {
   DEFAULT_PROVIDER_TIMEOUT_MS,
   type ProviderConfig,
 } from "./config.ts";
 import { createHttpJsonClient, type FetchImplementation } from "./http.ts";
-import { runMvgCacheFill } from "./mvg-limiter.ts";
 import {
   MVG_NEARBY_CACHE_DECIMAL_PLACES,
   MVG_NEARBY_URL,
-  MVG_UPSTREAM_REVALIDATE_SECONDS,
 } from "./mvg-constants.ts";
 
 export const MVG_NEARBY_TIMEOUT_MS = DEFAULT_PROVIDER_TIMEOUT_MS;
@@ -38,27 +35,8 @@ export async function fetchMvgNearbyStations(
   const url = new URL(MVG_NEARBY_URL);
   url.searchParams.set("latitude", nearbyCacheCoordinate(coordinate.latitude));
   url.searchParams.set("longitude", nearbyCacheCoordinate(coordinate.longitude));
-  if (fetchImplementation === globalThis.fetch) {
-    return runMvgCacheFill(
-      () => getCachedMvgNearbyStations(url, config),
-      signal,
-    );
-  }
   const client = createHttpJsonClient(url.toString(), config, null, fetchImplementation);
-  return runMvgCacheFill(
-    () => client.getJson(url.toString(), signal, { cache: "no-store" }).then(parseStations),
-    signal,
-  );
-}
-
-async function getCachedMvgNearbyStations(
-  url: URL,
-  config: Pick<ProviderConfig, "timeoutMs" | "maxResponseBytes">,
-): Promise<readonly MvgNearbyStation[]> {
-  "use cache";
-  cacheLife({ revalidate: MVG_UPSTREAM_REVALIDATE_SECONDS });
-  const client = createHttpJsonClient(url.toString(), config, null);
-  return parseStations(await client.getJson(url.toString(), undefined, { cache: "no-store" }));
+  return parseStations(await client.getJson(url.toString(), signal, { cache: "no-store" }));
 }
 
 export function findNearestMvgStation(

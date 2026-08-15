@@ -23,7 +23,7 @@ import { isCanonicalUtcInstant } from "../domain/routing-snapshot.ts";
 import type { RoutingMatrixRequest, RoutingMatrixResponse } from "../domain/types.ts";
 import { UNAVAILABLE_ROUTING_PROVIDER_CAPABILITIES } from "../domain/providers.ts";
 import type { PointToPointRoutingProvider, RoutingProvider } from "../domain/providers.ts";
-import type { SelfHostedRoutingConfig } from "./config.ts";
+import type { ProviderConfig, SelfHostedRoutingConfig } from "./config.ts";
 import {
   createHttpJsonClient,
   type FetchImplementation,
@@ -93,26 +93,7 @@ export const OTP_PLAN_CONNECTION_QUERY = `
   }
 `;
 
-export type SelfHostedRoutingOptions = SelfHostedRoutingConfig;
-
-export interface IsolatedSelfHostedRoutingAdapters {
-  readonly transit: PointToPointRoutingProvider;
-  readonly bikeCar: PointToPointRoutingProvider;
-  readonly snapshot: RoutingSnapshot;
-  readonly engineSnapshots: SelfHostedRoutingConfig["engineSnapshots"];
-}
-
-export function createIsolatedSelfHostedRoutingAdapters(
-  config: SelfHostedRoutingConfig,
-  fetchImplementation?: FetchImplementation,
-): IsolatedSelfHostedRoutingAdapters {
-  return {
-    transit: new OtpGraphqlRoutingProvider(config, fetchImplementation),
-    bikeCar: new GraphHopperRoutingProvider(config, fetchImplementation),
-    snapshot: config.snapshot,
-    engineSnapshots: config.engineSnapshots,
-  };
-}
+export type SelfHostedRoutingOptions = SelfHostedRoutingConfig | ProviderConfig;
 
 const OTP_CAPABILITIES: RoutingProviderCapabilities = {
   supportedModes: ["transit"],
@@ -137,7 +118,7 @@ export class OtpGraphqlRoutingProvider implements PointToPointRoutingProvider {
     config: SelfHostedRoutingOptions,
     fetchImplementation?: FetchImplementation,
   ) {
-    this.config = config;
+    this.config = getSelfHostedRoutingConfig(config);
     this.descriptor = {
       engine: "otp",
       endpoint: this.config.otpGraphqlUrl,
@@ -203,7 +184,7 @@ export class GraphHopperRoutingProvider implements PointToPointRoutingProvider {
     config: SelfHostedRoutingOptions,
     fetchImplementation?: FetchImplementation,
   ) {
-    this.config = config;
+    this.config = getSelfHostedRoutingConfig(config);
     this.descriptor = {
       engine: "graphhopper",
       endpoint: this.config.graphhopperUrl,
@@ -297,6 +278,18 @@ export class CalculationUnavailableRoutingProvider implements RoutingProvider {
 
 export const OtpGraphqlTransitProvider = OtpGraphqlRoutingProvider;
 export const GraphHopperPointToPointProvider = GraphHopperRoutingProvider;
+
+function getSelfHostedRoutingConfig(
+  config: SelfHostedRoutingOptions,
+): SelfHostedRoutingConfig {
+  if ("selfHostedRouting" in config) {
+    if (!config.selfHostedRouting) {
+      throw new Error("Self-hosted routing configuration is required.");
+    }
+    return config.selfHostedRouting;
+  }
+  return config;
+}
 
 function toFeedProvenance(snapshot: RoutingSnapshot, name: "MVG" | "MVV") {
   const feed = snapshot.feeds.find((candidate) => candidate.name === name);

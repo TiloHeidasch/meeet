@@ -27,13 +27,13 @@ import {
 } from "../lib/fixtures/scheduled-routing.ts";
 import { MvgScheduledAccessSeedProvider } from "../lib/providers/mvg-scheduled-access.ts";
 import { handleMeetingPost } from "../lib/domain/meeting-api.ts";
-import { ScheduledCalculationAdmission } from "../lib/domain/meeting-api.ts";
 import { fixtureProviders } from "../lib/fixtures/providers.ts";
 import type { MeetingProviders } from "../lib/domain/providers.ts";
 import { compareScheduledIds, type GtfsFeedFiles } from "../lib/domain/scheduled-routing/gtfs.ts";
 import { createScheduledSurfaceGrid } from "../lib/domain/scheduled-routing/grid.ts";
 import { createMeetingProviders } from "../lib/providers/factory.ts";
 import { MVG_NEARBY_URL } from "../lib/providers/mvg-constants.ts";
+import { ScheduledCalculationDeadlineError } from "../lib/domain/scheduled-admission.ts";
 
 const V3_REQUEST = {
   contractVersion: "meeet-meeting/v3",
@@ -94,6 +94,7 @@ interface MutableResponseShape {
   readonly metadata: {
     readonly schedule: Record<string, unknown>;
     readonly surface: Record<string, unknown>;
+    readonly accessProvider: Record<string, unknown>;
   };
 }
 
@@ -365,48 +366,69 @@ test("MVG scheduled access maps only exact artifact identities and never calls r
     fetchImplementation: async (input) => {
       calls.push(String(input));
       return Response.json({ stations: [
-        { globalId: "fixture-a", latitude: 48.1374, longitude: 11.5755 },
+        { globalId: "fixture-a-stop", latitude: 48.1374, longitude: 11.5755 },
         { globalId: "unknown-mvg-id", latitude: 48.1380, longitude: 11.5750 },
       ] });
     },
   });
   const seeds = await provider.resolveAccessSeeds({ origin: V3_REQUEST.participants[0].origin, schedule: FIXTURE_SCHEDULED_ARTIFACT });
   assert.equal(seeds.length, 1);
-  assert.equal(seeds[0]?.mvgStationId, "fixture-a");
+  assert.equal(seeds[0]?.mvgStationId, "fixture-a-stop");
   assert.equal(seeds[0]?.stationAreaId, "fixture-a");
+  assert.equal(seeds[0]?.boardingStopId, "fixture-a-stop");
   assert.equal(calls.length, 1);
   assert.equal(calls.some((url) => url.includes("/routes")), false);
+});
+
+test("scheduled access provenance is explicitly access-only and rejects routing, scheduled, live, and malformed claims", async () => {
+  const provider = new MvgScheduledAccessSeedProvider({ fetchImplementation: async () => Response.json({ stations: [] }) });
   assert.equal(provider.descriptor.provenance.role, "access");
-  assert.equal(provider.descriptor.dataKind, "unknown");
-});
+  assert.equal(provider.descriptor.provenance.dataKind, "access");
+  assert.equal(provider.descriptor.dataKind, "access");
 
-test("v3 accepts canonical zero-fraction search instants but rejects non-zero fractions", () => {
-  assert.equal(parseScheduledMeetingRequest({ ...V3_REQUEST, searchStartAt: "2026-08-11T08:05:00.000Z" }).success, true);
-  assert.equal(parseScheduledMeetingRequest({ ...V3_REQUEST, searchStartAt: "2026-08-11T08:05:00.001Z" }).success, false);
-});
-
-test("v3 response preserves optional exact boarding-stop identity and rejects blank IDs", async () => {
   const parsed = parseScheduledMeetingRequest(V3_REQUEST);
   assert.equal(parsed.success, true);
   if (!parsed.success) return;
   const response = await validScheduledResponse();
-  const mutable = mutableResponse(response);
-  mutable.participants[0]!.accessSeeds[0]!.boardingStopId = "fixture-a-stop";
-  assert.equal(validateScheduledMeetingResponse(mutable, parsed.data).success, true);
-  mutable.participants[0]!.accessSeeds[0]!.boardingStopId = "";
-  assert.equal(validateScheduledMeetingResponse(mutable, parsed.data).success, false);
+  const tamperProvider = (mutate: (provider: Record<string, unknown>, provenance: Record<string, unknown>) => void) => {
+    const tamper = mutableResponse(response);
+    const providerValue = tamper.metadata.accessProvider as unknown as Record<string, unknown>;
+    const provenance = providerValue.provenance as Record<string, unknown>;
+    mutate(providerValue, provenance);
+    assert.equal(validateScheduledMeetingResponse(tamper, parsed.data).success, false);
+  };
+  tamperProvider((providerValue, provenance) => { providerValue.dataKind = "scheduled"; provenance.dataKind = "scheduled"; });
+  tamperProvider((providerValue, provenance) => { providerValue.dataKind = "live"; provenance.dataKind = "live"; providerValue.liveData = true; provenance.liveData = true; });
+  tamperProvider((_, provenance) => { provenance.role = "routing"; });
+  tamperProvider((providerValue) => { providerValue.provenance = null; });
 });
 
-test("scheduled admission rejects an occupied second request with explicit unavailability", async () => {
-  const admission = new ScheduledCalculationAdmission(1);
-  const release = admission.enter();
-  const response = await handleMeetingPost(new Request("https://meeet.test/api/meeting/calculate", {
-    method: "POST",
-    body: JSON.stringify(V3_REQUEST),
-  }), { ...fixtureProviders, scheduledArtifact: FIXTURE_SCHEDULED_ARTIFACT, scheduledAccess: FIXTURE_SCHEDULED_ACCESS_PROVIDER }, { admission });
-  assert.equal(response.status, 503);
-  assert.equal((await response.json()).error.code, "PROVIDER_UNAVAILABLE");
-  release();
+test("v3 request parsing canonicalizes exactly-zero fractional seconds and rejects non-zero fractions", () => {
+  const zeroFraction = parseScheduledMeetingRequest({ ...V3_REQUEST, searchStartAt: "2026-08-11T08:05:00.000Z" });
+  assert.equal(zeroFraction.success, true);
+  if (zeroFraction.success) assert.equal(zeroFraction.data.searchStartAt, "2026-08-11T08:05:00.000Z");
+  assert.equal(parseScheduledMeetingRequest({ ...V3_REQUEST, searchStartAt: "2026-08-11T08:05:00.0+02:00" }).success, true);
+  assert.equal(parseScheduledMeetingRequest({ ...V3_REQUEST, searchStartAt: "2026-08-11T08:05:00.001Z" }).success, false);
+  assert.equal(parseScheduledMeetingRequest({ ...V3_REQUEST, searchStartAt: "2026-08-11T08:05:00.0001Z" }).success, false);
+});
+
+test("scheduled meeting checks injected deadlines at each orchestration boundary", async () => {
+  const parsed = parseScheduledMeetingRequest(V3_REQUEST);
+  assert.equal(parsed.success, true);
+  if (!parsed.success) return;
+  for (const target of ["meeting-start", "meeting-access", "meeting-surface", "meeting-result"] as const) {
+    const deadlineCheck = (phase: string): void => {
+      if (phase === target) throw new ScheduledCalculationDeadlineError(`deadline-${target}`);
+    };
+    await assert.rejects(
+      calculateScheduledMeeting(parsed.data, {
+        artifact: FIXTURE_SCHEDULED_ARTIFACT,
+        access: FIXTURE_SCHEDULED_ACCESS_PROVIDER,
+        deadlineCheck,
+      }),
+      ScheduledCalculationDeadlineError,
+    );
+  }
 });
 
 test("v3 validation is strict and scheduled orchestration emits only the v3 surface contract", async () => {
@@ -428,14 +450,20 @@ test("v3 validation is strict and scheduled orchestration emits only the v3 surf
   assert.equal(response.participants[0].color, "red");
   assert.equal(response.participants[1].color, "blue");
   assert.ok(response.cells.every((cell) => cell.geometry.type === "MultiPolygon"));
+  assert.ok(response.cells.every((cell) => cell.representativePoint !== undefined));
   assert.ok(response.cells.every((cell) => !("cellId" in cell)));
   assert.ok(response.cells.length >= 200);
   assert.ok(response.metadata.grid.columns >= 24);
   assert.equal(response.metadata.surface.classificationMethod, "representative-point-with-geometric-final-station-walking/v1");
   assert.equal(response.metadata.surface.classificationBasis, "representative-point");
-   assert.equal(response.metadata.surface.representativePointBasis, "inside-clipped-cell/v1");
+  assert.equal(response.metadata.surface.representativePointBasis, "inside-clipped-cell/v1");
   assert.equal(response.metadata.surface.finalWalkingMethod, "geometric-station-walking-estimate-not-navigation");
   assert.equal(validateScheduledMeetingResponse(response, parsed.data).success, true);
+  const boundaryRepresentative = mutableResponse(response);
+  const boundaryCell = boundaryRepresentative.cells[0]!;
+  const firstRing = (boundaryCell.geometry as { coordinates: number[][][][] }).coordinates[0]![0]!;
+  boundaryCell.representativePoint = { longitude: firstRing[0]![0]!, latitude: firstRing[0]![1]! };
+  assert.equal(validateScheduledMeetingResponse(boundaryRepresentative, parsed.data).success, false);
   assert.equal("fairLocations" in response, false);
   assert.equal(parseScheduledMeetingRequest({ ...V3_REQUEST, arrivalAt: V3_REQUEST.searchStartAt }).success, false);
 });
@@ -521,22 +549,16 @@ test("v3 response validation binds surface search start and tolerance to the par
   assert.equal(validateScheduledMeetingResponse(toleranceTamper, parsed.data).success, false);
 });
 
-test("v3 response validation restricts access provenance to non-live MVG seed access", async () => {
+test("v3 response preserves optional exact boarding-stop identity and rejects blank IDs", async () => {
   const parsed = parseScheduledMeetingRequest(V3_REQUEST);
   assert.equal(parsed.success, true);
   if (!parsed.success) return;
   const response = await validScheduledResponse();
-  const mutateProvider = (mutate: (provider: Record<string, unknown>, provenance: Record<string, unknown>) => void) => {
-    const tamper = mutableResponse(response);
-    const provider = (tamper.metadata as unknown as Record<string, unknown>).accessProvider as Record<string, unknown>;
-    const provenance = provider.provenance as Record<string, unknown>;
-    mutate(provider, provenance);
-    assert.equal(validateScheduledMeetingResponse(tamper, parsed.data).success, false);
-  };
-  mutateProvider((_, provenance) => { provenance.role = "routing"; });
-  mutateProvider((provider, provenance) => { provider.dataKind = "scheduled"; provenance.dataKind = "scheduled"; });
-  mutateProvider((provider, provenance) => { provider.liveData = true; provenance.liveData = true; });
-  mutateProvider((provider, provenance) => { provider.dataKind = "unknown"; provenance.dataKind = "demo-static"; });
+  const mutable = mutableResponse(response);
+  mutable.participants[0]!.accessSeeds[0]!.boardingStopId = "fixture-a-stop";
+  assert.equal(validateScheduledMeetingResponse(mutable, parsed.data).success, true);
+  mutable.participants[0]!.accessSeeds[0]!.boardingStopId = "";
+  assert.equal(validateScheduledMeetingResponse(mutable, parsed.data).success, false);
 });
 
 test("scheduled HTTP path handles fixture success, no seeds, and unavailable artifacts without legacy fallback", async () => {

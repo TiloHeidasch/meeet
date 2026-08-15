@@ -61,7 +61,7 @@ const fixtureProvenance: ProviderProvenance = {
   role: "access",
   provider: "fixture-scheduled-access",
   deployment: "fixture",
-  dataKind: "unknown",
+  dataKind: "demo-static",
   liveData: false,
   sourceUrl: "https://example.test/fixture-mvv-nearby",
   license: null,
@@ -75,7 +75,7 @@ const fixtureProvenance: ProviderProvenance = {
 const fixtureDescriptor: ProviderDescriptor = {
   name: "fixture-scheduled-access",
   deployment: "fixture",
-  dataKind: "unknown",
+  dataKind: "demo-static",
   liveData: false,
   asOf: "fixture-scheduled-access-v1",
   notes: fixtureProvenance.notes,

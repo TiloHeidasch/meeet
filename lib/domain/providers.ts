@@ -22,9 +22,9 @@ import { TRAVEL_MODES } from "./types.ts";
 import type { ScheduledRoutingArtifact } from "./scheduled-routing/models.ts";
 
 export class ProviderUnavailableError extends Error {
-  readonly providerRole: "geocoding" | "routing" | "access" | "poi";
+  readonly providerRole: "geocoding" | "routing" | "poi";
 
-  constructor(providerRole: "geocoding" | "routing" | "access" | "poi") {
+  constructor(providerRole: "geocoding" | "routing" | "poi") {
     super(`The ${providerRole} provider is unavailable.`);
     this.name = "ProviderUnavailableError";
     this.providerRole = providerRole;
@@ -32,9 +32,9 @@ export class ProviderUnavailableError extends Error {
 }
 
 export class ProviderNotConfiguredError extends Error {
-  readonly providerRole: "geocoding" | "routing" | "access" | "poi";
+  readonly providerRole: "geocoding" | "routing" | "poi";
 
-  constructor(providerRole: "geocoding" | "routing" | "access" | "poi") {
+  constructor(providerRole: "geocoding" | "routing" | "poi") {
     super(`The ${providerRole} provider is not configured.`);
     this.name = "ProviderNotConfiguredError";
     this.providerRole = providerRole;
@@ -102,6 +102,7 @@ export interface ScheduledAccessSeedCandidate {
   readonly seedId: string;
   readonly mvgStationId: string;
   readonly stationAreaId: string;
+  /** Exact GTFS boarding-stop identity when MVG nearby returned a boarding stop. */
   readonly boardingStopId?: string;
   readonly coordinate: LocationCoordinate;
   readonly accessSeconds: number;
@@ -130,6 +131,4 @@ export interface MeetingProviders {
   mapConfiguration?: MapConfigurationProvenance;
   scheduledArtifact?: ScheduledRoutingArtifact;
   scheduledAccess?: ScheduledAccessSeedProvider;
-  scheduledConcurrency?: number;
-  scheduledDeadlineMs?: number;
 }

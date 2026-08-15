@@ -6,6 +6,24 @@ import {
   validateScheduledMeetingResponse,
 } from "../validation/meeting-v3.ts";
 import { ScheduleArtifactUnavailableError } from "./scheduled-routing/artifact.ts";
+import {
+  createScheduledCalculationDeadline,
+  scheduledCalculationAdmission,
+  SCHEDULED_CALCULATION_CONCURRENCY,
+  SCHEDULED_CALCULATION_DEADLINE_MS,
+  type ScheduledCalculationAdmission,
+  type ScheduledDeadlineOptions,
+  type ScheduledCalculationDeadline,
+} from "./scheduled-admission.ts";
+import { ProviderConfigurationError } from "../providers/config.ts";
+
+export {
+  ScheduledCalculationAdmission,
+  ScheduledCalculationAdmissionError,
+  ScheduledCalculationDeadlineError,
+} from "./scheduled-admission.ts";
+export const DEFAULT_SCHEDULED_CALCULATION_CONCURRENCY = SCHEDULED_CALCULATION_CONCURRENCY;
+export const DEFAULT_SCHEDULED_CALCULATION_DEADLINE_MS = SCHEDULED_CALCULATION_DEADLINE_MS;
 
 export const MAX_MEETING_REQUEST_BODY_BYTES = 32 * 1024;
 
@@ -13,6 +31,7 @@ export type MeetingApiErrorCode =
   | "MALFORMED_JSON"
   | "INVALID_REQUEST"
   | "REQUEST_TOO_LARGE"
+  | "TEMPORARILY_UNAVAILABLE"
   | "PROVIDER_NOT_CONFIGURED"
   | "PROVIDER_UNAVAILABLE"
   | "CALCULATION_FAILED";
@@ -25,39 +44,21 @@ export interface MeetingApiErrorResponse {
   };
 }
 
-export class ScheduledCalculationAdmissionError extends Error {
-  constructor(message = "A scheduled meeting calculation is already in progress.") {
-    super(message);
-    this.name = "ScheduledCalculationAdmissionError";
-  }
-}
+export type MeetingProvidersSource = MeetingProviders | (() => MeetingProviders);
 
-export class ScheduledCalculationDeadlineError extends Error {
-  constructor(message = "The scheduled meeting calculation exceeded its deadline.") {
-    super(message);
-    this.name = "ScheduledCalculationDeadlineError";
-  }
+export interface HandleMeetingPostOptions {
+  readonly admission?: ScheduledCalculationAdmission;
+  readonly deadline?: ScheduledDeadlineOptions;
+  /** Flat aliases keep the server test seam convenient without changing policy. */
+  readonly deadlineMs?: number;
+  readonly now?: () => number;
+  readonly deadlineSignal?: AbortSignal;
 }
-
-export class ScheduledCalculationAdmission {
-  private active = 0;
-  constructor(private readonly limit: number) {}
-  enter(): () => void {
-    if (this.active >= this.limit) throw new ScheduledCalculationAdmissionError();
-    this.active += 1;
-    let released = false;
-    return () => { if (!released) { released = true; this.active -= 1; } };
-  }
-}
-
-export const DEFAULT_SCHEDULED_CALCULATION_CONCURRENCY = 1;
-export const DEFAULT_SCHEDULED_CALCULATION_DEADLINE_MS = 90_000;
-export const scheduledCalculationAdmission = new ScheduledCalculationAdmission(DEFAULT_SCHEDULED_CALCULATION_CONCURRENCY);
 
 export async function handleMeetingPost(
   request: Request,
-  providers: MeetingProviders,
-  options: { readonly deadlineMs?: number; readonly admission?: ScheduledCalculationAdmission } = {},
+  providersSource: MeetingProvidersSource,
+  options: HandleMeetingPostOptions = {},
 ): Promise<Response> {
   const declaredLength = request.headers.get("content-length");
   if (declaredLength && isTooLargeContentLength(declaredLength)) {
@@ -94,28 +95,64 @@ export async function handleMeetingPost(
   if (!parsedScheduled.success) {
     return jsonError(400, "INVALID_REQUEST", "Request body must use the meeet-meeting/v3 scheduled contract.", parsedScheduled.issues);
   }
-  const deadlineMs = options.deadlineMs ?? DEFAULT_SCHEDULED_CALCULATION_DEADLINE_MS;
-  const deadline = Date.now() + deadlineMs;
-  const checkDeadline = () => { if (Date.now() > deadline) throw new ScheduledCalculationDeadlineError(); };
-  let release: (() => void) | undefined;
+  const release = (options.admission ?? scheduledCalculationAdmission).tryAcquire();
+  if (release === null) {
+    return jsonError(503, "TEMPORARILY_UNAVAILABLE", "A scheduled meeting calculation is already in progress. Please try again shortly.");
+  }
+  let deadline: ScheduledCalculationDeadline | undefined;
   try {
-    release = (options.admission ?? scheduledCalculationAdmission).enter();
-    checkDeadline();
+    deadline = createScheduledCalculationDeadline({
+      ...options.deadline,
+      ...(options.deadlineMs === undefined ? {} : { deadlineMs: options.deadlineMs }),
+      ...(options.now === undefined ? {} : { now: options.now }),
+      ...(options.deadlineSignal === undefined ? {} : { deadlineSignal: options.deadlineSignal }),
+      requestSignal: request.signal,
+    });
+    deadline.check();
+    const providers = typeof providersSource === "function" ? providersSource() : providersSource;
+    deadline.check();
+    const calculationProviders = withDeadlineCheckedAccess(providers, deadline);
     const result = await calculateScheduledMeeting(parsedScheduled.data, {
-      artifact: providers.scheduledArtifact,
-      access: providers.scheduledAccess,
-      deadlineAtEpochMilliseconds: deadline,
-    }, request.signal);
-    checkDeadline();
+      artifact: calculationProviders.scheduledArtifact,
+      access: calculationProviders.scheduledAccess,
+      deadlineCheck: deadline.check,
+    }, deadline.signal);
+    deadline.check();
     if (!validateScheduledMeetingResponse(result, parsedScheduled.data).success) {
       return jsonError(500, "CALCULATION_FAILED", "The scheduled meeting response failed validation.");
     }
+    deadline.check();
     return Response.json(result, { status: 200 });
   } catch (error) {
+    if (error instanceof ProviderConfigurationError) throw error;
+    if (deadline?.isExpired()) {
+      return jsonError(503, "TEMPORARILY_UNAVAILABLE", "The scheduled meeting calculation exceeded its 90-second deadline. Please try again shortly.");
+    }
     return scheduledErrorResponse(error);
   } finally {
-    release?.();
+    deadline?.dispose();
+    release();
   }
+}
+
+function withDeadlineCheckedAccess(
+  providers: MeetingProviders,
+  deadline: ScheduledCalculationDeadline,
+): MeetingProviders {
+  const access = providers.scheduledAccess;
+  if (access === undefined) return providers;
+  return {
+    ...providers,
+    scheduledAccess: {
+      descriptor: access.descriptor,
+      async resolveAccessSeeds(input) {
+        deadline.check();
+        const seeds = await access.resolveAccessSeeds({ ...input, signal: deadline.signal });
+        deadline.check();
+        return seeds;
+      },
+    },
+  };
 }
 
 function isTooLargeContentLength(value: string): boolean {
@@ -135,9 +172,6 @@ function jsonError(
 }
 
 function scheduledErrorResponse(error: unknown): Response {
-  if (error instanceof ScheduledCalculationAdmissionError || error instanceof ScheduledCalculationDeadlineError) {
-    return jsonError(503, "PROVIDER_UNAVAILABLE", error.message);
-  }
   if (error instanceof RangeError) {
     return jsonError(400, "INVALID_REQUEST", error.message);
   }

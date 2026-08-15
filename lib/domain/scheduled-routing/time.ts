@@ -9,12 +9,15 @@ export interface ParsedOffsetInstant {
 }
 
 const OFFSET_INSTANT_PATTERN =
-  /^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{3})?)(Z|[+-]\d{2}:\d{2})$/;
+  /^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?)(Z|[+-]\d{2}:\d{2})$/;
 
 export function parseOffsetInstant(value: string, timeZone: string): ParsedOffsetInstant {
-  if (typeof value !== "string" || !OFFSET_INSTANT_PATTERN.test(value)) {
+  const match = typeof value === "string" ? OFFSET_INSTANT_PATTERN.exec(value) : null;
+  const fractional = match?.[1].match(/\.(\d+)$/)?.[1];
+  if (match === null) {
     throw new RangeError("searchStartAt must be an ISO-8601 instant with an explicit offset.");
   }
+  if (fractional !== undefined && /[1-9]/.test(fractional)) throw new RangeError("searchStartAt must represent an exact whole second.");
   validateTimeZone(timeZone);
   const epochMilliseconds = Date.parse(value);
   if (!Number.isFinite(epochMilliseconds) || epochMilliseconds % 1_000 !== 0) {

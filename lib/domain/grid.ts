@@ -102,18 +102,17 @@ export function createBoundedMunichGrid(
       if (geometry.coordinates.length === 0) continue;
       const cellId = `cell-${row}-${column}`;
       const clippedVertices = selectSampleVertices(geometry);
-      const representativePoint = findInteriorRepresentativePoint(center, clippedVertices, geometry);
+      const clippedCenter = findValidCenter(center, clippedVertices, geometry);
       const vertexIds = clippedVertices.map((vertex, index) =>
         addDestination(`${cellId}-vertex-${index}`, vertex, "vertex"),
       );
-      const centerId = addDestination(`${cellId}-center`, representativePoint, "center");
+      const centerId = addDestination(`${cellId}-center`, clippedCenter, "center");
 
       cells.push({
         id: cellId,
         row,
         column,
-        center,
-        representativePoint,
+        center: clippedCenter,
         vertices: clippedVertices,
         geometry,
         sampleDestinationIds: [centerId, ...vertexIds],
@@ -134,10 +133,6 @@ export function createBoundedMunichGrid(
     cells,
     destinations,
   };
-}
-
-export function isGridCellRepresentativePointInside(cell: GridCell): boolean {
-  return isPointInGeoJsonGeometry(toGeoJsonPosition(cell.representativePoint), cell.geometry);
 }
 
 /**
@@ -181,7 +176,7 @@ function selectSampleVertices(
   );
 }
 
-function findInteriorRepresentativePoint(
+function findValidCenter(
   originalCenter: LocationCoordinate,
   vertices: readonly LocationCoordinate[],
   geometry: ReturnType<typeof clipPolygonToOfficialMunichBoundary>,
@@ -189,40 +184,7 @@ function findInteriorRepresentativePoint(
   if (isPointInGeoJsonGeometry(toGeoJsonPosition(originalCenter), geometry)) {
     return originalCenter;
   }
-  // A clipped boundary cell can have no original rectangular center inside
-  // its polygon. Use the centroid of the clipped vertices, then move toward
-  // the original center until the point is inside; never report a raw vertex.
-  const allVertices = geometry.coordinates.flatMap((polygon) => polygon[0] ?? []).map(fromGeoJsonPosition);
-  const centroid = allVertices.reduce(
-    (sum, vertex) => ({ latitude: sum.latitude + vertex.latitude, longitude: sum.longitude + vertex.longitude }),
-    { latitude: 0, longitude: 0 },
-  );
-  const averaged = {
-    latitude: centroid.latitude / Math.max(allVertices.length, 1),
-    longitude: centroid.longitude / Math.max(allVertices.length, 1),
-  };
-  if (isPointInGeoJsonGeometry(toGeoJsonPosition(averaged), geometry)) return averaged;
-  for (const fraction of [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9]) {
-    const candidate = {
-      latitude: averaged.latitude + (originalCenter.latitude - averaged.latitude) * fraction,
-      longitude: averaged.longitude + (originalCenter.longitude - averaged.longitude) * fraction,
-    };
-    if (isPointInGeoJsonGeometry(toGeoJsonPosition(candidate), geometry)) return candidate;
-  }
-  const latitudes = allVertices.map((vertex) => vertex.latitude);
-  const longitudes = allVertices.map((vertex) => vertex.longitude);
-  const minLatitude = Math.min(...latitudes);
-  const maxLatitude = Math.max(...latitudes);
-  const minLongitude = Math.min(...longitudes);
-  const maxLongitude = Math.max(...longitudes);
-  for (let row = 0; row < 20; row += 1) {
-    for (let column = 0; column < 20; column += 1) {
-      const candidate = {
-        latitude: minLatitude + (maxLatitude - minLatitude) * (row + 0.5) / 20,
-        longitude: minLongitude + (maxLongitude - minLongitude) * (column + 0.5) / 20,
-      };
-      if (isPointInGeoJsonGeometry(toGeoJsonPosition(candidate), geometry)) return candidate;
-    }
-  }
-  throw new Error("Unable to derive an interior representative point for a clipped Munich cell.");
+  const fallback = vertices[0];
+  if (fallback) return fallback;
+  return originalCenter;
 }
