@@ -32,3 +32,11 @@
   `npx tsc --noEmit`, and `git diff --check` before handoff.
 - Preserve the intentional `meeet` spelling and the repository's strict
   TypeScript settings.
+
+## Deployment boundary
+
+- Before proposing a server change involving deployment, GHCR images, Cloudflare
+  Tunnel, or schedule artifacts, read `docs/application-deployment.md`.
+- The documented Unraid production profile is operator-owned and distinct from
+  the tracked Compose template; do not overwrite it or infer host-specific
+  resource limits.

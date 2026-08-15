@@ -16,29 +16,36 @@ npm run dev
 
 ## Production deployment
 
-The one-server production deployment is exposed only through a remotely managed
-Cloudflare Tunnel. See [docs/application-deployment.md](docs/application-deployment.md)
-for pinned image setup, MVV artifact rotation, tunnel configuration, smoke
-checks, preflight requirements, and rollback procedures. Production requires
-Docker Engine 28+ (API v1.48+) and Docker Compose v2.33.0+; GHCR publishes
-runner and compiler images for both `linux/amd64` and `linux/arm64`.
-Authenticate to GHCR with a least-privilege read-packages credential, put the
-workflow's digest-pinned `MEEET_IMAGE` and `MEEET_COMPILER_IMAGE` references in
-the ignored env file, then preflight, pull both exact images, verify their
-matching revision labels, and start:
+The live deployment is an operator-owned Unraid Compose project, external to
+this repository, at:
 
-```bash
-npm run deploy:preflight -- deploy/production.env
-docker compose --env-file deploy/production.env -f compose.production.yml pull meeet
-COMPILER_IMAGE="$(node deploy/read-compiler-image.mjs deploy/production.env)"
-docker pull "$COMPILER_IMAGE"
-node deploy/verify-production-images.mjs deploy/production.env
-docker compose --env-file deploy/production.env -f compose.production.yml pull cloudflared
-docker compose --env-file deploy/production.env -f compose.production.yml up -d
+```text
+/boot/config/plugins/compose.manager/projects/meeet
 ```
 
-The server does not build images; use `deploy/read-compiler-image.mjs` for
-compiler runs.
+It has exactly `meeet` and `cloudflared` services. The external runtime `.env`
+contains `TUNNEL_TOKEN`, `MEEET_IMAGE`, and `MEEET_SCHEDULE_HOST_DIR`; the
+schedule directory is `/mnt/user/appdata/meeet/schedule`. There are no host
+ports or local `config.yml`. Cloudflared is
+`cloudflare/cloudflared:latest`, runs `tunnel run`, receives `TUNNEL_TOKEN`, and
+uses the Cloudflare dashboard service `http://meeet:3000`.
+
+The operator selects the runner image tag or digest in the external `.env`. The
+runner and compiler GHCR packages must be public for unauthenticated host
+pulls, or the host may use a machine account with `read:packages`.
+
+The live Compose project does not run a compiler service. Rotate the MVV
+artifact manually with the published compiler image; download the official
+archive and write the manifest plus matching hash-named `.v8.bin` to
+`/mnt/user/appdata/meeet/schedule`, then restart `meeet`. The complete procedure
+is in [docs/application-deployment.md](docs/application-deployment.md).
+
+[`compose.production.yml`](compose.production.yml) remains a separate,
+checked-in hardened repository template. Its strict preflight, token-file
+mounts, template-only image variables, and `/srv`/`/etc/meeet` paths are not
+instructions for the live Unraid profile.
+
+## Application contract
 
 The server accepts only the `meeet-meeting/v3` calculation contract. A request
 contains two transit Participants, Munich origins, a whole-second
@@ -51,19 +58,17 @@ walk navigation, or individual MVG journey/route calls.
 
 ## Schedule artifact
 
-Compile the canonical MVV archive offline or explicitly as a deployment step:
+For local or explicitly controlled compilation:
 
 ```bash
-npm run schedule:compile:mvv -- --input /absolute/path/feed.zip --output /absolute/path/mvv-scheduled-artifact.json
+npm run schedule:compile:mvv -- \
+  --input /absolute/path/mvv-feed.zip \
+  --output /absolute/path/mvv-scheduled-artifact.json
 ```
 
-Set `MEEET_SCHEDULE_ARTIFACT_PATH` to the manifest. Production artifacts must
-be compiled under Node 24. Scheduled calculation admits exactly one
-two-participant request per process and enforces a 90-second deadline
-independently of the framework budget. Configured deployments must declare the
-conservative 4 GiB minimum runtime memory with `MEEET_SCHEDULED_MIN_MEMORY_GIB`.
-Release still requires an external Node 24 two-participant capacity smoke within
-the 90-second budget; the local artifact is not evidence for that gate.
+Production Unraid rotation is a manual one-off compiler run, not a runtime
+Compose service; use the [deployment procedure](docs/application-deployment.md)
+and restart the app after replacing the artifact pair.
 
 ## Validation
 

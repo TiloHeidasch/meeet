@@ -1,188 +1,115 @@
-# Production application deployment
+# Application deployment
 
-This deployment runs the Next standalone server and `cloudflared` on one host.
-There are no published Docker ports and no local Cloudflare config file:
-Cloudflare remotely manages the tunnel hostname and origin routing.
+This document distinguishes the checked-in Compose template from the live
+operator-owned deployment.
 
-## Prerequisites
+## Deployment boundary
 
-- Docker Engine **28 or newer** with API **v1.48 or newer**, and Docker Compose
-  plugin **v2.33.0 or newer**. Compose 2.33+ is required for the explicit egress
-  gateway priority used below. The server pulls prebuilt images; BuildKit is
-  not required on the server.
-- At least **6 GiB physical RAM** on the host, plus disk for the image and MVV
-  artifact. The app itself is capped at 4 GiB and one calculation at a time.
-- A host directory for the MVV manifest/payload and a root-owned,
-  `65532`-group-readable tunnel token file outside Git. Create both before
-  `docker compose config`.
-- A Cloudflare account with permission to create a remotely managed Tunnel and
-  configure its public hostname.
+[`compose.production.yml`](../compose.production.yml) is a hardened repository
+template. It is not the Compose file currently used on Unraid. In particular,
+do not infer the live Unraid secret handling, image variables, resource policy,
+or artifact paths from that template.
 
-## Authenticate and prepare the host
+The live profile is an operator-owned configuration outside this repository:
 
-The publish workflow prints immutable runner and compiler references in its
-job summary. Copy those exact lowercase GHCR `@sha256` references into the
-ignored env file; do not use `main`, a release tag, or `latest` as a deployment
-identity:
+- Unraid project directory: `/boot/config/plugins/compose.manager/projects/meeet`.
+- The runtime Compose project has exactly two services: `meeet` and
+  `cloudflared`.
+- Its runtime `.env` has exactly these deployment values:
 
-The workflow publishes both the runner and compiler images for
-`linux/amd64` and `linux/arm64`.
+  ```dotenv
+  TUNNEL_TOKEN=<Cloudflare tunnel token>
+  MEEET_IMAGE=ghcr.io/tiloheidasch/meeet:sha-<runner-commit>
+  MEEET_SCHEDULE_HOST_DIR=/mnt/user/appdata/meeet/schedule
+  ```
 
-```bash
-cp deploy/production.env.example deploy/production.env
-# Use a machine-account classic PAT with only read:packages; authorize its SSO
-# organization access where applicable. Configure a Docker credential helper
-# first, so login stores credentials outside the repository and env file.
-# GHCR_READ_PACKAGES_USER must be the PAT owner's machine-account login.
-# Keep the token out of command history, deploy/production.env, Compose, and Git.
-read -r -s GHCR_READ_PACKAGES_TOKEN
-printf '%s' "$GHCR_READ_PACKAGES_TOKEN" | docker login ghcr.io \
-  --username "$GHCR_READ_PACKAGES_USER" --password-stdin
-unset GHCR_READ_PACKAGES_TOKEN
-install -d -o 1001 -g 1001 -m 0750 /srv/meeet/artifacts
-install -d -o root -g 65532 -m 0750 /etc/meeet/secrets
-install -o root -g 65532 -m 0440 /path/to/cloudflare-tunnel-token /etc/meeet/secrets/cloudflare-tunnel-token
-```
+  The operator chooses the runner tag or digest in the external Unraid `.env`;
+  it is not stored in this repository.
+- `MEEET_SCHEDULE_HOST_DIR` is bind-mounted read-only into the app at
+  `/opt/meeet/schedule`.
+- There are no published host ports. Both services share the Compose network;
+  Cloudflare reaches the app by the service name `meeet` on port `3000`.
+- The live `cloudflared` image is `cloudflare/cloudflared:latest`. Its command
+  is `tunnel run`, and it receives the tunnel token through `TUNNEL_TOKEN`.
+  There is no token-file mount and no local `config.yml`.
+- In the Cloudflare dashboard, the public hostname's service is
+  `http://meeet:3000`.
+- The runtime Compose project does not include a compiler image or compiler
+  service. CPU, memory, and other resource limits remain Unraid host policy;
+  this profile prescribes none.
 
-The server-side env file requires `MEEET_IMAGE`, `MEEET_COMPILER_IMAGE`,
-`CLOUDFLARED_IMAGE`, `MEEET_SCHEDULE_HOST_DIR`, and
-`CLOUDFLARED_TOKEN_FILE`. The first two must be lowercase
-`ghcr.io/<owner>/<image>@sha256:<64 lowercase hex>` references. The
-Cloudflared image must include a release tag and digest. The package must be
-visible to the server's GHCR identity, or the package must grant that identity
-read access; a private package with no access will fail before startup.
+The tracked template's token-file mounts, `CLOUDFLARED_IMAGE`,
+`CLOUDFLARED_TOKEN_FILE`, `MEEET_COMPILER_IMAGE`, `/srv`, and `/etc/meeet` are
+template-only details and are not requirements for the external Unraid
+deployment. Likewise, the tracked `npm run deploy:preflight` validates that
+repository template; it is not a precondition for the operator-owned Compose
+project.
 
-Do not export any deployment-controlled variables before running the preflight
-or a `docker compose --env-file ...` command: exported shell values override
-`--env-file` values. The preflight fails closed and tells you which names to
-unset, so the env file it validates is the same input Compose will use. Run the
-tracked preflight before any Compose command; it also fails closed on unpinned
-images, relative host paths, an old Compose plugin, or an unavailable Docker
-Engine:
+## Image access
 
-```bash
-npm run deploy:preflight -- deploy/production.env
-```
+The runner package (`ghcr.io/tiloheidasch/meeet`) and artifact-compiler package
+(`ghcr.io/tiloheidasch/meeet-artifact-compiler`) must be pullable by the Unraid
+host. Public GHCR packages permit unauthenticated pulls. If the packages are
+private, authenticate Docker on the host with a machine account granted
+`read:packages` before pulling them.
 
-Pull the exact runner and compiler digests before starting. Pulling by digest
-also makes a missing package or insufficient GHCR permission fail explicitly:
+Use the runner image tag or digest selected by the operator. Changing it or the
+live `cloudflare/cloudflared:latest` image is an external Unraid configuration
+change.
 
-```bash
-docker compose --env-file deploy/production.env -f compose.production.yml pull meeet
-COMPILER_IMAGE="$(node deploy/read-compiler-image.mjs deploy/production.env)"
-docker pull "$COMPILER_IMAGE"
-node deploy/verify-production-images.mjs deploy/production.env
-```
+## MVV artifact rotation
 
-## Compile and rotate the MVV artifact
+The compiler is a manual, one-off artifact rotation. It is not part of the
+runtime Compose project.
 
-Compile with the separately published `MEEET_COMPILER_IMAGE`. It was built
-from the same commit and exact Node 24 digest as the runner, so no Dockerfile
-build or host Node installation is needed on the server:
+1. Before rotating, archive the active manifest and the exact `.v8.bin` payload
+   named by it as one rollback pair. Then ensure
+   `/mnt/user/appdata/meeet/schedule` exists and download the exact official
+   MVV archive:
 
-```bash
-COMPILER_IMAGE="$(node deploy/read-compiler-image.mjs deploy/production.env)"
-docker run --rm --read-only --tmpfs /tmp:rw,noexec,nosuid,nodev,size=1g \
-  -v "/absolute/path/feed.zip:/input/mvv-feed.zip:ro" \
-  -v /srv/meeet/artifacts:/output \
-  "$COMPILER_IMAGE" \
-  --input /input/mvv-feed.zip \
-  --output /output/mvv-scheduled-artifact.json
-```
+   ```bash
+   mkdir -p /mnt/user/appdata/meeet/schedule
+   curl --fail --location --retry 3 \
+     'https://www.mvv-muenchen.de/fileadmin/mediapool/developer/opendata/gesamt_gtfs.zip' \
+     --output /mnt/user/appdata/meeet/schedule/mvv-feed.zip
+   ```
 
-The compiler writes a Node V8 payload beside the JSON manifest and publishes
-the manifest last. Validate the new manifest and payload before rotation. Keep
-the previous pair for rollback; never edit a payload or manifest in place.
-The running app reads `/opt/meeet/schedule/mvv-scheduled-artifact.json` from a
-read-only bind, and a restart is required to load a rotated artifact.
+2. Select the published compiler image for the desired release. For example,
+   use the matching SHA tag or digest from
+   `ghcr.io/tiloheidasch/meeet-artifact-compiler`, then run it against the
+   host directory:
 
-## Configure the remote tunnel
+   ```bash
+   COMPILER_IMAGE='ghcr.io/tiloheidasch/meeet-artifact-compiler:sha-<compiler-commit>'
+   docker pull "$COMPILER_IMAGE"
+   docker run --rm \
+     --volume /mnt/user/appdata/meeet/schedule/mvv-feed.zip:/input/mvv-feed.zip:ro \
+     --volume /mnt/user/appdata/meeet/schedule:/output \
+     "$COMPILER_IMAGE" \
+     --input /input/mvv-feed.zip \
+     --output /output/mvv-scheduled-artifact.json
+   ```
 
-In Cloudflare Zero Trust, create a **remotely managed** Tunnel, copy its token
-to the host file above, and add a Public Hostname route to service
-`http://meeet:3000`. The tunnel container runs explicitly as UID/GID
-`65532:65532`; the host token is therefore `root:65532` with mode `0440`.
-Compose mounts the secret read-only at `/run/secrets/cloudflare_tunnel_token`;
-the token is never placed in the env file, service environment, or Git. The
-tunnel container is attached to the private `origin` network, so this service
-name is available without exposing a host port. Do not add a local `config.yml`;
-hostname routing is managed in the Cloudflare dashboard. Optionally add
-Cloudflare Access, WAF rules, and rate limits before publishing the hostname.
+   The output directory must contain
+   `mvv-scheduled-artifact.json` and its matching hash-named `.v8.bin` payload.
+   Keep the pair together; do not rename or edit the payload manually.
+3. Restart `meeet` from the Unraid Compose Manager (or the external Compose
+   project) after the pair has been rotated so the new schedule is loaded.
 
-## Start, stop, and rollback
+The app reads the manifest from the read-only `/opt/meeet/schedule` mount.
+Schedule compilation and rotation do not require adding a service to the live
+Compose file.
 
-Check interpolation and the Compose model before starting. The tunnel waits for
-the app's `/api/health/ready` healthcheck. There is no local build step:
+## Local and repository-template operations
+
+For local work, the artifact compiler can also be run with:
 
 ```bash
-npm run deploy:preflight -- deploy/production.env
-docker compose --env-file deploy/production.env -f compose.production.yml config --quiet
-docker compose --env-file deploy/production.env -f compose.production.yml pull cloudflared
-node deploy/verify-production-images.mjs deploy/production.env
-docker compose --env-file deploy/production.env -f compose.production.yml up -d
-docker compose --env-file deploy/production.env -f compose.production.yml ps
+npm run schedule:compile:mvv -- \
+  --input /absolute/path/mvv-feed.zip \
+  --output /absolute/path/mvv-scheduled-artifact.json
 ```
 
-The app readiness check allows the first load of the roughly 892 MiB schedule
-artifact: `start_period` 180 seconds, `interval` 30 seconds, `timeout` 10
-seconds, and 5 retries. Each service's public egress attachment has
-`gw_priority: 1`; the private `origin` network is only the tunnel-to-app link
-and must not become the default route.
-
-Stop without deleting the bind-mounted artifact or secret:
-
-```bash
-docker compose --env-file deploy/production.env -f compose.production.yml stop
-```
-
-Rollback does not stop the healthy stack first. Replace `MEEET_IMAGE` and
-`MEEET_COMPILER_IMAGE` in the ignored env file with the previous published
-digests, then pull and verify both images while the current app remains live:
-
-```bash
-npm run deploy:preflight -- deploy/production.env
-docker compose --env-file deploy/production.env -f compose.production.yml pull meeet
-COMPILER_IMAGE="$(node deploy/read-compiler-image.mjs deploy/production.env)"
-docker pull "$COMPILER_IMAGE"
-node deploy/verify-production-images.mjs deploy/production.env
-docker compose --env-file deploy/production.env -f compose.production.yml pull cloudflared
-docker compose --env-file deploy/production.env -f compose.production.yml up -d --force-recreate
-```
-
-The immutable runner digest changes the running app only at the final
-`--force-recreate`; the old app remains healthy during authentication, pulls,
-and label verification. Do not use `down -v`: the deployment intentionally has
-no disposable data volume, and the host-side artifact and secret must remain
-under operator control.
-
-## Production smoke and resource checks
-
-After the tunnel hostname is live, verify the readiness URL and submit two
-sequential valid `meeet-meeting/v3` two-transit-participant requests. Each must
-complete successfully in under 90 seconds. While the first request is active,
-submit a second request concurrently; it must receive HTTP `503`, proving the
-single admission gate rather than queueing work.
-
-Also check the container health state and limits:
-
-```bash
-docker compose --env-file deploy/production.env -f compose.production.yml ps
-docker inspect "$(docker compose --env-file deploy/production.env -f compose.production.yml ps -q meeet)" \
-  --format '{{json .State.Health}}'
-docker stats --no-stream "$(docker compose --env-file deploy/production.env -f compose.production.yml ps -q meeet)"
-docker compose --env-file deploy/production.env -f compose.production.yml exec -T meeet \
-  node -e 'const fs=require("node:fs"); fs.writeFileSync("/tmp/write-test", "ok"); try { fs.writeFileSync("/app/write-test", "no"); process.exit(1); } catch { process.exit(0); }'
-```
-
-The check covers readiness, the read-only root filesystem, and observed resource
-usage. Confirm that only `origin`, `meeet-egress`, and `cloudflared-egress`
-networks exist for this project and that `docker compose port meeet 3000` is
-empty.
-
-## Local limitations
-
-Local static checks cannot prove GHCR package visibility or server token scope,
-the Cloudflare edge hostname, remotely managed route, DNS/TLS behavior,
-Access/WAF/rate limits, or tunnel egress. They also do not replace the release
-smoke with the full production artifact, at least 6 GiB physical RAM, real MVG
-access, and measured sequential/concurrent requests.
+Any commands that reference `compose.production.yml`, the repository
+preflight, or its template-specific secret and artifact paths apply only to the
+checked-in template. They must not be presented as the live Unraid procedure.
