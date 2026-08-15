@@ -605,6 +605,59 @@ test("routing persists the fastest destination boarding-stop identity with a det
   assert.equal(destinationStop?.elapsedSeconds, 10 * 60);
 });
 
+test("equal-time fastest boarding stops use the scheduled stop-ID tie-break for station-area candidates", () => {
+  const equalReadyBoardingStopsFiles: GtfsFeedFiles = {
+    ...FIXTURE_FILES,
+    "stops.txt": [
+      "stop_id,stop_name,stop_lat,stop_lon,location_type,parent_station",
+      "station-a,Station A,48.1000,11.5000,1,",
+      "a-1,Station A platform,48.1000,11.5000,0,station-a",
+      "station-b,Station B,48.1000,11.5100,1,",
+      "b-z,Station B platform Z,48.1000,11.5100,0,station-b",
+      "b-a,Station B platform A,48.1000,11.5100,0,station-b",
+    ].join("\n"),
+    "trips.txt": [
+      "route_id,service_id,trip_id",
+      "red,weekday,z-arrival",
+      "blue,weekday,a-arrival",
+    ].join("\n"),
+    "stop_times.txt": [
+      "trip_id,arrival_time,departure_time,stop_id,stop_sequence",
+      "z-arrival,08:10:00,08:10:00,a-1,1",
+      "z-arrival,08:15:00,08:15:00,b-z,2",
+      "a-arrival,08:10:00,08:10:00,a-1,1",
+      "a-arrival,08:15:00,08:15:00,b-a,2",
+    ].join("\n"),
+  };
+  const schedule = importFixtureFiles(equalReadyBoardingStopsFiles);
+  const result = calculateScheduledSurface({
+    schedule,
+    accessSeedSets: [
+      [{ stationAreaId: "station-a", accessSeconds: 0 }],
+      [{ stationAreaId: "station-a", accessSeconds: 0 }],
+    ],
+    searchStartAt: SEARCH_START,
+    selectedTolerancePercent: 10,
+    cells: [],
+    walkingVelocityMetersPerSecond: 10,
+    transferRadiusMeters: 100,
+  });
+
+  for (const participant of result.participants) {
+    assert.deepEqual(
+      participant.boardingStopArrivals
+        .filter((arrival) => arrival.boardingStopId === "b-a" || arrival.boardingStopId === "b-z")
+        .map((arrival) => [arrival.boardingStopId, arrival.elapsedSeconds]),
+      [["b-a", 10 * 60], ["b-z", 10 * 60]],
+    );
+  }
+  const stationB = result.stationAreas.find((candidate) => candidate.stationAreaId === "station-b");
+  assert.deepEqual(
+    [stationB?.redBoardingStopId, stationB?.blueBoardingStopId, stationB?.redArrivalSeconds, stationB?.blueArrivalSeconds],
+    ["b-a", "b-a", 10 * 60, 10 * 60],
+  );
+});
+
 test("surface evaluates the disclosed representative point rather than an outside rectangular center", () => {
   const schedule = fixture();
   const result = calculateScheduledSurface({

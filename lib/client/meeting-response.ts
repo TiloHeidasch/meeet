@@ -1,5 +1,7 @@
-// This module is deliberately independent of the server validator.  Keep it
-// free of runtime imports: it is part of the browser trust boundary.
+// This module is deliberately independent of the server validator. Its only
+// runtime asset is the public Munich boundary geometry; server validators,
+// schedule artifacts, provider data, and credentials must stay out of it.
+import boundaryAsset from "../../data/official/munich-districts.json";
 import type {
   ScheduledMeetingCellDto as MeetingCell,
   ScheduledMeetingRequest as MeetingRequest,
@@ -33,6 +35,9 @@ const nullableWhole = (value: unknown): value is number | null => value === null
 const date = (value: unknown): value is string => typeof value === "string" && /^\d{4}-\d{2}-\d{2}$/.test(value);
 const instant = (value: unknown): value is string => typeof value === "string" && /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.0+)?(?:Z|[+-]\d{2}:\d{2})$/.test(value) && Number.isFinite(Date.parse(value));
 const coordinate = (value: unknown): value is { latitude: number; longitude: number } => object(value) && typeof value.latitude === "number" && Number.isFinite(value.latitude) && value.latitude >= -90 && value.latitude <= 90 && typeof value.longitude === "number" && Number.isFinite(value.longitude) && value.longitude >= -180 && value.longitude <= 180;
+type BoundaryGeometry = { readonly type: "MultiPolygon"; readonly coordinates: readonly (readonly (readonly (readonly [number, number])[])[])[] };
+const officialBoundary = boundaryAsset as unknown as { readonly features: readonly { readonly geometry: BoundaryGeometry }[] };
+const insideOfficialMunichBoundary = (value: unknown): boolean => coordinate(value) && officialBoundary.features.some(({ geometry }) => geometry.coordinates.some((polygon) => polygon.length > 0 && ringRelation(value, polygon[0] as unknown[]) !== -1 && polygon.slice(1).every((hole) => ringRelation(value, hole as unknown[]) === -1)));
 
 function ringRelation(point: { latitude: number; longitude: number }, ring: unknown[]): -1 | 0 | 1 {
   let inside = false;
@@ -163,7 +168,7 @@ function stationArea(value: unknown, index: number, status: unknown, tolerance: 
   if (!object(value)) { fail(issues, path, "Station area must be an object."); return false; }
   keys(value, ["stationAreaId", "name", "coordinate", "redBoardingStopId", "blueBoardingStopId", "classification", "redArrivalSeconds", "blueArrivalSeconds", "fasterParticipant", "withinSelectedTolerance"], path, issues);
   if (object(value.coordinate)) keys(value.coordinate, ["latitude", "longitude"], [...path, "coordinate"], issues);
-  const valid = nonEmpty(value.stationAreaId) && nonEmpty(value.name) && coordinate(value.coordinate) && (value.redBoardingStopId === null || nonEmpty(value.redBoardingStopId)) && (value.blueBoardingStopId === null || nonEmpty(value.blueBoardingStopId)) && ["red", "blue", "fair", "unclassified"].includes(String(value.classification)) && nullableWhole(value.redArrivalSeconds) && nullableWhole(value.blueArrivalSeconds) && (value.redBoardingStopId === null) === (value.redArrivalSeconds === null) && (value.blueBoardingStopId === null) === (value.blueArrivalSeconds === null) && (value.fasterParticipant === null || value.fasterParticipant === "red" || value.fasterParticipant === "blue") && typeof value.withinSelectedTolerance === "boolean";
+  const valid = nonEmpty(value.stationAreaId) && nonEmpty(value.name) && insideOfficialMunichBoundary(value.coordinate) && (value.redBoardingStopId === null || nonEmpty(value.redBoardingStopId)) && (value.blueBoardingStopId === null || nonEmpty(value.blueBoardingStopId)) && ["red", "blue", "fair", "unclassified"].includes(String(value.classification)) && nullableWhole(value.redArrivalSeconds) && nullableWhole(value.blueArrivalSeconds) && (value.redBoardingStopId === null) === (value.redArrivalSeconds === null) && (value.blueBoardingStopId === null) === (value.blueArrivalSeconds === null) && (value.fasterParticipant === null || value.fasterParticipant === "red" || value.fasterParticipant === "blue") && typeof value.withinSelectedTolerance === "boolean";
   const red = value.redArrivalSeconds; const blue = value.blueArrivalSeconds;
   if (status === "no-result" && (value.classification !== "unclassified" || value.redBoardingStopId !== null || value.blueBoardingStopId !== null || red !== null || blue !== null || value.fasterParticipant !== null || value.withinSelectedTolerance !== false)) fail(issues, path, "No-result station areas must be unclassified and have no boarding stops or travel fields.");
   if (status === "ok" && nullableWhole(red) && nullableWhole(blue)) { const hasRed = red !== null; const hasBlue = blue !== null; const fair = hasRed && hasBlue && Math.abs(red - blue) * 100 <= (red + blue) * Number(tolerance); const expected = !hasRed && !hasBlue ? "unclassified" : fair ? "fair" : hasRed && hasBlue ? red! < blue! ? "red" : "blue" : hasRed ? "red" : "blue"; const faster = !hasRed && !hasBlue ? null : hasRed && hasBlue && red === blue ? null : hasRed && hasBlue ? red! < blue! ? "red" : "blue" : hasRed ? "red" : "blue"; const expectedTolerance = !hasRed && !hasBlue ? false : fair; if (value.classification !== expected || value.withinSelectedTolerance !== expectedTolerance || value.fasterParticipant !== faster) fail(issues, path, "Station area classification contradicts arrivals."); }
@@ -188,7 +193,13 @@ export function validateMeetingResponse(value: unknown, request: MeetingRequest)
   const metadataValue = value.metadata;
   if (Array.isArray(cells)) { const tolerance = object(metadataValue) && object(metadataValue.surface) ? metadataValue.surface.selectedTolerancePercent : undefined; cells.forEach((item, i) => cell(item, i, value.status, tolerance, issues)); }
   metadata(metadataValue, request, participants, Array.isArray(cells) ? cells : [], Array.isArray(stationAreas) ? stationAreas : [], issues);
-  if (value.status === "no-result" && value.reason === "no-access-seeds" && object(metadataValue) && object(metadataValue.surface) && Array.isArray(metadataValue.surface.accessSeedCounts) && !metadataValue.surface.accessSeedCounts.some((count) => count === 0)) fail(issues, ["reason"], "no-access-seeds requires an empty participant access-seed set.");
+  if (value.status === "no-result" && object(metadataValue) && object(metadataValue.surface) && Array.isArray(metadataValue.surface.accessSeedCounts) && Array.isArray(participants)) {
+    const counts = metadataValue.surface.accessSeedCounts;
+    const empty = counts.length === 2 && counts.some((count) => count === 0) && participants.length === 2 && participants.some((item) => object(item) && Array.isArray(item.accessSeeds) && item.accessSeeds.length === 0);
+    const reachable = counts.length === 2 && counts.every((count) => whole(count) && count > 0) && participants.length === 2 && participants.every((item) => object(item) && Array.isArray(item.accessSeeds) && item.accessSeeds.length > 0);
+    if (value.reason === "no-access-seeds" && !empty) fail(issues, ["reason"], "no-access-seeds requires at least one participant access-seed set to be empty.");
+    if (value.reason === "no-reachable-stations" && !reachable) fail(issues, ["reason"], "no-reachable-stations requires both participant access-seed sets to be non-empty.");
+  }
   if (issues.length || !isParsedResponse(value)) return { success: false, issues: issues.length ? issues : [{ path: [], message: "The response structure is invalid." }] };
   return { success: true, data: value };
 }

@@ -58,10 +58,16 @@ test("client adapter rejects station-area tampering and count mismatches", () =>
   const pair = response();
   (pair.stationAreas as Array<Record<string, unknown>>)[0]!.redBoardingStopId = null;
   assert.equal(validateMeetingResponse(pair, request).success, false);
+  const outsideBoundary = response();
+  (outsideBoundary.stationAreas as Array<Record<string, unknown>>)[0]!.coordinate = { latitude: 49, longitude: 11.576 };
+  assert.equal(validateMeetingResponse(outsideBoundary, request).success, false);
+  const outsideGeometry = response();
+  (outsideGeometry.stationAreas as Array<Record<string, unknown>>)[0]!.coordinate = { latitude: 48.2, longitude: 11.7 };
+  assert.equal(validateMeetingResponse(outsideGeometry, request).success, false);
 });
 
 test("client adapter accepts unclassified station areas in a no-result response", () => {
-  const payload = response({ status: "no-result", reason: "no-reachable-stations" });
+  const payload = response({ status: "no-result", reason: "no-access-seeds" });
   (payload.cells as Array<Record<string, unknown>>)[0] = { ...(payload.cells as Array<Record<string, unknown>>)[0], classification: "unclassified", redArrivalSeconds: null, blueArrivalSeconds: null, fasterParticipant: null, withinSelectedTolerance: false };
   const area = (payload.stationAreas as Array<Record<string, unknown>>)[0]!;
   area.classification = "unclassified";
@@ -91,6 +97,21 @@ test("client adapter binds no-access-seeds to an empty access-seed count", () =>
   area.classification = "unclassified"; area.redBoardingStopId = null; area.blueBoardingStopId = null; area.redArrivalSeconds = null; area.blueArrivalSeconds = null; area.fasterParticipant = null; area.withinSelectedTolerance = false;
   assert.equal(validateMeetingResponse(payload, request).success, true);
   ((payload.metadata as Record<string, unknown>).surface as Record<string, unknown>).accessSeedCounts = [1, 1];
+  assert.equal(validateMeetingResponse(payload, request).success, false);
+  const partiallyEmpty = response({ status: "no-result", reason: "no-access-seeds" });
+  (partiallyEmpty.cells as Array<Record<string, unknown>>)[0] = { ...(partiallyEmpty.cells as Array<Record<string, unknown>>)[0], classification: "unclassified", redArrivalSeconds: null, blueArrivalSeconds: null, fasterParticipant: null, withinSelectedTolerance: false };
+  const partialArea = (partiallyEmpty.stationAreas as Array<Record<string, unknown>>)[0]!;
+  partialArea.classification = "unclassified"; partialArea.redBoardingStopId = null; partialArea.blueBoardingStopId = null; partialArea.redArrivalSeconds = null; partialArea.blueArrivalSeconds = null; partialArea.fasterParticipant = null; partialArea.withinSelectedTolerance = false;
+  (partiallyEmpty.participants as Array<Record<string, unknown>>)[1]!.accessSeeds = [{ seedId: "seed-2", mvgStationId: "station-2", stationAreaId: "station-area-2", boardingStopId: "stop-2", coordinate: { latitude: 48.137, longitude: 11.576 }, accessSeconds: 120, provenance: { source: "fixture-static", endpoint: "fixture", distanceMeters: 100, walkingSeconds: 120, note: "fixture" } }];
+  ((partiallyEmpty.metadata as Record<string, unknown>).surface as Record<string, unknown>).accessSeedCounts = [0, 1];
+  assert.equal(validateMeetingResponse(partiallyEmpty, request).success, true);
+});
+
+test("client adapter requires access seeds for no-reachable-stations", () => {
+  const payload = response({ status: "no-result", reason: "no-reachable-stations" });
+  (payload.cells as Array<Record<string, unknown>>)[0] = { ...(payload.cells as Array<Record<string, unknown>>)[0], classification: "unclassified", redArrivalSeconds: null, blueArrivalSeconds: null, fasterParticipant: null, withinSelectedTolerance: false };
+  const area = (payload.stationAreas as Array<Record<string, unknown>>)[0]!;
+  area.classification = "unclassified"; area.redBoardingStopId = null; area.blueBoardingStopId = null; area.redArrivalSeconds = null; area.blueArrivalSeconds = null; area.fasterParticipant = null; area.withinSelectedTolerance = false;
   assert.equal(validateMeetingResponse(payload, request).success, false);
 });
 
