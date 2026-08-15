@@ -14,19 +14,20 @@ const request: MeetingRequest = {
 
 function response(overrides: Record<string, unknown> = {}): Record<string, unknown> {
   const cell = { id: "cell-1", geometry: { type: "MultiPolygon", coordinates: [[[[11.57, 48.13], [11.58, 48.13], [11.58, 48.14], [11.57, 48.14], [11.57, 48.13]]]] }, representativePoint: { latitude: 48.135, longitude: 11.575 }, classification: "fair", redArrivalSeconds: 600, blueArrivalSeconds: 660, fasterParticipant: "red", withinSelectedTolerance: true };
+  const stationArea = { stationAreaId: "station-area-1", name: "Marienplatz", coordinate: { latitude: 48.137, longitude: 11.576 }, redBoardingStopId: "red-stop", blueBoardingStopId: "blue-stop", classification: "fair", redArrivalSeconds: 600, blueArrivalSeconds: 660, fasterParticipant: "red", withinSelectedTolerance: true };
   return {
     contractVersion: "meeet-meeting/v3", status: "ok", reason: null,
     participants: [
       { id: "participant-1", color: "red", mode: "transit", origin: request.participants[0].origin, accessSeeds: [] },
       { id: "participant-2", color: "blue", mode: "transit", origin: request.participants[1].origin, accessSeeds: [] },
     ],
-    cells: [cell],
+    cells: [cell], stationAreas: [stationArea],
     metadata: {
       schedule: { contractVersion: "meeet-scheduled-routing/v1", feedId: "fixture", timeZone: "Europe/Berlin", scheduleContentHash: "a".repeat(64), compiledArtifactId: "c".repeat(64), serviceDateRange: { firstDate: "2026-08-01", lastDate: "2026-08-31" }, acquisition: { sourceUrl: "https://example.test/feed.zip", retrievedAt: "2026-08-01T00:00:00Z", rawArchiveByteSize: 1, rawArchiveSha256: "b".repeat(64), feedVersion: "fixture", feedValidFrom: "2026-08-01", feedValidUntil: "2026-08-31", attribution: "Fixture", officialAttribution: "MVV", officialLicense: { name: "CC BY 4.0", url: "https://creativecommons.org/licenses/by/4.0/" }, officialProvenance: { source: "feed", policyId: null } } },
       surface: { contractVersion: "meeet-scheduled-routing/v1", searchStartAt: request.searchStartAt, selectedTolerancePercent: request.tolerancePercent, scheduleContentHash: "a".repeat(64), compiledArtifactId: "c".repeat(64), feedId: "fixture", timeZone: "Europe/Berlin", routingHorizonSeconds: 86400, walkingVelocityMetersPerSecond: 1.4, walkingSecondsRoundingRule: "ceil(distanceMetres / velocityMetresPerSecond), with zero distance taking zero seconds", transferRadiusMeters: 100, accessSeedCounts: [0, 0], stationAreaCount: 1, boardingStopCount: 1, connectionCount: 1, coverage: "scheduled-service-day-local-radius/v1", representativePointBasis: "inside-clipped-cell/v1", classificationMethod: "representative-point-with-geometric-final-station-walking/v1", classificationBasis: "representative-point", finalWalkingMethod: "geometric-station-walking-estimate-not-navigation" },
       grid: { columns: 24, rows: 16, cellCount: 1, geometry: "munich-clipped-surface-grid/v1" },
       accessProvider: { name: "fixture", deployment: "fixture", dataKind: "demo-static", liveData: false, asOf: "fixture", notes: "fixture", provenance: { role: "access", provider: "fixture", deployment: "fixture", dataKind: "demo-static", liveData: false, sourceUrl: null, license: null, attribution: "fixture", version: "fixture", retrievedAt: "fixture", notes: "fixture", feeds: null } },
-      coverage: "munich-clipped-scheduled-grid/v1",
+      stationAreas: { count: 1, coverage: "official-munich-boundary-with-connected-artifact-boarding-stops/v1", selection: "all-eligible-scheduled-station-areas/v1" }, coverage: "munich-clipped-scheduled-grid/v1",
     },
     ...overrides,
   };
@@ -44,6 +45,52 @@ test("client adapter accepts a complete independent v3 response", () => {
 test("client adapter rejects a cell whose classification contradicts arrivals", () => {
   const payload = response();
   (payload.cells as Array<Record<string, unknown>>)[0].classification = "red";
+  assert.equal(validateMeetingResponse(payload, request).success, false);
+});
+
+test("client adapter rejects station-area tampering and count mismatches", () => {
+  const payload = response();
+  (payload.stationAreas as Array<Record<string, unknown>>)[0]!.classification = "red";
+  assert.equal(validateMeetingResponse(payload, request).success, false);
+  const count = response();
+  (((count.metadata as Record<string, unknown>).stationAreas as Record<string, unknown>).count as number) = 2;
+  assert.equal(validateMeetingResponse(count, request).success, false);
+  const pair = response();
+  (pair.stationAreas as Array<Record<string, unknown>>)[0]!.redBoardingStopId = null;
+  assert.equal(validateMeetingResponse(pair, request).success, false);
+});
+
+test("client adapter accepts unclassified station areas in a no-result response", () => {
+  const payload = response({ status: "no-result", reason: "no-reachable-stations" });
+  (payload.cells as Array<Record<string, unknown>>)[0] = { ...(payload.cells as Array<Record<string, unknown>>)[0], classification: "unclassified", redArrivalSeconds: null, blueArrivalSeconds: null, fasterParticipant: null, withinSelectedTolerance: false };
+  const area = (payload.stationAreas as Array<Record<string, unknown>>)[0]!;
+  area.classification = "unclassified";
+  area.redBoardingStopId = null;
+  area.blueBoardingStopId = null;
+  area.redArrivalSeconds = null;
+  area.blueArrivalSeconds = null;
+  area.fasterParticipant = null;
+  area.withinSelectedTolerance = false;
+  assert.equal(validateMeetingResponse(payload, request).success, true);
+});
+
+test("client adapter rejects an ok station area with no arrivals or an incomplete stop pair", () => {
+  const noArrivals = response();
+  const area = (noArrivals.stationAreas as Array<Record<string, unknown>>)[0]!;
+  area.classification = "red"; area.redBoardingStopId = null; area.blueBoardingStopId = null; area.redArrivalSeconds = null; area.blueArrivalSeconds = null; area.fasterParticipant = null; area.withinSelectedTolerance = false;
+  assert.equal(validateMeetingResponse(noArrivals, request).success, false);
+  const incompletePair = response();
+  (incompletePair.stationAreas as Array<Record<string, unknown>>)[0]!.blueBoardingStopId = null;
+  assert.equal(validateMeetingResponse(incompletePair, request).success, false);
+});
+
+test("client adapter binds no-access-seeds to an empty access-seed count", () => {
+  const payload = response({ status: "no-result", reason: "no-access-seeds" });
+  (payload.cells as Array<Record<string, unknown>>)[0] = { ...(payload.cells as Array<Record<string, unknown>>)[0], classification: "unclassified", redArrivalSeconds: null, blueArrivalSeconds: null, fasterParticipant: null, withinSelectedTolerance: false };
+  const area = (payload.stationAreas as Array<Record<string, unknown>>)[0]!;
+  area.classification = "unclassified"; area.redBoardingStopId = null; area.blueBoardingStopId = null; area.redArrivalSeconds = null; area.blueArrivalSeconds = null; area.fasterParticipant = null; area.withinSelectedTolerance = false;
+  assert.equal(validateMeetingResponse(payload, request).success, true);
+  ((payload.metadata as Record<string, unknown>).surface as Record<string, unknown>).accessSeedCounts = [1, 1];
   assert.equal(validateMeetingResponse(payload, request).success, false);
 });
 

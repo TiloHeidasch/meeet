@@ -188,6 +188,12 @@ export interface StationArrivalField {
   readonly elapsedSeconds: number | null;
 }
 
+export interface BoardingStopArrivalField {
+  readonly boardingStopId: string;
+  readonly arrivalAt: string | null;
+  readonly elapsedSeconds: number | null;
+}
+
 export interface CellArrivalField {
   readonly cellId: string;
   readonly arrivalAt: string | null;
@@ -197,6 +203,7 @@ export interface CellArrivalField {
 export interface ScheduledParticipantSurface {
   readonly participantId: string;
   readonly stationArrivals: readonly StationArrivalField[];
+  readonly boardingStopArrivals: readonly BoardingStopArrivalField[];
   readonly cellArrivals: readonly CellArrivalField[];
 }
 
@@ -209,6 +216,36 @@ export interface ScheduledClassifiedCell {
   readonly blueArrivalSeconds: number | null;
   readonly fasterParticipant: "red" | "blue" | null;
   readonly withinSelectedTolerance: boolean;
+}
+
+export interface ScheduledStationAreaCandidate {
+  readonly stationAreaId: string;
+  readonly name: string;
+  readonly coordinate: ScheduledCoordinate;
+  readonly redBoardingStopId: string | null;
+  readonly blueBoardingStopId: string | null;
+  readonly classification: ScheduledCellClassification;
+  readonly redArrivalSeconds: number | null;
+  readonly blueArrivalSeconds: number | null;
+  readonly fasterParticipant: "red" | "blue" | null;
+  readonly withinSelectedTolerance: boolean;
+}
+
+export interface ScheduledStationAreaCatalogEntry {
+  readonly stationAreaId: string;
+  readonly name: string;
+  readonly coordinate: ScheduledCoordinate;
+  readonly eligibleBoardingStopIds: readonly string[];
+}
+
+export interface ScheduledStationAreaCatalog {
+  readonly entries: readonly ScheduledStationAreaCatalogEntry[];
+}
+
+export interface ScheduledStationAreaMetadata {
+  readonly count: number;
+  readonly coverage: "official-munich-boundary-with-connected-artifact-boarding-stops/v1";
+  readonly selection: "all-eligible-scheduled-station-areas/v1";
 }
 
 export interface ScheduledSurfaceMetadata {
@@ -236,6 +273,7 @@ export interface ScheduledSurfaceResult {
   readonly reason: "no-access-seeds" | "no-reachable-stations" | null;
   readonly participants: readonly [ScheduledParticipantSurface, ScheduledParticipantSurface];
   readonly cells: readonly ScheduledClassifiedCell[];
+  readonly stationAreas: readonly ScheduledStationAreaCandidate[];
   readonly metadata: ScheduledSurfaceMetadata;
 }
 
@@ -260,6 +298,7 @@ export interface ScheduledRoutingOptions {
 
 export interface ScheduledRoutingResult {
   readonly stationArrivals: readonly StationArrivalField[];
+  readonly boardingStopArrivals: readonly BoardingStopArrivalField[];
   readonly reachableStationAreaCount: number;
   readonly searchStartAt: string;
   readonly searchStartEpochSeconds: number;

@@ -13,13 +13,26 @@ station areas, boarding stop points, calendars, exceptions, planned
 connections, timezone rules, and provenance. No realtime, POI, pedestrian
 navigation, or individual MVG journey is used to establish the surface.
 
-For each Participant, the scheduled router returns station-area arrival
-fields. Each Munich-clipped grid cell is evaluated at its center using a
-geometric final station-to-center walking estimate. A cell is fair when both
-elapsed planned arrivals satisfy the selected tolerance; otherwise it is red
-or blue according to the faster Participant. If neither side is reachable the
-cell is unclassified. A no-result response is explicit and contains only
-unclassified cells.
+For each Participant, the scheduled router returns station-area arrival fields
+for the grid and final ready fields for every boarding stop. Station-area
+arrival fields do not claim a boarding-stop identity; station-area markers
+select the fastest eligible boarding-stop ready field with a deterministic tie
+break. The current meeting surface remains the Munich-clipped grid: each cell
+is evaluated at its center using a geometric final station-to-center walking
+estimate. A cell is fair when both elapsed planned arrivals satisfy the
+selected tolerance; otherwise it is red or blue according to the faster
+Participant. If neither side is reachable the cell is unclassified.
+
+The v3 response also exposes one station-area meeting-place candidate for
+every canonical station area whose coordinate is inside the official Munich
+boundary and which has at least one child boarding stop inside that boundary
+participating in an imported scheduled connection. The shared-window CSA scan
+retains each boarding stop's final ready time; a marker selects the fastest
+eligible ready stop, breaking ties by scheduled stop ID. These markers use
+boarding-stop readiness (not MVG routes), retain the selected red and blue
+boarding-stop identities, and apply the same classification rules. A
+no-result response is explicit and contains only unclassified cells and
+station-area candidates.
 
 ## Consequences
 
@@ -29,6 +42,8 @@ unclassified cells.
   tolerance, and seed counts are cross-bound in the response validator.
 - The surface is a bounded planned-time approximation: cell-center final
   walking is disclosed as geometric estimation, not navigation.
+- The grid remains the current surface; station-area markers are the added
+  meeting-place candidates.
 - A selected tolerance is never escalated.
 - Munich clipping and station-area/boarding-stop identity are enforced by the
   server contract.

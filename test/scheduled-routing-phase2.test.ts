@@ -29,11 +29,13 @@ import { MvgScheduledAccessSeedProvider } from "../lib/providers/mvg-scheduled-a
 import { handleMeetingPost } from "../lib/domain/meeting-api.ts";
 import { fixtureProviders } from "../lib/fixtures/providers.ts";
 import type { MeetingProviders } from "../lib/domain/providers.ts";
-import { compareScheduledIds, type GtfsFeedFiles } from "../lib/domain/scheduled-routing/gtfs.ts";
+import { compareScheduledIds, importGtfsSchedule, type GtfsFeedFiles } from "../lib/domain/scheduled-routing/gtfs.ts";
 import { createScheduledSurfaceGrid } from "../lib/domain/scheduled-routing/grid.ts";
+import { buildScheduledStationAreaCatalog } from "../lib/domain/scheduled-routing/surface.ts";
 import { createMeetingProviders } from "../lib/providers/factory.ts";
 import { MVG_NEARBY_URL } from "../lib/providers/mvg-constants.ts";
 import { ScheduledCalculationDeadlineError } from "../lib/domain/scheduled-admission.ts";
+import type { ScheduledAccessSeedCandidate, ScheduledAccessSeedRequest } from "../lib/domain/providers.ts";
 
 const V3_REQUEST = {
   contractVersion: "meeet-meeting/v3",
@@ -87,19 +89,97 @@ async function validScheduledResponse(): Promise<ScheduledMeetingResponseDto> {
 }
 
 interface MutableResponseShape {
-  readonly status: string;
-  readonly reason: string | null;
-  readonly participants: Array<{ readonly accessSeeds: Array<Record<string, unknown>> }>;
+  status: string;
+  reason: string | null;
+  readonly participants: Array<{ id: string; origin: Record<string, unknown>; readonly accessSeeds: Array<Record<string, unknown>> }>;
   readonly cells: Array<Record<string, unknown>>;
+  readonly stationAreas: Array<Record<string, unknown>>;
   readonly metadata: {
     readonly schedule: Record<string, unknown>;
     readonly surface: Record<string, unknown>;
+    readonly stationAreas: Record<string, unknown>;
     readonly accessProvider: Record<string, unknown>;
   };
 }
 
 function mutableResponse(response: ScheduledMeetingResponseDto): MutableResponseShape {
   return JSON.parse(JSON.stringify(response)) as MutableResponseShape;
+}
+
+function stationAreaMeetingFeedFiles(): GtfsFeedFiles {
+  return {
+    "agency.txt": "agency_id,agency_name,agency_url,agency_timezone\nfixture,Fixture,https://example.test,Europe/Berlin",
+    "routes.txt": "route_id,route_short_name,route_long_name,route_type\nred,R,Red,3\nblue,B,Blue,3",
+    "stops.txt": [
+      "stop_id,stop_name,stop_lat,stop_lon,location_type,parent_station",
+      "red-area,Red area,48.1374,11.5755,1,",
+      "a-slow,Red slow platform,48.1374,11.5800,0,red-area",
+      "z-fast,Red fast platform,48.1374,11.5755,0,red-area",
+      "fair-area,Fair area,48.1380,11.5760,1,",
+      "fair-stop,Fair platform,48.1380,11.5760,0,fair-area",
+      "blue-area,Blue area,48.1390,11.5770,1,",
+      "blue-stop,Blue platform,48.1390,11.5770,0,blue-area",
+      "unserved-area,Unserved area,48.1000,11.5000,1,",
+      "unserved-stop,Unserved platform,48.1000,11.5000,0,unserved-area",
+      "unserved-stop-2,Unserved platform 2,48.1000,11.5001,0,unserved-area",
+      "disconnected-area,Disconnected area,48.1010,11.5010,1,",
+      "disconnected-stop,Disconnected platform,48.1010,11.5010,0,disconnected-area",
+      "outside-stop-area,Outside-stop area,48.1020,11.5020,1,",
+      "outside-child-stop,Outside platform,48.5000,11.5000,0,outside-stop-area",
+      "outside-child-stop-2,Outside platform 2,48.5000,11.5001,0,outside-stop-area",
+      "outside-area,Outside area,48.5000,11.5000,1,",
+      "outside-stop,Outside platform,48.5000,11.5000,0,outside-area",
+    ].join("\n"),
+    "trips.txt": "route_id,service_id,trip_id,trip_headsign\nred,fixture-service,red-trip,Fair and blue\nblue,fixture-service,blue-trip,Fair\nred,fixture-service,slow-trip,Slow and fair\nred,fixture-service,unserved-trip,Unserved\nred,fixture-service,outside-stop-trip,Outside",
+    "stop_times.txt": [
+      "trip_id,arrival_time,departure_time,stop_id,stop_sequence,pickup_type,drop_off_type",
+      "red-trip,08:10:00,08:10:00,z-fast,1,0,0",
+      "red-trip,08:20:00,08:20:00,fair-stop,2,0,0",
+      "red-trip,08:35:00,08:35:00,blue-stop,3,0,0",
+      "blue-trip,08:10:00,08:10:00,blue-stop,1,0,0",
+      "blue-trip,08:20:00,08:20:00,fair-stop,2,0,0",
+      "unserved-trip,08:10:00,08:10:00,unserved-stop,1,0,0",
+      "unserved-trip,08:20:00,08:20:00,unserved-stop-2,2,0,0",
+      "slow-trip,08:10:00,08:10:00,a-slow,1,0,0",
+      "slow-trip,08:20:00,08:20:00,fair-stop,2,0,0",
+      "outside-stop-trip,08:10:00,08:10:00,outside-child-stop,1,0,0",
+      "outside-stop-trip,08:20:00,08:20:00,outside-child-stop-2,2,0,0",
+    ].join("\n"),
+    "calendar.txt": "service_id,monday,tuesday,wednesday,thursday,friday,saturday,sunday,start_date,end_date\nfixture-service,1,1,1,1,1,1,1,20260801,20260831",
+  };
+}
+
+function stationAreaMeetingArtifact() {
+  return importGtfsSchedule(stationAreaMeetingFeedFiles(), {
+    feedId: "station-area-meeting-feed",
+    acquisition: FIXTURE_SCHEDULED_ARTIFACT.provenance.acquisition,
+  });
+}
+
+function stationAreaMeetingAccessProvider(empty = false) {
+  return {
+    ...FIXTURE_SCHEDULED_ACCESS_PROVIDER,
+    async resolveAccessSeeds(request: ScheduledAccessSeedRequest): Promise<readonly ScheduledAccessSeedCandidate[]> {
+      if (empty) return [];
+      const stationAreaId = request.origin.latitude < 48.139 ? "red-area" : "blue-area";
+      const area = request.schedule.stationAreas.find((candidate) => candidate.id === stationAreaId);
+      if (area === undefined) throw new Error(`Missing ${stationAreaId}`);
+      return [{
+        seedId: `fixture-access:${stationAreaId}`,
+        mvgStationId: stationAreaId,
+        stationAreaId,
+        coordinate: area.coordinate,
+        accessSeconds: 0,
+        provenance: {
+          source: "fixture-static",
+          endpoint: "fixture-static",
+          distanceMeters: 0,
+          walkingSeconds: 0,
+          note: "No upstream service was contacted.",
+        },
+      }];
+    },
+  };
 }
 
 test("compiler and loader retain raw acquisition provenance and reject malformed or stale artifacts", async () => {
@@ -468,6 +548,78 @@ test("v3 validation is strict and scheduled orchestration emits only the v3 surf
   assert.equal(parseScheduledMeetingRequest({ ...V3_REQUEST, arrivalAt: V3_REQUEST.searchStartAt }).success, false);
 });
 
+test("scheduled meeting emits every eligible Munich station area with derived classifications and fails closed on station-area tampering", async () => {
+  const parsed = parseScheduledMeetingRequest(V3_REQUEST);
+  assert.equal(parsed.success, true);
+  if (!parsed.success) return;
+  const artifact = stationAreaMeetingArtifact();
+  const response = await calculateScheduledMeeting(parsed.data, {
+    artifact,
+    access: stationAreaMeetingAccessProvider(),
+    grid: undefined,
+  });
+  const byId = new Map(response.stationAreas.map((candidate) => [candidate.stationAreaId, candidate]));
+  assert.deepEqual([...byId.keys()], ["blue-area", "fair-area", "red-area", "unserved-area"]);
+  assert.equal(byId.get("red-area")?.classification, "red");
+  assert.equal(byId.get("red-area")?.redBoardingStopId, "z-fast");
+  assert.equal(byId.get("red-area")?.redArrivalSeconds, 0);
+  assert.equal(byId.get("fair-area")?.classification, "fair");
+  assert.equal(byId.get("blue-area")?.classification, "blue");
+  assert.equal(byId.get("unserved-area")?.classification, "unclassified");
+  assert.equal(byId.get("disconnected-area"), undefined);
+  assert.equal(byId.get("outside-stop-area"), undefined);
+  assert.equal(byId.get("outside-area"), undefined);
+  assert.equal(response.metadata.stationAreas.count, response.stationAreas.length);
+  assert.equal(validateScheduledMeetingResponse(response, parsed.data).success, true);
+  const catalog = buildScheduledStationAreaCatalog(artifact);
+  assert.equal(validateScheduledMeetingResponse(response, parsed.data, { stationAreaCatalog: catalog }).success, true);
+
+  const deleted = mutableResponse(response);
+  deleted.stationAreas.pop();
+  assert.equal(validateScheduledMeetingResponse(deleted, parsed.data, { stationAreaCatalog: catalog }).success, false);
+
+  const reordered = mutableResponse(response);
+  [reordered.stationAreas[0], reordered.stationAreas[1]] = [reordered.stationAreas[1]!, reordered.stationAreas[0]!];
+  assert.equal(validateScheduledMeetingResponse(reordered, parsed.data, { stationAreaCatalog: catalog }).success, false);
+
+  const renamed = mutableResponse(response);
+  renamed.stationAreas[0]!.name = "Tampered name";
+  assert.equal(validateScheduledMeetingResponse(renamed, parsed.data, { stationAreaCatalog: catalog }).success, false);
+
+  const relocated = mutableResponse(response);
+  relocated.stationAreas[0]!.coordinate = { latitude: 48.2, longitude: 11.6 };
+  assert.equal(validateScheduledMeetingResponse(relocated, parsed.data, { stationAreaCatalog: catalog }).success, false);
+
+  const nonMemberStop = mutableResponse(response);
+  nonMemberStop.stationAreas.find((candidate) => candidate.stationAreaId === "red-area")!.redBoardingStopId = "not-a-catalog-stop";
+  assert.equal(validateScheduledMeetingResponse(nonMemberStop, parsed.data, { stationAreaCatalog: catalog }).success, false);
+
+  const noResult = await calculateScheduledMeeting(parsed.data, {
+    artifact,
+    access: stationAreaMeetingAccessProvider(true),
+    grid: undefined,
+  });
+  assert.equal(noResult.status, "no-result");
+  assert.ok(noResult.stationAreas.every((candidate) => candidate.classification === "unclassified" && candidate.redBoardingStopId === null && candidate.blueBoardingStopId === null));
+  assert.equal(validateScheduledMeetingResponse(noResult, parsed.data, { stationAreaCatalog: catalog }).success, true);
+
+  const classificationTamper = mutableResponse(response);
+  classificationTamper.stationAreas.find((candidate) => candidate.stationAreaId === "red-area")!.classification = "blue";
+  assert.equal(validateScheduledMeetingResponse(classificationTamper, parsed.data).success, false);
+
+  const idTamper = mutableResponse(response);
+  idTamper.stationAreas[0]!.stationAreaId = idTamper.stationAreas[1]!.stationAreaId;
+  assert.equal(validateScheduledMeetingResponse(idTamper, parsed.data).success, false);
+
+  const countTamper = mutableResponse(response);
+  countTamper.metadata.stationAreas.count = response.stationAreas.length + 1;
+  assert.equal(validateScheduledMeetingResponse(countTamper, parsed.data).success, false);
+
+  const boardingIdentityTamper = mutableResponse(response);
+  boardingIdentityTamper.stationAreas.find((candidate) => candidate.stationAreaId === "red-area")!.redBoardingStopId = null;
+  assert.equal(validateScheduledMeetingResponse(boardingIdentityTamper, parsed.data).success, false);
+});
+
 test("v3 response validation derives exact cell classification and rejects arrival tampering", async () => {
   const parsed = parseScheduledMeetingRequest(V3_REQUEST);
   assert.equal(parsed.success, true);
@@ -510,6 +662,13 @@ test("v3 response validation enforces no-result, identity, search-start, and see
   const parsed = parseScheduledMeetingRequest(V3_REQUEST);
   assert.equal(parsed.success, true);
   if (!parsed.success) return;
+  assert.equal(validateScheduledMeetingResponse(response, parsed.data).success, true);
+  const participantIdTamper = mutableResponse(response);
+  participantIdTamper.participants[0]!.id = "tampered-participant";
+  assert.equal(validateScheduledMeetingResponse(participantIdTamper, parsed.data).success, false);
+  const participantOriginTamper = mutableResponse(response);
+  participantOriginTamper.participants[1]!.origin.latitude = 48.2;
+  assert.equal(validateScheduledMeetingResponse(participantOriginTamper, parsed.data).success, false);
   const noResultResponse = await calculateScheduledMeeting(parsed.data, {
     artifact: FIXTURE_SCHEDULED_ARTIFACT,
     access: { ...FIXTURE_SCHEDULED_ACCESS_PROVIDER, resolveAccessSeeds: async () => [] },
@@ -521,6 +680,17 @@ test("v3 response validation enforces no-result, identity, search-start, and see
   noResultTamper.cells[0]!.redArrivalSeconds = 1;
   noResultTamper.cells[0]!.fasterParticipant = "red";
   assert.equal(validateScheduledMeetingResponse(noResultTamper, parsed.data).success, false);
+
+  const invalidNoAccessReason = mutableResponse(noResultResponse);
+  invalidNoAccessReason.reason = "no-access-seeds";
+  invalidNoAccessReason.participants[0]!.accessSeeds.push(...response.participants[0].accessSeeds.map((seed) => seed as unknown as Record<string, unknown>));
+  invalidNoAccessReason.participants[1]!.accessSeeds.push(...response.participants[1].accessSeeds.map((seed) => seed as unknown as Record<string, unknown>));
+  invalidNoAccessReason.metadata.surface.accessSeedCounts = [response.participants[0].accessSeeds.length, response.participants[1].accessSeeds.length];
+  assert.equal(validateScheduledMeetingResponse(invalidNoAccessReason, parsed.data).success, false);
+
+  const invalidNoReachableReason = mutableResponse(noResultResponse);
+  invalidNoReachableReason.reason = "no-reachable-stations";
+  assert.equal(validateScheduledMeetingResponse(invalidNoReachableReason, parsed.data).success, false);
 
   for (const [field, value] of [["feedId", "tampered-feed"], ["scheduleContentHash", "f".repeat(64)], ["compiledArtifactId", "e".repeat(64)], ["timeZone", "Europe/London"], ["searchStartAt", "2026-08-11T06:05:00.123Z"]] as const) {
     const tamper = mutableResponse(response);

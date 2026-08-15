@@ -587,6 +587,24 @@ test("exact boarding-stop seeds board only the resolved stop while area seeds re
   assert.notEqual(areaSeed.stationArrivals.find((arrival) => arrival.stationAreaId === "station-c")?.arrivalAt, null);
 });
 
+test("routing persists the fastest destination boarding-stop identity with a deterministic result", () => {
+  const fastestBoardingStopFiles: GtfsFeedFiles = {
+    ...FIXTURE_FILES,
+    "trips.txt": `${FIXTURE_FILES["trips.txt"]}\nred,weekday,fast-b2,Station B`,
+    "stop_times.txt": `${FIXTURE_FILES["stop_times.txt"]}\nfast-b2,08:10:00,08:10:00,a-1,1,0,0\nfast-b2,08:15:00,08:15:00,b-2,2,0,0`,
+  };
+  const result = routeScheduledEarliestArrivals(
+    importFixtureFiles(fastestBoardingStopFiles),
+    [{ stationAreaId: "station-a", accessSeconds: 0 }],
+    SEARCH_START,
+    { walkingVelocityMetersPerSecond: 10, transferRadiusMeters: 100 },
+  );
+  const destination = result.stationArrivals.find((arrival) => arrival.stationAreaId === "station-b");
+  assert.equal(destination?.elapsedSeconds, 10 * 60);
+  const destinationStop = result.boardingStopArrivals.find((arrival) => arrival.boardingStopId === "b-2");
+  assert.equal(destinationStop?.elapsedSeconds, 10 * 60);
+});
+
 test("surface evaluates the disclosed representative point rather than an outside rectangular center", () => {
   const schedule = fixture();
   const result = calculateScheduledSurface({

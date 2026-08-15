@@ -7,6 +7,7 @@ import {
   type ScheduledBoardingStop,
   type ScheduledConnection,
   type ScheduledDeadlineCheck,
+  type BoardingStopArrivalField,
   type ScheduledRoutingArtifact,
   type ScheduledRoutingOptions,
   type ScheduledRoutingResult,
@@ -208,8 +209,18 @@ export function routeScheduledEarliestArrivals(
       elapsedSeconds: epochSeconds === undefined ? null : epochSeconds - parsedStart.epochSeconds,
     };
   });
+  const boardingStopArrivals: BoardingStopArrivalField[] = schedule.boardingStops.map((stop, index) => {
+    if (index % ROUTING_CONNECTION_CHECKPOINT === 0) resolvedOptions.deadlineCheck?.("routing-scan");
+    const readyAt = earliestReadyByStop.get(stop.id);
+    return {
+      boardingStopId: stop.id,
+      arrivalAt: readyAt === undefined ? null : formatEpochSeconds(readyAt),
+      elapsedSeconds: readyAt === undefined ? null : readyAt - parsedStart.epochSeconds,
+    };
+  });
   return Object.freeze({
     stationArrivals: Object.freeze(stationArrivals),
+    boardingStopArrivals: Object.freeze(boardingStopArrivals),
     reachableStationAreaCount: stationArrivals.filter((arrival) => arrival.arrivalAt !== null).length,
     searchStartAt: parsedStart.canonicalAt,
     searchStartEpochSeconds: parsedStart.epochSeconds,
@@ -518,9 +529,9 @@ function compareMaterializedConnections(left: ScheduledMaterializedConnection, r
   return left.departureEpochSeconds - right.departureEpochSeconds || compareScheduledConnections(left.source, right.source) || left.arrivalEpochSeconds - right.arrivalEpochSeconds || left.instanceId.localeCompare(right.instanceId);
 }
 
-function updateMinimum(values: Map<string, number>, key: string, value: number): void {
+function updateMinimum(values: Map<string, number>, key: string, epochSeconds: number): void {
   const current = values.get(key);
-  if (current === undefined || value < current) values.set(key, value);
+  if (current === undefined || epochSeconds < current) values.set(key, epochSeconds);
 }
 
 function validateRoutingOptions(options: ResolvedRoutingOptions): void {

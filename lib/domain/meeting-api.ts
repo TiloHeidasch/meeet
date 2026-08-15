@@ -1,6 +1,7 @@
 import { ProviderNotConfiguredError, ProviderUnavailableError, type MeetingProviders } from "./providers.ts";
 import type { ScheduledValidationIssue } from "../validation/meeting-v3.ts";
 import { calculateScheduledMeeting } from "./scheduled-routing/meeting.ts";
+import { buildScheduledStationAreaCatalog } from "./scheduled-routing/surface.ts";
 import {
   parseScheduledMeetingRequest,
   validateScheduledMeetingResponse,
@@ -118,7 +119,10 @@ export async function handleMeetingPost(
       deadlineCheck: deadline.check,
     }, deadline.signal);
     deadline.check();
-    if (!validateScheduledMeetingResponse(result, parsedScheduled.data).success) {
+    const stationAreaCatalog = calculationProviders.scheduledArtifact === undefined
+      ? undefined
+      : buildScheduledStationAreaCatalog(calculationProviders.scheduledArtifact, deadline.check);
+    if (!validateScheduledMeetingResponse(result, parsedScheduled.data, { stationAreaCatalog, deadlineCheck: deadline.check }).success) {
       return jsonError(500, "CALCULATION_FAILED", "The scheduled meeting response failed validation.");
     }
     deadline.check();

@@ -17,9 +17,12 @@ import type {
 import type { ScheduledMeetingRequest, ScheduledMeetingParticipantInput } from "../../validation/meeting-v3.ts";
 import type {
   ScheduledMeetingCellDto,
+  ScheduledMeetingStationAreaDto,
   ScheduledMeetingParticipantDto,
   ScheduledMeetingResponseDto,
 } from "../../validation/meeting-v3.ts";
+
+const MEETING_RESULT_CHECKPOINT = 32;
 
 export interface ScheduledMeetingProviderBundle {
   readonly artifact?: ScheduledRoutingArtifact;
@@ -32,6 +35,7 @@ export interface ScheduledMeetingProviderBundle {
 
 export type ScheduledParticipantResponse = ScheduledMeetingParticipantDto;
 export type ScheduledMeetingCellResponse = ScheduledMeetingCellDto;
+export type ScheduledMeetingStationAreaResponse = ScheduledMeetingStationAreaDto;
 export type ScheduledMeetingResponse = ScheduledMeetingResponseDto;
 
 export async function calculateScheduledMeeting(
@@ -97,6 +101,21 @@ export async function calculateScheduledMeeting(
       withinSelectedTolerance: classification.withinSelectedTolerance,
     };
   });
+  const stationAreas = surface.stationAreas.map((candidate, index) => {
+    if (index % MEETING_RESULT_CHECKPOINT === 0) providers.deadlineCheck?.("meeting-result");
+    return {
+      stationAreaId: candidate.stationAreaId,
+      name: candidate.name,
+      coordinate: candidate.coordinate,
+      redBoardingStopId: candidate.redBoardingStopId,
+      blueBoardingStopId: candidate.blueBoardingStopId,
+      classification: candidate.classification,
+      redArrivalSeconds: candidate.redArrivalSeconds,
+      blueArrivalSeconds: candidate.blueArrivalSeconds,
+      fasterParticipant: candidate.fasterParticipant,
+      withinSelectedTolerance: candidate.withinSelectedTolerance,
+    };
+  });
   providers.deadlineCheck?.("meeting-result");
   return deepFreeze({
     contractVersion: "meeet-meeting/v3",
@@ -107,6 +126,7 @@ export async function calculateScheduledMeeting(
       participantResponse(request.participants[1], "blue", seedSets[1]),
     ],
     cells,
+    stationAreas,
     metadata: {
       schedule: {
         contractVersion: artifact.contractVersion,
@@ -129,6 +149,11 @@ export async function calculateScheduledMeeting(
         rows: grid.rows,
         cellCount: grid.cells.length,
         geometry: "munich-clipped-surface-grid/v1",
+      },
+      stationAreas: {
+        count: stationAreas.length,
+        coverage: "official-munich-boundary-with-connected-artifact-boarding-stops/v1",
+        selection: "all-eligible-scheduled-station-areas/v1",
       },
       accessProvider: access.descriptor,
       coverage: "munich-clipped-scheduled-grid/v1",
