@@ -7,7 +7,7 @@ import { getOrCreateProcessValue } from "./process-registry.ts";
 export const STATION_AREA_CALCULATION_REF_HEADER = "Meeet-Calculation-Ref";
 export const STATION_AREA_CALCULATION_BASIS_TTL_MS = 15 * 60_000;
 export const STATION_AREA_CALCULATION_BASIS_MAX_ENTRIES = 32;
-export const STATION_AREA_CALCULATION_BASIS_MAX_BYTES = 256 * 1024;
+export const STATION_AREA_CALCULATION_BASIS_MAX_BYTES = 32 * 1024 * 1024;
 
 export class StationAreaCalculationBasisCacheLimitError extends Error {
   constructor(message = "The scheduled calculation basis exceeded its bounded cache size.") {

@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef, useState, type FormEvent, type KeyboardEvent } from "react";
+import { useEffect, useMemo, useRef, useState, type FormEvent, type KeyboardEvent } from "react";
 import dynamic from "next/dynamic";
 import { validateMeetingResponse, type MeetingRequest, type MeetingResponse, type MeetingStationArea } from "@/lib/client/meeting-response";
 import { validateStationAreaDetails, type StationAreaDetail } from "@/lib/client/station-area-details";
@@ -51,8 +51,118 @@ function ScheduleDisclosure({ result }: { result: MeetingResponse }) { const sch
 function unavailableCopy(reason: string | null) { switch (reason) { case "no-access-seeds": return "No nearby access seed was available for this participant, so no planned MVV route can be shown."; case "no-reachable-stations": return "The scheduled MVV search could not reach a station for this participant."; case "station-area-unclassified": return "This station area is unclassified, so scheduled evidence is unavailable for this participant."; case "station-area-unavailable-for-participant": return "This station area has no scheduled evidence for this participant."; default: return "Scheduled evidence is unavailable for this participant."; } }
 function DetailProvenance({ basis }: { basis: StationAreaDetail["basis"] }) { const schedule = basis.schedule; const acquisition = isRecord(schedule.acquisition) ? schedule.acquisition : {}; const access = basis.accessProvider; const accessProvenance = isRecord(access.provenance) ? access.provenance : {}; return <details className="detail-provenance"><summary>Schedule and access provenance</summary><div className="detail-provenance-copy"><section><h3>Scheduled MVV feed</h3><p><strong>Feed:</strong> {String(schedule.feedId)} · <strong>Timezone:</strong> {String(schedule.timeZone)}</p><p><strong>Valid:</strong> {String(isRecord(schedule.serviceDateRange) ? schedule.serviceDateRange.firstDate : "—")} to {String(isRecord(schedule.serviceDateRange) ? schedule.serviceDateRange.lastDate : "—")}</p><p><strong>Feed version:</strong> {String(acquisition.feedVersion)} · <strong>Retrieved:</strong> {String(acquisition.retrievedAt)}</p><p><strong>Source:</strong> {String(acquisition.sourceUrl)}</p><p><strong>Official attribution:</strong> {String(acquisition.officialAttribution)} · <strong>License:</strong> {String(isRecord(acquisition.officialLicense) ? acquisition.officialLicense.name : "—")}</p></section><section><h3>Access data</h3><p><strong>Provider:</strong> {String(access.name)} · <strong>Data kind:</strong> {String(access.dataKind)}</p><p><strong>Deployment:</strong> {String(access.deployment)} · <strong>As of:</strong> {String(access.asOf)} · non-live access data</p><p><strong>Provenance:</strong> {String(accessProvenance.provider)} · version {String(accessProvenance.version)} · retrieved {String(accessProvenance.retrievedAt)}</p><p><strong>Attribution:</strong> {String(accessProvenance.attribution)}</p></section></div></details>; }
 
-function StationAreaList({ areas, selectedId, resultState, onSelect }: { areas: readonly MeetingStationArea[]; selectedId: string | null; resultState: "ok" | "no-result"; onSelect: (id: string) => void }) {
-  return <section className="station-area-panel" aria-labelledby="station-area-heading" data-testid="station-area-list"><div className="station-area-heading"><div><span className="field-label">Accessible map index</span><h2 id="station-area-heading">Calculated station areas</h2></div><span className="station-area-count">{areas.length}</span></div><p id="station-area-instructions" className="station-area-instructions">Select an area to inspect its scheduled comparison. Every gray station area is included.</p><ul className="station-area-list" aria-describedby="station-area-instructions">{areas.map((area) => { const name = `${area.name}, ${classificationLabel(area.classification)}, Participant 1 ${formatSeconds(area.redArrivalSeconds)}, Participant 2 ${formatSeconds(area.blueArrivalSeconds)}`; return <li key={area.stationAreaId}><button type="button" className={`station-area-button station-${area.classification}`} data-station-area-id={area.stationAreaId} data-station-area-classification={area.classification} aria-label={name} aria-pressed={selectedId === area.stationAreaId} onClick={() => onSelect(area.stationAreaId)}><span className="station-area-dot" aria-hidden="true"/><span className="station-area-copy"><strong>{area.name}</strong><small>{classificationShort(area.classification)}</small></span><span className="station-area-times"><span>P1 {formatSeconds(area.redArrivalSeconds)}</span><span>P2 {formatSeconds(area.blueArrivalSeconds)}</span></span><Icon name="chevron"/></button></li>; })}</ul>{resultState === "no-result" && <p className="station-no-result">Scheduled evidence is unavailable for this result. These station areas remain shown for transparency.</p>}</section>;
+export function sortStationAreasByWorstTime(areas: readonly MeetingStationArea[]): MeetingStationArea[] {
+  return [...areas].sort((a, b) => {
+    const aBoth = a.redArrivalSeconds !== null && a.blueArrivalSeconds !== null;
+    const bBoth = b.redArrivalSeconds !== null && b.blueArrivalSeconds !== null;
+    if (aBoth && bBoth) {
+      const aWorst = Math.max(a.redArrivalSeconds!, a.blueArrivalSeconds!);
+      const bWorst = Math.max(b.redArrivalSeconds!, b.blueArrivalSeconds!);
+      if (aWorst !== bWorst) return aWorst - bWorst;
+      const aBest = Math.min(a.redArrivalSeconds!, a.blueArrivalSeconds!);
+      const bBest = Math.min(b.redArrivalSeconds!, b.blueArrivalSeconds!);
+      if (aBest !== bBest) return aBest - bBest;
+      return a.name.localeCompare(b.name, "de");
+    }
+    if (aBoth !== bBoth) return aBoth ? -1 : 1;
+    const aSingle = a.redArrivalSeconds !== null || a.blueArrivalSeconds !== null;
+    const bSingle = b.redArrivalSeconds !== null || b.blueArrivalSeconds !== null;
+    if (aSingle && bSingle) {
+      const aTime = (a.redArrivalSeconds ?? a.blueArrivalSeconds)!;
+      const bTime = (b.redArrivalSeconds ?? b.blueArrivalSeconds)!;
+      if (aTime !== bTime) return aTime - bTime;
+      return a.name.localeCompare(b.name, "de");
+    }
+    if (aSingle !== bSingle) return aSingle ? -1 : 1;
+    return a.name.localeCompare(b.name, "de");
+  });
+}
+
+function StationAreaList({
+  areas,
+  selectedId,
+  resultState,
+  detail,
+  detailLoading,
+  detailError,
+  reason,
+  expired,
+  onSelect,
+  onRecalculate,
+}: {
+  areas: readonly MeetingStationArea[];
+  selectedId: string | null;
+  resultState: "ok" | "no-result";
+  detail: StationAreaDetail | null;
+  detailLoading: boolean;
+  detailError: string;
+  reason: string | null;
+  expired: boolean;
+  onSelect: (id: string) => void;
+  onRecalculate: () => void;
+}) {
+  return (
+    <section className="station-area-panel" aria-labelledby="station-area-heading" data-testid="station-area-list">
+      <div className="station-area-heading">
+        <div>
+          <span className="field-label">Accessible map index</span>
+          <h2 id="station-area-heading">Calculated station areas</h2>
+        </div>
+        <span className="station-area-count">{areas.length}</span>
+      </div>
+      <p id="station-area-instructions" className="station-area-instructions">
+        Select an area to inspect its scheduled comparison. Every gray station area is included.
+      </p>
+      <ul className="station-area-list" aria-describedby="station-area-instructions">
+        {areas.map((area) => {
+          const isSelected = selectedId === area.stationAreaId;
+          const name = `${area.name}, ${classificationLabel(area.classification)}, Participant 1 ${formatSeconds(area.redArrivalSeconds)}, Participant 2 ${formatSeconds(area.blueArrivalSeconds)}`;
+          return (
+            <li key={area.stationAreaId} className={`station-area-item ${isSelected ? "selected" : ""}`}>
+              <button
+                type="button"
+                className={`station-area-button station-${area.classification}`}
+                data-station-area-id={area.stationAreaId}
+                data-station-area-classification={area.classification}
+                aria-label={name}
+                aria-expanded={isSelected}
+                aria-pressed={isSelected}
+                onClick={() => onSelect(area.stationAreaId)}
+              >
+                <span className="station-area-dot" aria-hidden="true" />
+                <span className="station-area-copy">
+                  <strong>{area.name}</strong>
+                  <small>{classificationShort(area.classification)}</small>
+                </span>
+                <span className="station-area-times">
+                  <span>P1 {formatSeconds(area.redArrivalSeconds)}</span>
+                  <span>P2 {formatSeconds(area.blueArrivalSeconds)}</span>
+                </span>
+                <Icon name="chevron" />
+              </button>
+              {isSelected && (
+                <DetailPanel
+                  detail={detail}
+                  area={area}
+                  loading={detailLoading}
+                  error={detailError}
+                  noResult={resultState === "no-result"}
+                  reason={reason}
+                  expired={expired}
+                  onRecalculate={onRecalculate}
+                />
+              )}
+            </li>
+          );
+        })}
+      </ul>
+      {resultState === "no-result" && (
+        <p className="station-no-result">
+          Scheduled evidence is unavailable for this result. These station areas remain shown for transparency.
+        </p>
+      )}
+    </section>
+  );
 }
 function DetailPanel({ detail, area, loading, error, noResult, reason, expired, onRecalculate }: { detail: StationAreaDetail | null; area: MeetingStationArea | null; loading: boolean; error: string; noResult: boolean; reason: string | null; expired: boolean; onRecalculate: () => void }) {
   let content: React.ReactNode = <p>Select a station area to inspect its scheduled comparison.</p>;
@@ -73,6 +183,9 @@ export default function MeetPlanner({ capability }: { capability: PlannerCapabil
   async function selectStationArea(id: string) { const currentResult = result; const area = currentResult?.stationAreas.find((item) => item.stationAreaId === id); if (!area || !currentResult) return; detailAbort.current?.abort(); detailAbort.current = null; setDetailLoading(false); const requestId = ++detailRequestId.current; setSelectedId(id); setDetail(null); setDetailError(""); if (currentResult.status === "no-result") return; if (detailExpired) return; const ref = calculationRef; if (!ref) { setDetailError("Scheduled evidence is unavailable because the calculation reference was not retained safely."); return; } const key = `${ref}:${id}`; const cached = detailCache.current.get(key); if (cached) { setDetail(cached); return; } const controller = new AbortController(); detailAbort.current = controller; setDetailLoading(true); try { const body: MeetingRequest = { contractVersion: "meeet-meeting/v3", participants: participants.map((item) => ({ id: item.id, mode: "transit" as const, origin: { label: item.location!.label, latitude: item.location!.lat, longitude: item.location!.lng } })) as [MeetingRequest["participants"][0], MeetingRequest["participants"][1]], tolerancePercent: tolerance, searchStartAt }; const response = await fetch(`/api/meeting/station-areas/${encodeURIComponent(id)}/details`, { method: "POST", headers: { "Content-Type": "application/json", "Meeet-Calculation-Ref": ref }, body: JSON.stringify(body), signal: controller.signal }); const payload: unknown = await response.json().catch(() => null); if (!response.ok) { if (errorCode(payload) === "CALCULATION_REF_EXPIRED") { detailCache.current.clear(); setDetailExpired(true); return; } throw new Error(errorMessage(payload) || "The station-area details are unavailable right now."); } const checked = validateStationAreaDetails(payload, currentResult, body, ref, id); if (!checked.success) throw new Error(checked.message); if (requestId !== detailRequestId.current || ref !== calculationRef) return; detailCache.current.set(key, checked.data); setDetail(checked.data); } catch (error) { if (!controller.signal.aborted && requestId === detailRequestId.current) setDetailError(error instanceof Error ? error.message : "The station-area details could not be loaded."); } finally { if (!controller.signal.aborted && requestId === detailRequestId.current) setDetailLoading(false); } }
   async function calculate() { if (!canSubmitMeetingCalculation(ui, status)) return; const missing = participants.filter((item) => !item.location); if (missing.length || !searchStartAt) { const next: Record<string, string> = {}; missing.forEach((item) => { next[item.id] = "Choose a Munich starting point."; }); setErrors(next); setStatus("error"); setMessage("Choose both starting points before searching."); return; } clearDetails(); const request: MeetingRequest = { contractVersion: "meeet-meeting/v3", participants: [{ id: participants[0]!.id, mode: "transit", origin: { label: participants[0]!.location!.label, latitude: participants[0]!.location!.lat, longitude: participants[0]!.location!.lng } }, { id: participants[1]!.id, mode: "transit", origin: { label: participants[1]!.location!.label, latitude: participants[1]!.location!.lat, longitude: participants[1]!.location!.lng } }], tolerancePercent: tolerance, searchStartAt }; const id = ++requestRef.current; setResult(null); setStatus("loading"); setMessage("Reading the MVV schedule for both origins…"); try { const response = await fetch("/api/meeting/calculate", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(request) }); const payload: unknown = await response.json().catch(() => null); if (id !== requestRef.current) return; if (!response.ok) throw new Error(errorMessage(payload) || "The MVG meeting service is unavailable right now."); const parsed = validateMeetingResponse(payload, request); if (!parsed.success) throw new Error("The meeting surface could not be verified. Please try again."); setCalculationRef(response.headers.get("Meeet-Calculation-Ref")); setResult(parsed.data); setStatus("success"); setMessage(""); } catch (error) { if (id === requestRef.current) { clearDetails(); setStatus("error"); setMessage(error instanceof Error ? error.message : "The meeting search could not be completed."); } } }
   function submit(event: FormEvent) { event.preventDefault(); void calculate(); }
-  const stationAreas = result?.stationAreas ?? []; const mapParticipants = participants.flatMap((item, index) => item.location ? [{ id: item.id, number: index + 1, label: `Participant ${index + 1}`, latitude: item.location.lat, longitude: item.location.lng, color: COLORS[index]! }] : []); const noResult = result?.status === "no-result"; const selectedArea = stationAreas.find((area) => area.stationAreaId === selectedId) ?? null;
-  return <main className="planner-shell"><div className="planner-inner"><header className="brand-bar"><div className="brand"><span className="brand-mark">m</span><span>meeet</span></div><span className="scope-pill">Munich · MVV scheduled search</span></header><div className="planner-grid"><section className="planner-copy"><div className="eyebrow">A better place to meet</div><h1>Find the middle,<br/><em>without guessing.</em></h1><p className="lede">Two origins. One planned start. A map of where public transport gets you close enough.</p>{ui.calculationUnavailable && <div className="state-card" role="status"><strong>Meeting search unavailable</strong><span>{ui.unavailableMessage}</span></div>}<form onSubmit={submit} noValidate><div className="origin-stack"><LocationInput participant={participants[0]!} index={0} error={errors["participant-1"]} disabled={ui.controlsDisabled || status === "loading"} onChange={(location) => updateOrigin(0, location)}/><LocationInput participant={participants[1]!} index={1} error={errors["participant-2"]} disabled={ui.controlsDisabled || status === "loading"} onChange={(location) => updateOrigin(1, location)}/></div><div className="search-options"><label className="start-field"><span className="field-label">Planned start</span><span className="start-value">{formatDate(searchStartAt)}</span><small>Now + 5 minutes · whole seconds</small></label><fieldset className="tolerance-field"><legend className="field-label">Travel-time tolerance</legend><div className="tolerance-options">{([5, 10, 15] as const).map((value) => <label key={value} className={tolerance === value ? "tolerance-selected" : ""}><input type="radio" name="tolerance" value={value} checked={tolerance === value} disabled={status === "loading"} onChange={() => { setTolerance(value); changed(); }}/><span>±{value}%</span></label>)}</div></fieldset></div><button className="search-button" type="submit" disabled={!canSubmitMeetingCalculation(ui, status)}>{status === "loading" && <span className="button-spinner"/>}{status === "loading" ? "Calculating…" : "Show meeting surface"}</button>{message && <p className={`form-message ${status === "error" ? "error" : ""}`} role={status === "error" ? "alert" : "status"}>{message}</p>}</form>{result && <section className={`result-summary ${noResult ? "no-result" : ""}`}><span className="eyebrow">{noResult ? "No meeting surface yet" : "Surface ready"}</span><h2>{noResult ? "No scheduled route reached the surface." : "A fair place to meet."}</h2><p>{noResult ? (result.reason === "no-access-seeds" ? "No nearby MVG access seed could be resolved for one or both origins, so the scheduled surface cannot be calculated." : "The MVV schedule could not reach a station from one or both origins during the planned search window.") : "Compare every eligible station area, then open the planned legs for either participant."}</p><ScheduleDisclosure result={result}/></section>}</section><section className="map-column"><div className="map-viewport"><MapLibreCanvas participants={mapParticipants} stationAreas={stationAreas} resultState={result ? (noResult ? "no-result" : "ok") : "initial"} originDraggingEnabled={status !== "loading"} onParticipantMove={moveOrigin} selectedStationAreaId={selectedId} onStationAreaSelect={(id) => void selectStationArea(id)}/>{result && <Legend/>}</div>{result && <><StationAreaList areas={stationAreas} selectedId={selectedId} resultState={noResult ? "no-result" : "ok"} onSelect={(id) => void selectStationArea(id)}/>{selectedId && <DetailPanel detail={detail} area={selectedArea} loading={detailLoading} error={detailError} noResult={Boolean(noResult)} reason={result.reason} expired={detailExpired} onRecalculate={() => void calculate()}/>}</>}</section></div><footer className="planner-footer">Scheduled MVV surface <span>•</span> Munich only <span>•</span> Built for two origins</footer></div></main>;
+  const sortedStationAreas = useMemo(() => sortStationAreasByWorstTime(result?.stationAreas ?? []), [result?.stationAreas]);
+  const stationAreas = result?.stationAreas ?? [];
+  const mapParticipants = participants.flatMap((item, index) => item.location ? [{ id: item.id, number: index + 1, label: `Participant ${index + 1}`, latitude: item.location.lat, longitude: item.location.lng, color: COLORS[index]! }] : []);
+  const noResult = result?.status === "no-result";
+  return <main className="planner-shell"><div className="planner-inner"><header className="brand-bar"><div className="brand"><span className="brand-mark">m</span><span>meeet</span></div><span className="scope-pill">Munich · MVV scheduled search</span></header><div className="planner-grid"><section className="planner-copy"><div className="eyebrow">A better place to meet</div><h1>Find the middle,<br/><em>without guessing.</em></h1><p className="lede">Two origins. One planned start. A map of where public transport gets you close enough.</p>{ui.calculationUnavailable && <div className="state-card" role="status"><strong>Meeting search unavailable</strong><span>{ui.unavailableMessage}</span></div>}<form onSubmit={submit} noValidate><div className="origin-stack"><LocationInput participant={participants[0]!} index={0} error={errors["participant-1"]} disabled={ui.controlsDisabled || status === "loading"} onChange={(location) => updateOrigin(0, location)}/><LocationInput participant={participants[1]!} index={1} error={errors["participant-2"]} disabled={ui.controlsDisabled || status === "loading"} onChange={(location) => updateOrigin(1, location)}/></div><div className="search-options"><label className="start-field"><span className="field-label">Planned start</span><span className="start-value">{formatDate(searchStartAt)}</span><small>Now + 5 minutes · whole seconds</small></label><fieldset className="tolerance-field"><legend className="field-label">Travel-time tolerance</legend><div className="tolerance-options">{([5, 10, 15] as const).map((value) => <label key={value} className={tolerance === value ? "tolerance-selected" : ""}><input type="radio" name="tolerance" value={value} checked={tolerance === value} disabled={status === "loading"} onChange={() => { setTolerance(value); changed(); }}/><span>±{value}%</span></label>)}</div></fieldset></div><button className="search-button" type="submit" disabled={!canSubmitMeetingCalculation(ui, status)}>{status === "loading" && <span className="button-spinner"/>}{status === "loading" ? "Calculating…" : "Show meeting surface"}</button>{message && <p className={`form-message ${status === "error" ? "error" : ""}`} role={status === "error" ? "alert" : "status"}>{message}</p>}</form>{result && <section className={`result-summary ${noResult ? "no-result" : ""}`}><span className="eyebrow">{noResult ? "No meeting surface yet" : "Surface ready"}</span><h2>{noResult ? "No scheduled route reached the surface." : "A fair place to meet."}</h2><p>{noResult ? (result.reason === "no-access-seeds" ? "No nearby MVG access seed could be resolved for one or both origins, so the scheduled surface cannot be calculated." : "The MVV schedule could not reach a station from one or both origins during the planned search window.") : "Compare every eligible station area, then open the planned legs for either participant."}</p><ScheduleDisclosure result={result}/></section>}</section><section className="map-column"><div className="map-viewport"><MapLibreCanvas participants={mapParticipants} stationAreas={stationAreas} resultState={result ? (noResult ? "no-result" : "ok") : "initial"} originDraggingEnabled={status !== "loading"} onParticipantMove={moveOrigin} selectedStationAreaId={selectedId} onStationAreaSelect={(id) => void selectStationArea(id)}/>{result && <Legend/>}</div>{result && <StationAreaList areas={sortedStationAreas} selectedId={selectedId} resultState={noResult ? "no-result" : "ok"} detail={detail} detailLoading={detailLoading} detailError={detailError} reason={result.reason} expired={detailExpired} onSelect={(id) => void selectStationArea(id)} onRecalculate={() => void calculate()}/>}</section></div><footer className="planner-footer">Scheduled MVV surface <span>•</span> Munich only <span>•</span> Built for two origins</footer></div></main>;
 }

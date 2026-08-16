@@ -37,7 +37,7 @@ boarding-stop walk shown. The cached canonical seed's `accessSeconds` and the
 artifact coordinate remain the sole v3 readiness inputs.
 
 References are short-lived and bounded by both entry count and serialized
-basis bytes. The current cap is 32 entries and 256 KiB of serialized basis
+basis bytes. The current cap is 32 entries and 32 MiB of serialized basis
 data, with a 15-minute TTL. A miss, expiry, process restart, or
 artifact/request mismatch is visible to the caller; the server does not
 re-resolve access or silently recompute a replacement basis. If the bounded
