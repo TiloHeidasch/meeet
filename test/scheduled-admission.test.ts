@@ -83,7 +83,9 @@ test("deadline uses an injected clock and signal without waiting for the product
     },
   }, { admission: new ScheduledCalculationAdmission(), deadline });
   assert.equal(response.status, 503);
-  assert.equal((await response.json()).error.code, "TEMPORARILY_UNAVAILABLE");
+  const error = (await response.json()).error;
+  assert.equal(error.code, "TEMPORARILY_UNAVAILABLE");
+  assert.match(error.message, /30-second deadline/);
   assert.equal(accessCalls, 1);
 });
 
@@ -102,7 +104,9 @@ test("deadline can be deterministically pre-aborted before provider work", async
     },
   }, { admission: new ScheduledCalculationAdmission(), deadline: { deadlineSignal: controller.signal } });
   assert.equal(response.status, 503);
-  assert.equal((await response.json()).error.code, "TEMPORARILY_UNAVAILABLE");
+  const error = (await response.json()).error;
+  assert.equal(error.code, "TEMPORARILY_UNAVAILABLE");
+  assert.match(error.message, /30-second deadline/);
   assert.equal(accessCalls, 0);
 });
 
@@ -129,7 +133,9 @@ test("deadline is checked again after synchronous calculation", async () => {
     deadline: { deadlineMs: 10, now: () => (checks++ >= 4 ? 11 : 0) },
   });
   assert.equal(response.status, 503);
-  assert.equal((await response.json()).error.code, "TEMPORARILY_UNAVAILABLE");
+  const error = (await response.json()).error;
+  assert.equal(error.code, "TEMPORARILY_UNAVAILABLE");
+  assert.match(error.message, /30-second deadline/);
   const release = admission.tryAcquire();
   assert.ok(release);
   release();
@@ -150,11 +156,20 @@ test("scheduled capability is an allow-listed configuration check and never prob
   });
 });
 
-test("scheduled deployment policy is fixed at one request, 90 seconds, and at least 4 GiB", () => {
+test("scheduled deployment policy is fixed at one request, 30 seconds, and at least 4 GiB", () => {
   const fixture = readProviderConfig({ MEEET_PROVIDER_MODE: "fixture" });
   assert.equal(fixture.scheduledConcurrency, 1);
-  assert.equal(fixture.scheduledDeadlineMs, 90_000);
+  assert.equal(fixture.scheduledDeadlineMs, 30_000);
   assert.equal(fixture.scheduledMinMemoryGiB, DEFAULT_SCHEDULED_MIN_MEMORY_GIB);
+  const explicit = readProviderConfig({
+    MEEET_PROVIDER_MODE: "fixture",
+    MEEET_SCHEDULED_DEADLINE_MS: "30000",
+  });
+  assert.equal(explicit.scheduledDeadlineMs, 30_000);
+  assert.throws(
+    () => readProviderConfig({ MEEET_PROVIDER_MODE: "fixture", MEEET_SCHEDULED_DEADLINE_MS: "29999" }),
+    /MEEET_SCHEDULED_DEADLINE_MS/,
+  );
 
   const configured = readProviderConfig({
     MEEET_PROVIDER_MODE: "configured",

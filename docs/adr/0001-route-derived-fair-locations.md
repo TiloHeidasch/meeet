@@ -54,4 +54,4 @@ station-area candidates.
 - Munich clipping and station-area/boarding-stop identity are enforced by the
   server contract.
 - Node 24 compilation, binary-artifact compatibility, memory capacity, a
-  90-second API budget, and a concurrency guard are release qualifications.
+  30-second API budget, and a concurrency guard are release qualifications.

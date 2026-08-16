@@ -3,7 +3,7 @@ import "server-only";
 import { getOrCreateProcessValue } from "./process-registry.ts";
 
 export const SCHEDULED_CALCULATION_CONCURRENCY = 1;
-export const SCHEDULED_CALCULATION_DEADLINE_MS = 90_000;
+export const SCHEDULED_CALCULATION_DEADLINE_MS = 30_000;
 
 export class ScheduledCalculationAdmissionError extends Error {
   constructor(message = "Scheduled calculations are temporarily unavailable.") {
@@ -13,7 +13,7 @@ export class ScheduledCalculationAdmissionError extends Error {
 }
 
 export class ScheduledCalculationDeadlineError extends Error {
-  constructor(message = "The scheduled meeting calculation exceeded its 90-second deadline.") {
+  constructor(message = "The scheduled meeting calculation exceeded its 30-second deadline.") {
     super(message);
     this.name = "ScheduledCalculationDeadlineError";
   }
@@ -73,7 +73,7 @@ function isScheduledCalculationAdmission(value: unknown): value is ScheduledCalc
 }
 
 export interface ScheduledDeadlineOptions {
-  /** Test seam; production uses the fixed 90-second policy. */
+  /** Test seam; production uses the fixed 30-second policy. */
   readonly deadlineMs?: number;
   /** Test seam for advancing time without sleeping. */
   readonly now?: () => number;
