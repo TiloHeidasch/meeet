@@ -9,8 +9,9 @@
 - MVV GTFS is the sole schedule and transit-routing authority. MVG location and
   nearby access are seed resolution only; never add journey, route, realtime,
   POI, or pedestrian-navigation behavior to the scheduled calculation.
-- Preserve station-area/boarding-stop identity, planned service-day semantics,
-  provenance, explicit no-result, and red/blue/fair/unclassified cell rules.
+- Preserve station-area identity, planned service-day semantics, provenance,
+  explicit no-result, and red/blue/fair/unclassified cell rules. Boarding-stop
+  identity is deliberately not preserved (see `docs/adr/0003-station-level-routing-with-change-time.md`).
 - Do not escalate or silently change the selected tolerance.
 
 ## Change triggers
