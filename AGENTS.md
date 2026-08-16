@@ -29,7 +29,8 @@
 - Keep Node 24 artifact compatibility, full-feed memory capacity, API deadline,
   and concurrency limits explicit in deployment changes.
 - Use TDD for contract retirement and tamper seams; run affected tests,
-  `npx tsc --noEmit`, and `git diff --check` before handoff.
+  `npm run lint`, `npx tsc --noEmit`, and `git diff --check` before handoff.
+  Linting is a mandatory quality gate that must pass with zero errors.
 - Preserve the intentional `meeet` spelling and the repository's strict
   TypeScript settings.
 
