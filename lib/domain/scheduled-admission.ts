@@ -1,5 +1,7 @@
 import "server-only";
 
+import { getOrCreateProcessValue } from "./process-registry.ts";
+
 export const SCHEDULED_CALCULATION_CONCURRENCY = 1;
 export const SCHEDULED_CALCULATION_DEADLINE_MS = 90_000;
 
@@ -54,7 +56,21 @@ export class ScheduledCalculationAdmission {
   }
 }
 
-export const scheduledCalculationAdmission = new ScheduledCalculationAdmission();
+export const scheduledCalculationAdmission = getOrCreateProcessValue(
+  Symbol.for("meeet.scheduled-calculation-admission/v1"),
+  () => new ScheduledCalculationAdmission(),
+  isScheduledCalculationAdmission,
+);
+
+function isScheduledCalculationAdmission(value: unknown): value is ScheduledCalculationAdmission {
+  return value instanceof ScheduledCalculationAdmission || (
+    typeof value === "object" && value !== null &&
+    typeof (value as { tryAcquire?: unknown }).tryAcquire === "function" &&
+    typeof (value as { acquire?: unknown }).acquire === "function" &&
+    typeof (value as { enter?: unknown }).enter === "function" &&
+    typeof (value as { activeCount?: unknown }).activeCount === "number"
+  );
+}
 
 export interface ScheduledDeadlineOptions {
   /** Test seam; production uses the fixed 90-second policy. */

@@ -38,11 +38,51 @@ export type ScheduledMeetingCellResponse = ScheduledMeetingCellDto;
 export type ScheduledMeetingStationAreaResponse = ScheduledMeetingStationAreaDto;
 export type ScheduledMeetingResponse = ScheduledMeetingResponseDto;
 
+export interface ScheduledCalculationBasis {
+  readonly canonicalRequest: ScheduledMeetingRequest;
+  /** Exact seeds consumed by the v3 surface; never substitute provider coordinates. */
+  readonly canonicalAccessSeeds: readonly [readonly ScheduledAccessSeed[], readonly ScheduledAccessSeed[]];
+  /** Ordered provider results retained only for selected-route access evidence. */
+  readonly accessSeedCandidates: readonly [readonly ScheduledAccessSeedCandidate[], readonly ScheduledAccessSeedCandidate[]];
+  readonly artifactIdentity: {
+    readonly contractVersion: string;
+    readonly feedId: string;
+    readonly timeZone: string;
+    readonly scheduleContentHash: string;
+    readonly compiledArtifactId: string;
+  };
+  readonly routingOptions: {
+    readonly routingHorizonSeconds: number;
+    readonly walkingVelocityMetersPerSecond: number;
+    readonly walkingSecondsRoundingRule: string;
+    readonly transferRadiusMeters: number;
+  };
+  readonly scheduleProvenance: ScheduledMeetingResponseDto["metadata"]["schedule"];
+  readonly accessProvenance: ScheduledMeetingResponseDto["metadata"]["accessProvider"];
+  readonly status: ScheduledMeetingResponseDto["status"];
+  readonly reason: ScheduledMeetingResponseDto["reason"];
+  readonly stationAreas: readonly ScheduledMeetingStationAreaDto[];
+}
+
+export interface ScheduledMeetingCalculation {
+  readonly response: ScheduledMeetingResponse;
+  readonly basis: ScheduledCalculationBasis;
+}
+
 export async function calculateScheduledMeeting(
   request: ScheduledMeetingRequest,
   providers: ScheduledMeetingProviderBundle,
   signal?: AbortSignal,
 ): Promise<ScheduledMeetingResponse> {
+  const calculation = await calculateScheduledMeetingWithBasis(request, providers, signal);
+  return calculation.response;
+}
+
+export async function calculateScheduledMeetingWithBasis(
+  request: ScheduledMeetingRequest,
+  providers: ScheduledMeetingProviderBundle,
+  signal?: AbortSignal,
+): Promise<ScheduledMeetingCalculation> {
   providers.deadlineCheck?.("meeting-start");
   const artifact = providers.artifact;
   if (artifact === undefined) throw new ProviderNotConfiguredError("routing");
@@ -117,7 +157,7 @@ export async function calculateScheduledMeeting(
     };
   });
   providers.deadlineCheck?.("meeting-result");
-  return deepFreeze({
+  const response: ScheduledMeetingResponse = deepFreeze({
     contractVersion: "meeet-meeting/v3",
     status: surface.status,
     reason: surface.status === "no-result" ? surface.reason : null,
@@ -159,6 +199,36 @@ export async function calculateScheduledMeeting(
       coverage: "munich-clipped-scheduled-grid/v1",
     },
   });
+  const basis: ScheduledCalculationBasis = {
+    canonicalRequest: cloneRequest(request),
+    canonicalAccessSeeds: [
+      scheduledSeedSets[0].map(cloneScheduledAccessSeed),
+      scheduledSeedSets[1].map(cloneScheduledAccessSeed),
+    ],
+    accessSeedCandidates: [
+      seedSets[0].map(cloneAccessSeedCandidate),
+      seedSets[1].map(cloneAccessSeedCandidate),
+    ],
+    artifactIdentity: {
+      contractVersion: artifact.contractVersion,
+      feedId: artifact.feedId,
+      timeZone: artifact.timeZone,
+      scheduleContentHash: artifact.provenance.contentHash,
+      compiledArtifactId: artifact.provenance.compiledArtifactId,
+    },
+    routingOptions: {
+      routingHorizonSeconds: surface.metadata.routingHorizonSeconds,
+      walkingVelocityMetersPerSecond: surface.metadata.walkingVelocityMetersPerSecond,
+      walkingSecondsRoundingRule: surface.metadata.walkingSecondsRoundingRule,
+      transferRadiusMeters: surface.metadata.transferRadiusMeters,
+    },
+    scheduleProvenance: response.metadata.schedule,
+    accessProvenance: response.metadata.accessProvider,
+    status: response.status,
+    reason: response.reason,
+    stationAreas: response.stationAreas.map((stationArea) => ({ ...stationArea })),
+  };
+  return deepFreeze({ response, basis });
 }
 
 function participantResponse(
@@ -177,6 +247,38 @@ function toScheduledAccessSeed(candidate: ScheduledAccessSeedCandidate): Schedul
   };
 }
 
+function cloneScheduledAccessSeed(seed: ScheduledAccessSeed): ScheduledAccessSeed {
+  return {
+    stationAreaId: seed.stationAreaId,
+    ...(seed.boardingStopId === undefined ? {} : { boardingStopId: seed.boardingStopId }),
+    accessSeconds: seed.accessSeconds,
+  };
+}
+
+function cloneAccessSeedCandidate(candidate: ScheduledAccessSeedCandidate): ScheduledAccessSeedCandidate {
+  return {
+    seedId: candidate.seedId,
+    mvgStationId: candidate.mvgStationId,
+    stationAreaId: candidate.stationAreaId,
+    ...(candidate.boardingStopId === undefined ? {} : { boardingStopId: candidate.boardingStopId }),
+    coordinate: { latitude: candidate.coordinate.latitude, longitude: candidate.coordinate.longitude },
+    accessSeconds: candidate.accessSeconds,
+    provenance: { ...candidate.provenance },
+  };
+}
+
+function cloneRequest(request: ScheduledMeetingRequest): ScheduledMeetingRequest {
+  return {
+    contractVersion: "meeet-meeting/v3",
+    participants: [
+      { id: request.participants[0].id, mode: "transit", origin: { ...request.participants[0].origin } },
+      { id: request.participants[1].id, mode: "transit", origin: { ...request.participants[1].origin } },
+    ],
+    tolerancePercent: request.tolerancePercent,
+    searchStartAt: request.searchStartAt,
+  };
+}
+
 function toSurfaceCell(cell: BoundedMunichGrid["cells"][number]): ScheduledSurfaceCell {
   return {
     id: cell.id,
@@ -186,7 +288,7 @@ function toSurfaceCell(cell: BoundedMunichGrid["cells"][number]): ScheduledSurfa
   };
 }
 
-function deepFreeze<T>(value: T): T {
+export function deepFreeze<T>(value: T): T {
   if (value !== null && typeof value === "object" && !Object.isFrozen(value)) {
     for (const child of Object.values(value)) deepFreeze(child);
     Object.freeze(value);

@@ -18,6 +18,24 @@ boarding stop points.
 nearby endpoint. Its duration is geographic walking time; timetable routing
 comes only from the compiled MVV GTFS artifact.
 
+**Calculation reference**: The opaque short-lived token returned in the
+`Meeet-Calculation-Ref` header of a validated v3 calculation. A station-area
+detail request presents it to prove it refers to that calculation's basis.
+
+**Calculation basis**: The small immutable server-side record behind a
+calculation reference: canonical request, canonical access seeds, candidate
+evidence, artifact identities, routing options, and public provenance. It is
+bounded and never contains schedule data, route trees, or credentials.
+
+**Identity-resolution fact**: A zero-duration detail segment that maps a
+resolved MVG coordinate to its scheduled MVV artifact identity (station area
+or boarding stop). It explains evidence without changing canonical readiness
+or claiming a walk.
+
+**Witness capture**: Request-local recording of the earliest-arrival scan's
+ready and connection steps, enabled only to reconstruct a selected station
+area's evidence on demand.
+
 **Planned schedule**: The immutable Europe/Berlin MVV GTFS timetable loaded
 from the versioned binary schedule artifact. It supplies calendar exceptions,
 stop-point connections, service-day timing, and routing provenance.
