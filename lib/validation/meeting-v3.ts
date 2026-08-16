@@ -9,8 +9,7 @@ import type {
   ScheduledStationAreaCatalog,
   ScheduledStationAreaMetadata,
 } from "../domain/scheduled-routing/models.ts";
-import type { GeoJsonMultiPolygon, ProviderDescriptor } from "../domain/types.ts";
-import { isScheduledInteriorRepresentativePoint } from "../domain/scheduled-routing/grid.ts";
+import type { ProviderDescriptor } from "../domain/types.ts";
 import type { ScheduledAccessSeedProvenance } from "../domain/providers.ts";
 
 export interface ScheduledMeetingParticipantInput {
@@ -58,17 +57,6 @@ export interface ScheduledMeetingParticipantDto {
   readonly accessSeeds: readonly ScheduledMeetingAccessSeedDto[];
 }
 
-export interface ScheduledMeetingCellDto {
-  readonly id: string;
-  readonly geometry: GeoJsonMultiPolygon;
-  readonly representativePoint: { readonly latitude: number; readonly longitude: number };
-  readonly classification: ScheduledCellClassification;
-  readonly redArrivalSeconds: number | null;
-  readonly blueArrivalSeconds: number | null;
-  readonly fasterParticipant: "red" | "blue" | null;
-  readonly withinSelectedTolerance: boolean;
-}
-
 export interface ScheduledMeetingStationAreaDto {
   readonly stationAreaId: string;
   readonly name: string;
@@ -98,12 +86,6 @@ export interface ScheduledMeetingMetadataDto {
     readonly representativePointBasis: "inside-clipped-cell/v1";
     readonly finalWalkingMethod: "geometric-station-walking-estimate-not-navigation";
   };
-  readonly grid: {
-    readonly columns: number;
-    readonly rows: number;
-    readonly cellCount: number;
-    readonly geometry: "munich-clipped-surface-grid/v1";
-  };
   readonly stationAreas: ScheduledStationAreaMetadata;
   readonly accessProvider: ProviderDescriptor;
   readonly coverage: "munich-clipped-scheduled-grid/v1";
@@ -114,7 +96,6 @@ export interface ScheduledMeetingResponseDto {
   readonly status: "ok" | "no-result";
   readonly reason: "no-access-seeds" | "no-reachable-stations" | null;
   readonly participants: readonly [ScheduledMeetingParticipantDto, ScheduledMeetingParticipantDto];
-  readonly cells: readonly ScheduledMeetingCellDto[];
   readonly stationAreas: readonly ScheduledMeetingStationAreaDto[];
   readonly metadata: ScheduledMeetingMetadataDto;
 }
@@ -176,7 +157,7 @@ export function validateScheduledMeetingResponse(
 ): ScheduledResponseValidationResult {
   const issues: ScheduledValidationIssue[] = [];
   if (!isRecord(input)) return failure([], "invalid_type", "Scheduled meeting response must be an object.");
-  addUnknownKeys(input, ["contractVersion", "status", "reason", "participants", "cells", "stationAreas", "metadata"], [], issues);
+  addUnknownKeys(input, ["contractVersion", "status", "reason", "participants", "stationAreas", "metadata"], [], issues);
   if (input.contractVersion !== "meeet-meeting/v3") issues.push(issue(["contractVersion"], "invalid_value", "Response contractVersion must be meeet-meeting/v3."));
   if (input.status !== "ok" && input.status !== "no-result") issues.push(issue(["status"], "invalid_enum", "Response status must be ok or no-result."));
   if (input.reason !== null && input.reason !== "no-access-seeds" && input.reason !== "no-reachable-stations") issues.push(issue(["reason"], "invalid_enum", "Response no-result reason is invalid."));
@@ -186,14 +167,6 @@ export function validateScheduledMeetingResponse(
     input.participants.forEach((participant, index) => validateResponseParticipant(participant, index, issues));
     if (input.participants[0] && isRecord(input.participants[0]) && input.participants[0].color !== "red") issues.push(issue(["participants", 0, "color"], "invalid_value", "The first participant must be red."));
     if (input.participants[1] && isRecord(input.participants[1]) && input.participants[1].color !== "blue") issues.push(issue(["participants", 1, "color"], "invalid_value", "The second participant must be blue."));
-  }
-  if (!Array.isArray(input.cells)) {
-    issues.push(issue(["cells"], "invalid_type", "Response cells must be an array."));
-  } else {
-    input.cells.forEach((cell, index) => validateCell(cell, index, issues));
-    const ids = input.cells.map((cell) => isRecord(cell) && typeof cell.id === "string" ? cell.id : "");
-    if (new Set(ids).size !== ids.length || ids.some((id) => id === "")) issues.push(issue(["cells"], "duplicate", "Response cell ids must be unique and non-empty."));
-    input.cells.forEach((cell, index) => validateCellInvariant(cell, index, issues));
   }
   if (!Array.isArray(input.stationAreas)) {
     issues.push(issue(["stationAreas"], "invalid_type", "Response stationAreas must be an array."));
@@ -208,7 +181,6 @@ export function validateScheduledMeetingResponse(
   if (context.stationAreaCatalog !== undefined) validateStationAreaCatalog(input, context.stationAreaCatalog, issues, context.deadlineCheck);
   if (input.status === "ok" && input.reason !== null) issues.push(issue(["reason"], "invalid_value", "Successful responses must have a null no-result reason."));
   if (input.status === "no-result" && input.reason === null) issues.push(issue(["reason"], "required", "No-result responses must disclose a reason."));
-  if (isRecord(input.metadata) && Array.isArray(input.cells) && typeof input.metadata.grid === "object" && input.metadata.grid !== null && "cellCount" in input.metadata.grid && input.metadata.grid.cellCount !== input.cells.length) issues.push(issue(["metadata", "grid", "cellCount"], "inconsistent", "Grid cellCount must equal serialized cell count."));
   if (isRecord(input.metadata) && Array.isArray(input.stationAreas) && isRecord(input.metadata.stationAreas) && input.metadata.stationAreas.count !== input.stationAreas.length) issues.push(issue(["metadata", "stationAreas", "count"], "inconsistent", "Station-area count must equal serialized station-area count."));
   if (issues.length > 0 || !isScheduledMeetingResponse(input)) {
     if (issues.length === 0) issues.push(issue([], "invalid_structure", "Scheduled meeting response structure is invalid."));
@@ -273,37 +245,6 @@ function parseSearchStartAt(value: unknown, issues: ScheduledValidationIssue[]):
   }
 }
 
-function validateCell(value: unknown, index: number, issues: ScheduledValidationIssue[]): void {
-  const path = ["cells", index];
-  if (!isRecord(value)) {
-    issues.push(issue(path, "invalid_type", "Cell must be an object."));
-    return;
-  }
-  addUnknownKeys(value, ["id", "geometry", "representativePoint", "classification", "redArrivalSeconds", "blueArrivalSeconds", "fasterParticipant", "withinSelectedTolerance"], path, issues);
-  if (typeof value.id !== "string" || value.id.trim() === "") issues.push(issue([...path, "id"], "invalid_value", "Cell id must be non-empty."));
-  if (!isMultiPolygon(value.geometry)) issues.push(issue([...path, "geometry"], "invalid_geometry", "Cell geometry must be a valid non-empty GeoJSON MultiPolygon."));
-  if (!isCoordinate(value.representativePoint)) issues.push(issue([...path, "representativePoint"], "invalid_coordinate", "Cell representativePoint must be a valid coordinate."));
-  else if (isMultiPolygon(value.geometry) && !isScheduledInteriorRepresentativePoint(value.representativePoint, value.geometry)) issues.push(issue([...path, "representativePoint"], "invalid_coordinate", "Cell representativePoint must be strictly inside its clipped geometry."));
-  if (value.classification !== "red" && value.classification !== "blue" && value.classification !== "fair" && value.classification !== "unclassified") issues.push(issue([...path, "classification"], "invalid_enum", "Cell classification is invalid."));
-  if (!isNullableWholeSecond(value.redArrivalSeconds)) issues.push(issue([...path, "redArrivalSeconds"], "invalid_value", "redArrivalSeconds must be a whole second or null."));
-  if (!isNullableWholeSecond(value.blueArrivalSeconds)) issues.push(issue([...path, "blueArrivalSeconds"], "invalid_value", "blueArrivalSeconds must be a whole second or null."));
-  if (value.fasterParticipant !== null && value.fasterParticipant !== "red" && value.fasterParticipant !== "blue") issues.push(issue([...path, "fasterParticipant"], "invalid_enum", "fasterParticipant is invalid."));
-  if (typeof value.withinSelectedTolerance !== "boolean") issues.push(issue([...path, "withinSelectedTolerance"], "invalid_type", "withinSelectedTolerance must be boolean."));
-}
-
-function validateCellInvariant(value: unknown, index: number, issues: ScheduledValidationIssue[]): void {
-  if (!isRecord(value)) return;
-  const classification = value.classification;
-  const red = value.redArrivalSeconds;
-  const blue = value.blueArrivalSeconds;
-  const fair = classification === "fair";
-  const bothReachable = isWholeSecond(red) && isWholeSecond(blue);
-  if (classification === "unclassified" && (red !== null || blue !== null)) issues.push(issue(["cells", index], "inconsistent", "Unclassified cells must have no arrival fields."));
-  if (classification !== "unclassified" && red === null && blue === null) issues.push(issue(["cells", index], "inconsistent", "Classified cells must expose at least one reachable arrival field."));
-  if (classification === "fair" && !bothReachable) issues.push(issue(["cells", index], "inconsistent", "Fair cells must expose both participant arrival fields."));
-  if (fair !== (value.withinSelectedTolerance === true)) issues.push(issue(["cells", index], "inconsistent", "withinSelectedTolerance must match fair classification."));
-}
-
 function validateResponseInvariants(value: Record<string, unknown>, metadata: Record<string, unknown>, request: ScheduledMeetingRequest, issues: ScheduledValidationIssue[], deadlineCheck?: ScheduledDeadlineCheck): void {
   if (Array.isArray(value.participants) && value.participants.length === 2) {
     const expectedParticipants = request.participants;
@@ -361,7 +302,6 @@ function validateResponseInvariants(value: Record<string, unknown>, metadata: Re
 
   const tolerance = surface.selectedTolerancePercent;
   if (!isSelectedTolerance(tolerance)) return;
-  if (Array.isArray(value.cells)) value.cells.forEach((cell, index) => validateDerivedCellInvariant(cell, index, value.status, tolerance, issues));
   if (Array.isArray(value.stationAreas)) value.stationAreas.forEach((candidate, index) => {
     if (index % 32 === 0) deadlineCheck?.("meeting-result");
     validateDerivedStationAreaInvariant(candidate, index, value.status, tolerance, issues);
@@ -389,42 +329,6 @@ function validateStationAreaCatalog(input: Record<string, unknown>, catalog: Sch
         issues.push(issue([...path, `${color}BoardingStopId`], "inconsistent", "Selected boarding stop must belong to the station-area eligible catalog."));
       }
     }
-  }
-}
-
-function validateDerivedCellInvariant(value: unknown, index: number, status: unknown, tolerancePercent: 5 | 10 | 15, issues: ScheduledValidationIssue[]): void {
-  if (!isRecord(value)) return;
-  const path = ["cells", index];
-  const classification = value.classification;
-  const red = value.redArrivalSeconds;
-  const blue = value.blueArrivalSeconds;
-  const fasterParticipant = value.fasterParticipant;
-  const withinSelectedTolerance = value.withinSelectedTolerance;
-
-  if (status === "no-result") {
-    if (classification !== "unclassified" || red !== null || blue !== null || fasterParticipant !== null || withinSelectedTolerance !== false) {
-      issues.push(issue(path, "inconsistent", "No-result cells must be unclassified with null arrivals, no faster participant, and false tolerance."));
-    }
-    return;
-  }
-
-  if (!isNullableWholeSecond(red) || !isNullableWholeSecond(blue)) return;
-  let expectedClassification: ScheduledCellClassification = "unclassified";
-  let expectedFasterParticipant: "red" | "blue" | null = null;
-  let expectedWithinSelectedTolerance = false;
-  if (isWholeSecond(red) && isWholeSecond(blue)) {
-    expectedWithinSelectedTolerance = isToleranceSatisfied(red, blue, tolerancePercent);
-    expectedClassification = expectedWithinSelectedTolerance ? "fair" : red < blue ? "red" : "blue";
-    expectedFasterParticipant = red === blue ? null : red < blue ? "red" : "blue";
-  } else if (isWholeSecond(red)) {
-    expectedClassification = "red";
-    expectedFasterParticipant = "red";
-  } else if (isWholeSecond(blue)) {
-    expectedClassification = "blue";
-    expectedFasterParticipant = "blue";
-  }
-  if (classification !== expectedClassification || fasterParticipant !== expectedFasterParticipant || withinSelectedTolerance !== expectedWithinSelectedTolerance) {
-    issues.push(issue(path, "inconsistent", "Cell classification, faster participant, and tolerance flag must be derived from its arrival fields."));
   }
 }
 
@@ -525,7 +429,7 @@ function validateResponseParticipant(value: unknown, index: number, issues: Sche
 
 function validateResponseMetadata(value: Record<string, unknown>, issues: ScheduledValidationIssue[]): void {
   const path = ["metadata"];
-  addUnknownKeys(value, ["schedule", "surface", "grid", "stationAreas", "accessProvider", "coverage"], path, issues);
+  addUnknownKeys(value, ["schedule", "surface", "stationAreas", "accessProvider", "coverage"], path, issues);
   const schedule = value.schedule;
   if (isRecord(schedule)) addUnknownKeys(schedule, ["contractVersion", "feedId", "timeZone", "scheduleContentHash", "compiledArtifactId", "serviceDateRange", "acquisition"], [...path, "schedule"], issues);
   if (isRecord(schedule) && isRecord(schedule.serviceDateRange)) addUnknownKeys(schedule.serviceDateRange, ["firstDate", "lastDate"], [...path, "schedule", "serviceDateRange"], issues);
@@ -536,7 +440,6 @@ function validateResponseMetadata(value: Record<string, unknown>, issues: Schedu
     if (isRecord(schedule.acquisition.officialProvenance)) addUnknownKeys(schedule.acquisition.officialProvenance, ["source", "policyId"], [...acquisitionPath, "officialProvenance"], issues);
   }
   if (isRecord(value.surface)) addUnknownKeys(value.surface, ["contractVersion", "scheduleContentHash", "compiledArtifactId", "feedId", "timeZone", "searchStartAt", "routingHorizonSeconds", "selectedTolerancePercent", "walkingVelocityMetersPerSecond", "walkingSecondsRoundingRule", "transferRadiusMeters", "accessSeedCounts", "stationAreaCount", "boardingStopCount", "connectionCount", "coverage", "representativePointBasis", "classificationMethod", "classificationBasis", "finalWalkingMethod"], [...path, "surface"], issues);
-  if (isRecord(value.grid)) addUnknownKeys(value.grid, ["columns", "rows", "cellCount", "geometry"], [...path, "grid"], issues);
   if (isRecord(value.stationAreas)) addUnknownKeys(value.stationAreas, ["count", "coverage", "selection"], [...path, "stationAreas"], issues);
   if (isRecord(value.accessProvider)) {
     const providerPath = [...path, "accessProvider"];
@@ -553,7 +456,6 @@ function isScheduledMeetingResponse(value: unknown): value is ScheduledMeetingRe
     (value.reason === null || value.reason === "no-access-seeds" || value.reason === "no-reachable-stations") &&
     Array.isArray(value.participants) && value.participants.length === 2 &&
     isScheduledParticipantDto(value.participants[0]) && isScheduledParticipantDto(value.participants[1]) &&
-    Array.isArray(value.cells) && value.cells.every(isScheduledCellDto) &&
     Array.isArray(value.stationAreas) && value.stationAreas.every(isScheduledStationAreaDto) &&
     isScheduledMetadataDto(value.metadata);
 }
@@ -566,20 +468,15 @@ function isScheduledSeedDto(value: unknown): value is ScheduledMeetingAccessSeed
   return isRecord(value) && typeof value.seedId === "string" && value.seedId.trim() !== "" && typeof value.mvgStationId === "string" && value.mvgStationId.trim() !== "" && typeof value.stationAreaId === "string" && value.stationAreaId.trim() !== "" && (value.boardingStopId === undefined || (typeof value.boardingStopId === "string" && value.boardingStopId.trim() !== "")) && isWholeSecond(value.accessSeconds) && isCoordinate(value.coordinate) && isRecord(value.provenance) && (value.provenance.source === "mvg-nearby" || value.provenance.source === "fixture-static") && typeof value.provenance.endpoint === "string" && typeof value.provenance.distanceMeters === "number" && Number.isFinite(value.provenance.distanceMeters) && value.provenance.distanceMeters >= 0 && isWholeSecond(value.provenance.walkingSeconds) && typeof value.provenance.note === "string";
 }
 
-function isScheduledCellDto(value: unknown): value is ScheduledMeetingCellDto {
-  return isRecord(value) && typeof value.id === "string" && isMultiPolygon(value.geometry) && isCoordinate(value.representativePoint) && isScheduledInteriorRepresentativePoint(value.representativePoint, value.geometry) && (value.classification === "red" || value.classification === "blue" || value.classification === "fair" || value.classification === "unclassified") && isNullableWholeSecond(value.redArrivalSeconds) && isNullableWholeSecond(value.blueArrivalSeconds) && (value.fasterParticipant === null || value.fasterParticipant === "red" || value.fasterParticipant === "blue") && typeof value.withinSelectedTolerance === "boolean";
-}
-
 function isScheduledStationAreaDto(value: unknown): value is ScheduledMeetingStationAreaDto {
   return isRecord(value) && typeof value.stationAreaId === "string" && value.stationAreaId.trim() !== "" && typeof value.name === "string" && value.name.trim() !== "" && isCoordinate(value.coordinate) && isWithinOfficialMunichBoundary(value.coordinate) && isNullableNonEmptyString(value.redBoardingStopId) && isNullableNonEmptyString(value.blueBoardingStopId) && (value.classification === "red" || value.classification === "blue" || value.classification === "fair" || value.classification === "unclassified") && isNullableWholeSecond(value.redArrivalSeconds) && isNullableWholeSecond(value.blueArrivalSeconds) && (value.fasterParticipant === null || value.fasterParticipant === "red" || value.fasterParticipant === "blue") && typeof value.withinSelectedTolerance === "boolean";
 }
 
 function isScheduledMetadataDto(value: unknown): value is ScheduledMeetingMetadataDto {
-  if (!isRecord(value) || !isRecord(value.schedule) || !isRecord(value.surface) || !isRecord(value.grid) || !isScheduledStationAreaMetadata(value.stationAreas) || !isScheduledAccessProviderDescriptor(value.accessProvider)) return false;
+  if (!isRecord(value) || !isRecord(value.schedule) || !isRecord(value.surface) || !isScheduledStationAreaMetadata(value.stationAreas) || !isScheduledAccessProviderDescriptor(value.accessProvider)) return false;
   return value.coverage === "munich-clipped-scheduled-grid/v1" &&
     typeof value.schedule.contractVersion === "string" && typeof value.schedule.feedId === "string" && value.schedule.timeZone === MEETING_TIME_ZONE && typeof value.schedule.scheduleContentHash === "string" && typeof value.schedule.compiledArtifactId === "string" && isDateRange(value.schedule.serviceDateRange) && isAcquisition(value.schedule.acquisition) &&
-    value.surface.classificationMethod === "representative-point-with-geometric-final-station-walking/v1" && value.surface.classificationBasis === "representative-point" && value.surface.representativePointBasis === "inside-clipped-cell/v1" && value.surface.finalWalkingMethod === "geometric-station-walking-estimate-not-navigation" && isSurfaceMetadata(value.surface) &&
-    typeof value.grid.columns === "number" && Number.isSafeInteger(value.grid.columns) && typeof value.grid.rows === "number" && Number.isSafeInteger(value.grid.rows) && typeof value.grid.cellCount === "number" && Number.isSafeInteger(value.grid.cellCount) && value.grid.columns >= 24 && value.grid.rows >= 16 && value.grid.cellCount > 0 && value.grid.geometry === "munich-clipped-surface-grid/v1";
+    value.surface.classificationMethod === "representative-point-with-geometric-final-station-walking/v1" && value.surface.classificationBasis === "representative-point" && value.surface.representativePointBasis === "inside-clipped-cell/v1" && value.surface.finalWalkingMethod === "geometric-station-walking-estimate-not-navigation" && isSurfaceMetadata(value.surface);
 }
 
 function isScheduledStationAreaMetadata(value: unknown): value is ScheduledStationAreaMetadata {
@@ -631,24 +528,6 @@ function isDateString(value: unknown): value is string {
 
 function isCoordinate(value: unknown): value is { readonly latitude: number; readonly longitude: number } {
   return isRecord(value) && typeof value.latitude === "number" && Number.isFinite(value.latitude) && value.latitude >= -90 && value.latitude <= 90 && typeof value.longitude === "number" && Number.isFinite(value.longitude) && value.longitude >= -180 && value.longitude <= 180;
-}
-
-function isMultiPolygon(value: unknown): value is GeoJsonMultiPolygon {
-  if (!isRecord(value) || value.type !== "MultiPolygon" || !Array.isArray(value.coordinates) || value.coordinates.length === 0) return false;
-  return value.coordinates.every((polygon) => {
-    if (!Array.isArray(polygon) || polygon.length === 0) return false;
-    return polygon.every((ring) => {
-      if (!Array.isArray(ring) || ring.length < 4) return false;
-      const positions = ring.filter(isGeoJsonPosition);
-      const first = positions[0];
-      const last = positions[positions.length - 1];
-      return positions.length === ring.length && first !== undefined && last !== undefined && first[0] === last[0] && first[1] === last[1];
-    });
-  });
-}
-
-function isGeoJsonPosition(value: unknown): value is [number, number] {
-  return Array.isArray(value) && value.length === 2 && typeof value[0] === "number" && Number.isFinite(value[0]) && typeof value[1] === "number" && Number.isFinite(value[1]);
 }
 
 function isNullableWholeSecond(value: unknown): value is number | null {

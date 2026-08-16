@@ -7,4 +7,3 @@ export * from "./router.ts";
 export * from "./surface.ts";
 export * from "./artifact.ts";
 export * from "./meeting.ts";
-export * from "./grid.ts";

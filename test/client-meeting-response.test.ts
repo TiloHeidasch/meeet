@@ -13,7 +13,6 @@ const request: MeetingRequest = {
 };
 
 function response(overrides: Record<string, unknown> = {}): Record<string, unknown> {
-  const cell = { id: "cell-1", geometry: { type: "MultiPolygon", coordinates: [[[[11.57, 48.13], [11.58, 48.13], [11.58, 48.14], [11.57, 48.14], [11.57, 48.13]]]] }, representativePoint: { latitude: 48.135, longitude: 11.575 }, classification: "fair", redArrivalSeconds: 600, blueArrivalSeconds: 660, fasterParticipant: "red", withinSelectedTolerance: true };
   const stationArea = { stationAreaId: "station-area-1", name: "Marienplatz", coordinate: { latitude: 48.137, longitude: 11.576 }, redBoardingStopId: "red-stop", blueBoardingStopId: "blue-stop", classification: "fair", redArrivalSeconds: 600, blueArrivalSeconds: 660, fasterParticipant: "red", withinSelectedTolerance: true };
   return {
     contractVersion: "meeet-meeting/v3", status: "ok", reason: null,
@@ -21,11 +20,10 @@ function response(overrides: Record<string, unknown> = {}): Record<string, unkno
       { id: "participant-1", color: "red", mode: "transit", origin: request.participants[0].origin, accessSeeds: [] },
       { id: "participant-2", color: "blue", mode: "transit", origin: request.participants[1].origin, accessSeeds: [] },
     ],
-    cells: [cell], stationAreas: [stationArea],
+    stationAreas: [stationArea],
     metadata: {
       schedule: { contractVersion: "meeet-scheduled-routing/v1", feedId: "fixture", timeZone: "Europe/Berlin", scheduleContentHash: "a".repeat(64), compiledArtifactId: "c".repeat(64), serviceDateRange: { firstDate: "2026-08-01", lastDate: "2026-08-31" }, acquisition: { sourceUrl: "https://example.test/feed.zip", retrievedAt: "2026-08-01T00:00:00Z", rawArchiveByteSize: 1, rawArchiveSha256: "b".repeat(64), feedVersion: "fixture", feedValidFrom: "2026-08-01", feedValidUntil: "2026-08-31", attribution: "Fixture", officialAttribution: "MVV", officialLicense: { name: "CC BY 4.0", url: "https://creativecommons.org/licenses/by/4.0/" }, officialProvenance: { source: "feed", policyId: null } } },
       surface: { contractVersion: "meeet-scheduled-routing/v1", searchStartAt: request.searchStartAt, selectedTolerancePercent: request.tolerancePercent, scheduleContentHash: "a".repeat(64), compiledArtifactId: "c".repeat(64), feedId: "fixture", timeZone: "Europe/Berlin", routingHorizonSeconds: 86400, walkingVelocityMetersPerSecond: 1.4, walkingSecondsRoundingRule: "ceil(distanceMetres / velocityMetresPerSecond), with zero distance taking zero seconds", transferRadiusMeters: 100, accessSeedCounts: [0, 0], stationAreaCount: 1, boardingStopCount: 1, connectionCount: 1, coverage: "scheduled-service-day-local-radius/v1", representativePointBasis: "inside-clipped-cell/v1", classificationMethod: "representative-point-with-geometric-final-station-walking/v1", classificationBasis: "representative-point", finalWalkingMethod: "geometric-station-walking-estimate-not-navigation" },
-      grid: { columns: 24, rows: 16, cellCount: 1, geometry: "munich-clipped-surface-grid/v1" },
       accessProvider: { name: "fixture", deployment: "fixture", dataKind: "demo-static", liveData: false, asOf: "fixture", notes: "fixture", provenance: { role: "access", provider: "fixture", deployment: "fixture", dataKind: "demo-static", liveData: false, sourceUrl: null, license: null, attribution: "fixture", version: "fixture", retrievedAt: "fixture", notes: "fixture", feeds: null } },
       stationAreas: { count: 1, coverage: "official-munich-boundary-with-connected-artifact-boarding-stops/v1", selection: "all-eligible-scheduled-station-areas/v1" }, coverage: "munich-clipped-scheduled-grid/v1",
     },
@@ -40,12 +38,6 @@ test("client adapter rejects a non-v3 or structurally unsafe response", () => {
 
 test("client adapter accepts a complete independent v3 response", () => {
   assert.equal(validateMeetingResponse(response(), request).success, true);
-});
-
-test("client adapter rejects a cell whose classification contradicts arrivals", () => {
-  const payload = response();
-  (payload.cells as Array<Record<string, unknown>>)[0].classification = "red";
-  assert.equal(validateMeetingResponse(payload, request).success, false);
 });
 
 test("client adapter rejects station-area tampering and count mismatches", () => {
@@ -68,7 +60,6 @@ test("client adapter rejects station-area tampering and count mismatches", () =>
 
 test("client adapter accepts unclassified station areas in a no-result response", () => {
   const payload = response({ status: "no-result", reason: "no-access-seeds" });
-  (payload.cells as Array<Record<string, unknown>>)[0] = { ...(payload.cells as Array<Record<string, unknown>>)[0], classification: "unclassified", redArrivalSeconds: null, blueArrivalSeconds: null, fasterParticipant: null, withinSelectedTolerance: false };
   const area = (payload.stationAreas as Array<Record<string, unknown>>)[0]!;
   area.classification = "unclassified";
   area.redBoardingStopId = null;
@@ -92,14 +83,12 @@ test("client adapter rejects an ok station area with no arrivals or an incomplet
 
 test("client adapter binds no-access-seeds to an empty access-seed count", () => {
   const payload = response({ status: "no-result", reason: "no-access-seeds" });
-  (payload.cells as Array<Record<string, unknown>>)[0] = { ...(payload.cells as Array<Record<string, unknown>>)[0], classification: "unclassified", redArrivalSeconds: null, blueArrivalSeconds: null, fasterParticipant: null, withinSelectedTolerance: false };
   const area = (payload.stationAreas as Array<Record<string, unknown>>)[0]!;
   area.classification = "unclassified"; area.redBoardingStopId = null; area.blueBoardingStopId = null; area.redArrivalSeconds = null; area.blueArrivalSeconds = null; area.fasterParticipant = null; area.withinSelectedTolerance = false;
   assert.equal(validateMeetingResponse(payload, request).success, true);
   ((payload.metadata as Record<string, unknown>).surface as Record<string, unknown>).accessSeedCounts = [1, 1];
   assert.equal(validateMeetingResponse(payload, request).success, false);
   const partiallyEmpty = response({ status: "no-result", reason: "no-access-seeds" });
-  (partiallyEmpty.cells as Array<Record<string, unknown>>)[0] = { ...(partiallyEmpty.cells as Array<Record<string, unknown>>)[0], classification: "unclassified", redArrivalSeconds: null, blueArrivalSeconds: null, fasterParticipant: null, withinSelectedTolerance: false };
   const partialArea = (partiallyEmpty.stationAreas as Array<Record<string, unknown>>)[0]!;
   partialArea.classification = "unclassified"; partialArea.redBoardingStopId = null; partialArea.blueBoardingStopId = null; partialArea.redArrivalSeconds = null; partialArea.blueArrivalSeconds = null; partialArea.fasterParticipant = null; partialArea.withinSelectedTolerance = false;
   (partiallyEmpty.participants as Array<Record<string, unknown>>)[1]!.accessSeeds = [{ seedId: "seed-2", mvgStationId: "station-2", stationAreaId: "station-area-2", boardingStopId: "stop-2", coordinate: { latitude: 48.137, longitude: 11.576 }, accessSeconds: 120, provenance: { source: "fixture-static", endpoint: "fixture", distanceMeters: 100, walkingSeconds: 120, note: "fixture" } }];
@@ -109,13 +98,12 @@ test("client adapter binds no-access-seeds to an empty access-seed count", () =>
 
 test("client adapter requires access seeds for no-reachable-stations", () => {
   const payload = response({ status: "no-result", reason: "no-reachable-stations" });
-  (payload.cells as Array<Record<string, unknown>>)[0] = { ...(payload.cells as Array<Record<string, unknown>>)[0], classification: "unclassified", redArrivalSeconds: null, blueArrivalSeconds: null, fasterParticipant: null, withinSelectedTolerance: false };
   const area = (payload.stationAreas as Array<Record<string, unknown>>)[0]!;
   area.classification = "unclassified"; area.redBoardingStopId = null; area.blueBoardingStopId = null; area.redArrivalSeconds = null; area.blueArrivalSeconds = null; area.fasterParticipant = null; area.withinSelectedTolerance = false;
   assert.equal(validateMeetingResponse(payload, request).success, false);
 });
 
-test("client adapter rejects contradictory no-result cells", () => {
+test("client adapter rejects contradictory no-result station areas", () => {
   const payload = response({ status: "no-result", reason: "no-reachable-stations" });
   assert.equal(validateMeetingResponse(payload, request).success, false);
 });
@@ -136,9 +124,6 @@ test("client adapter rejects nested contract tampering", () => {
   const unknown = response();
   ((unknown.metadata as Record<string, unknown>).accessProvider as Record<string, unknown>).unexpected = true;
   assert.equal(validateMeetingResponse(unknown, request).success, false);
-  const malformedGeometry = response();
-  (((malformedGeometry.cells as Array<Record<string, unknown>>)[0]!.geometry as Record<string, unknown>).coordinates as unknown[][][][])[0]![0]![4] = [11.57, 48.131];
-  assert.equal(validateMeetingResponse(malformedGeometry, request).success, false);
   const badId = response();
   ((badId.metadata as Record<string, unknown>).schedule as Record<string, unknown>).compiledArtifactId = "artifact";
   assert.equal(validateMeetingResponse(badId, request).success, false);
@@ -157,16 +142,19 @@ test("client adapter rejects contradictory access provenance and serialized coun
   assert.equal(validateMeetingResponse(counts, request).success, false);
 });
 
-test("client adapter rejects a representative point on a hole boundary", () => {
-  const payload = response();
-  const cell = (payload.cells as Array<Record<string, unknown>>)[0]!;
-  cell.geometry = {
-    type: "MultiPolygon",
-    coordinates: [[
-      [[11.57, 48.13], [11.58, 48.13], [11.58, 48.14], [11.57, 48.14], [11.57, 48.13]],
-      [[11.574, 48.134], [11.576, 48.134], [11.576, 48.136], [11.574, 48.136], [11.574, 48.134]],
-    ]],
-  };
-  cell.representativePoint = { latitude: 48.134, longitude: 11.574 };
-  assert.equal(validateMeetingResponse(payload, request).success, false);
+test("client adapter rejects the retired grid-cell surface contract", () => {
+  const legacyCells = response();
+  legacyCells.cells = [{ id: "cell-1", geometry: { type: "MultiPolygon", coordinates: [[[[11.57, 48.13], [11.58, 48.13], [11.58, 48.14], [11.57, 48.14], [11.57, 48.13]]]] }, representativePoint: { latitude: 48.135, longitude: 11.575 }, classification: "fair", redArrivalSeconds: 600, blueArrivalSeconds: 660, fasterParticipant: "red", withinSelectedTolerance: true }];
+  const legacyCellsResult = validateMeetingResponse(legacyCells, request);
+  assert.equal(legacyCellsResult.success, false);
+  if (!legacyCellsResult.success) {
+    assert.ok(legacyCellsResult.issues.some((issue) => issue.path.includes("cells")));
+  }
+  const legacyGrid = response();
+  (legacyGrid.metadata as Record<string, unknown>).grid = { columns: 24, rows: 16, cellCount: 1, geometry: "munich-clipped-surface-grid/v1" };
+  const legacyGridResult = validateMeetingResponse(legacyGrid, request);
+  assert.equal(legacyGridResult.success, false);
+  if (!legacyGridResult.success) {
+    assert.ok(legacyGridResult.issues.some((issue) => issue.path.includes("grid")));
+  }
 });

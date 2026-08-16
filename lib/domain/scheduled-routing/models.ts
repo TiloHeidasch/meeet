@@ -1,5 +1,3 @@
-import type { GeoJsonMultiPolygon } from "../types.ts";
-
 /**
  * The scheduled-routing domain deliberately has its own models.  It is an
  * immutable, service-day based timetable model and is not a v2 meeting API
@@ -173,15 +171,6 @@ export interface ScheduledAccessSeed {
   readonly accessSeconds: number;
 }
 
-export interface ScheduledSurfaceCell {
-  readonly id: string;
-  /** Legacy rectangular center retained for grid identity; routing uses the disclosed point below. */
-  readonly center: ScheduledCoordinate;
-  /** Deterministic point strictly inside the clipped cell used for final walking. */
-  readonly representativePoint: ScheduledCoordinate;
-  readonly geometry?: GeoJsonMultiPolygon;
-}
-
 export interface StationArrivalField {
   readonly stationAreaId: string;
   readonly arrivalAt: string | null;
@@ -194,29 +183,13 @@ export interface BoardingStopArrivalField {
   readonly elapsedSeconds: number | null;
 }
 
-export interface CellArrivalField {
-  readonly cellId: string;
-  readonly arrivalAt: string | null;
-  readonly elapsedSeconds: number | null;
-}
-
 export interface ScheduledParticipantSurface {
   readonly participantId: string;
   readonly stationArrivals: readonly StationArrivalField[];
   readonly boardingStopArrivals: readonly BoardingStopArrivalField[];
-  readonly cellArrivals: readonly CellArrivalField[];
 }
 
 export type ScheduledCellClassification = "red" | "blue" | "fair" | "unclassified";
-
-export interface ScheduledClassifiedCell {
-  readonly cellId: string;
-  readonly classification: ScheduledCellClassification;
-  readonly redArrivalSeconds: number | null;
-  readonly blueArrivalSeconds: number | null;
-  readonly fasterParticipant: "red" | "blue" | null;
-  readonly withinSelectedTolerance: boolean;
-}
 
 export interface ScheduledStationAreaCandidate {
   readonly stationAreaId: string;
@@ -272,7 +245,6 @@ export interface ScheduledSurfaceResult {
   readonly status: "ok" | "no-result";
   readonly reason: "no-access-seeds" | "no-reachable-stations" | null;
   readonly participants: readonly [ScheduledParticipantSurface, ScheduledParticipantSurface];
-  readonly cells: readonly ScheduledClassifiedCell[];
   readonly stationAreas: readonly ScheduledStationAreaCandidate[];
   readonly metadata: ScheduledSurfaceMetadata;
 }
@@ -283,7 +255,6 @@ export interface ScheduledSurfaceInput {
   readonly accessSeedSets: readonly [readonly ScheduledAccessSeed[], readonly ScheduledAccessSeed[]];
   readonly searchStartAt: string;
   readonly selectedTolerancePercent: SelectedTolerancePercent;
-  readonly cells: readonly ScheduledSurfaceCell[];
   readonly walkingVelocityMetersPerSecond: number;
   readonly transferRadiusMeters?: number;
   readonly participantIds?: readonly [string, string];

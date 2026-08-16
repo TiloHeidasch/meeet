@@ -30,7 +30,6 @@ import { handleMeetingPost } from "../lib/domain/meeting-api.ts";
 import { fixtureProviders } from "../lib/fixtures/providers.ts";
 import type { MeetingProviders } from "../lib/domain/providers.ts";
 import { compareScheduledIds, importGtfsSchedule, type GtfsFeedFiles } from "../lib/domain/scheduled-routing/gtfs.ts";
-import { createScheduledSurfaceGrid } from "../lib/domain/scheduled-routing/grid.ts";
 import { buildScheduledStationAreaCatalog } from "../lib/domain/scheduled-routing/surface.ts";
 import { createMeetingProviders } from "../lib/providers/factory.ts";
 import { MVG_NEARBY_URL } from "../lib/providers/mvg-constants.ts";
@@ -84,7 +83,6 @@ async function validScheduledResponse(): Promise<ScheduledMeetingResponseDto> {
   return calculateScheduledMeeting(parsed.data, {
     artifact: FIXTURE_SCHEDULED_ARTIFACT,
     access: FIXTURE_SCHEDULED_ACCESS_PROVIDER,
-    grid: undefined,
   });
 }
 
@@ -92,7 +90,6 @@ interface MutableResponseShape {
   status: string;
   reason: string | null;
   readonly participants: Array<{ id: string; origin: Record<string, unknown>; readonly accessSeeds: Array<Record<string, unknown>> }>;
-  readonly cells: Array<Record<string, unknown>>;
   readonly stationAreas: Array<Record<string, unknown>>;
   readonly metadata: {
     readonly schedule: Record<string, unknown>;
@@ -511,39 +508,26 @@ test("scheduled meeting checks injected deadlines at each orchestration boundary
   }
 });
 
-test("v3 validation is strict and scheduled orchestration emits only the v3 surface contract", async () => {
-  const surfaceGrid = createScheduledSurfaceGrid();
-  assert.equal(surfaceGrid.columns, 24);
-  assert.equal(surfaceGrid.rows, 16);
-  assert.ok(surfaceGrid.destinations.length > 400);
-  assert.ok(surfaceGrid.cells.every((cell) => cell.geometry.type === "MultiPolygon" && cell.geometry.coordinates.length > 0));
+test("v3 validation is strict and scheduled orchestration emits only the v3 station-area surface contract", async () => {
   const parsed = parseScheduledMeetingRequest(V3_REQUEST);
   assert.equal(parsed.success, true);
   if (!parsed.success) return;
   const response = await calculateScheduledMeeting(parsed.data, {
     artifact: FIXTURE_SCHEDULED_ARTIFACT,
     access: FIXTURE_SCHEDULED_ACCESS_PROVIDER,
-    grid: undefined,
   } satisfies ScheduledMeetingProviderBundle);
   assert.equal(response.contractVersion, "meeet-meeting/v3");
   assert.equal(response.participants.length, 2);
   assert.equal(response.participants[0].color, "red");
   assert.equal(response.participants[1].color, "blue");
-  assert.ok(response.cells.every((cell) => cell.geometry.type === "MultiPolygon"));
-  assert.ok(response.cells.every((cell) => cell.representativePoint !== undefined));
-  assert.ok(response.cells.every((cell) => !("cellId" in cell)));
-  assert.ok(response.cells.length >= 200);
-  assert.ok(response.metadata.grid.columns >= 24);
+  assert.ok(response.stationAreas.length > 0);
+  assert.ok(response.stationAreas.every((area) => area.stationAreaId !== "" && area.classification !== undefined));
+  assert.equal(response.metadata.stationAreas.count, response.stationAreas.length);
   assert.equal(response.metadata.surface.classificationMethod, "representative-point-with-geometric-final-station-walking/v1");
   assert.equal(response.metadata.surface.classificationBasis, "representative-point");
   assert.equal(response.metadata.surface.representativePointBasis, "inside-clipped-cell/v1");
   assert.equal(response.metadata.surface.finalWalkingMethod, "geometric-station-walking-estimate-not-navigation");
   assert.equal(validateScheduledMeetingResponse(response, parsed.data).success, true);
-  const boundaryRepresentative = mutableResponse(response);
-  const boundaryCell = boundaryRepresentative.cells[0]!;
-  const firstRing = (boundaryCell.geometry as { coordinates: number[][][][] }).coordinates[0]![0]!;
-  boundaryCell.representativePoint = { longitude: firstRing[0]![0]!, latitude: firstRing[0]![1]! };
-  assert.equal(validateScheduledMeetingResponse(boundaryRepresentative, parsed.data).success, false);
   assert.equal("fairLocations" in response, false);
   assert.equal(parseScheduledMeetingRequest({ ...V3_REQUEST, arrivalAt: V3_REQUEST.searchStartAt }).success, false);
 });
@@ -556,7 +540,6 @@ test("scheduled meeting emits every eligible Munich station area with derived cl
   const response = await calculateScheduledMeeting(parsed.data, {
     artifact,
     access: stationAreaMeetingAccessProvider(),
-    grid: undefined,
   });
   const byId = new Map(response.stationAreas.map((candidate) => [candidate.stationAreaId, candidate]));
   assert.deepEqual([...byId.keys()], ["blue-area", "fair-area", "red-area", "unserved-area"]);
@@ -597,7 +580,6 @@ test("scheduled meeting emits every eligible Munich station area with derived cl
   const noResult = await calculateScheduledMeeting(parsed.data, {
     artifact,
     access: stationAreaMeetingAccessProvider(true),
-    grid: undefined,
   });
   assert.equal(noResult.status, "no-result");
   assert.ok(noResult.stationAreas.every((candidate) => candidate.classification === "unclassified" && candidate.redBoardingStopId === null && candidate.blueBoardingStopId === null));
@@ -620,40 +602,40 @@ test("scheduled meeting emits every eligible Munich station area with derived cl
   assert.equal(validateScheduledMeetingResponse(boardingIdentityTamper, parsed.data).success, false);
 });
 
-test("v3 response validation derives exact cell classification and rejects arrival tampering", async () => {
+test("v3 response validation derives exact station-area classification and rejects arrival tampering", async () => {
   const parsed = parseScheduledMeetingRequest(V3_REQUEST);
   assert.equal(parsed.success, true);
   if (!parsed.success) return;
   const response = await validScheduledResponse();
   assert.equal(validateScheduledMeetingResponse(response, parsed.data).success, true);
-  const sourceIndex = response.cells.findIndex((cell) => cell.redArrivalSeconds !== null && cell.blueArrivalSeconds !== null);
+  const sourceIndex = response.stationAreas.findIndex((area) => area.redArrivalSeconds !== null && area.blueArrivalSeconds !== null);
   assert.ok(sourceIndex >= 0);
 
   const classificationTamper = mutableResponse(response);
-  const classificationCell = classificationTamper.cells[sourceIndex]!;
-  classificationCell.redArrivalSeconds = 0;
-  classificationCell.blueArrivalSeconds = 100;
-  classificationCell.classification = "fair";
-  classificationCell.fasterParticipant = null;
-  classificationCell.withinSelectedTolerance = true;
+  const classificationArea = classificationTamper.stationAreas[sourceIndex]!;
+  classificationArea.redArrivalSeconds = 0;
+  classificationArea.blueArrivalSeconds = 100;
+  classificationArea.classification = "fair";
+  classificationArea.fasterParticipant = null;
+  classificationArea.withinSelectedTolerance = true;
   assert.equal(validateScheduledMeetingResponse(classificationTamper, parsed.data).success, false);
 
   const fasterParticipantTamper = mutableResponse(response);
-  const fasterCell = fasterParticipantTamper.cells[sourceIndex]!;
-  fasterCell.redArrivalSeconds = 0;
-  fasterCell.blueArrivalSeconds = 100;
-  fasterCell.classification = "red";
-  fasterCell.fasterParticipant = "blue";
-  fasterCell.withinSelectedTolerance = false;
+  const fasterArea = fasterParticipantTamper.stationAreas[sourceIndex]!;
+  fasterArea.redArrivalSeconds = 0;
+  fasterArea.blueArrivalSeconds = 100;
+  fasterArea.classification = "red";
+  fasterArea.fasterParticipant = "blue";
+  fasterArea.withinSelectedTolerance = false;
   assert.equal(validateScheduledMeetingResponse(fasterParticipantTamper, parsed.data).success, false);
 
   const oneSidedTamper = mutableResponse(response);
-  const oneSidedCell = oneSidedTamper.cells[sourceIndex]!;
-  oneSidedCell.redArrivalSeconds = 100;
-  oneSidedCell.blueArrivalSeconds = null;
-  oneSidedCell.classification = "red";
-  oneSidedCell.fasterParticipant = null;
-  oneSidedCell.withinSelectedTolerance = false;
+  const oneSidedArea = oneSidedTamper.stationAreas[sourceIndex]!;
+  oneSidedArea.redArrivalSeconds = 100;
+  oneSidedArea.blueArrivalSeconds = null;
+  oneSidedArea.classification = "red";
+  oneSidedArea.fasterParticipant = null;
+  oneSidedArea.withinSelectedTolerance = false;
   assert.equal(validateScheduledMeetingResponse(oneSidedTamper, parsed.data).success, false);
 });
 
@@ -672,13 +654,12 @@ test("v3 response validation enforces no-result, identity, search-start, and see
   const noResultResponse = await calculateScheduledMeeting(parsed.data, {
     artifact: FIXTURE_SCHEDULED_ARTIFACT,
     access: { ...FIXTURE_SCHEDULED_ACCESS_PROVIDER, resolveAccessSeeds: async () => [] },
-    grid: undefined,
   });
   assert.equal(validateScheduledMeetingResponse(noResultResponse, parsed.data).success, true);
   const noResultTamper = mutableResponse(noResultResponse);
-  noResultTamper.cells[0]!.classification = "red";
-  noResultTamper.cells[0]!.redArrivalSeconds = 1;
-  noResultTamper.cells[0]!.fasterParticipant = "red";
+  noResultTamper.stationAreas[0]!.classification = "red";
+  noResultTamper.stationAreas[0]!.redArrivalSeconds = 1;
+  noResultTamper.stationAreas[0]!.fasterParticipant = "red";
   assert.equal(validateScheduledMeetingResponse(noResultTamper, parsed.data).success, false);
 
   const invalidNoAccessReason = mutableResponse(noResultResponse);
@@ -750,7 +731,7 @@ test("scheduled HTTP path handles fixture success, no seeds, and unavailable art
   assert.equal(noSeeds.status, 200);
   assert.equal(noSeedsBody.status, "no-result");
   assert.equal(noSeedsBody.reason, "no-access-seeds");
-  assert.ok(noSeedsBody.cells.every((cell: { classification: string }) => cell.classification === "unclassified"));
+  assert.ok(noSeedsBody.stationAreas.every((area: { classification: string }) => area.classification === "unclassified"));
 
   const unavailable = await handleMeetingPost(new Request("https://meeet.test/api/meeting/calculate", { method: "POST", body: JSON.stringify(V3_REQUEST) }), { ...providers, scheduledArtifact: undefined });
   assert.equal(unavailable.status, 503);
