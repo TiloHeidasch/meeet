@@ -25,7 +25,7 @@ paths remain server-only.
   deep freeze.
 - The schedule is valid only for Europe/Berlin and the Munich application
   boundary. The API requires exactly two transit Participants.
-- The full-feed binary/window memory profile, 30-second API budget, and
+- The full-feed binary/window memory profile, 90-second API budget, and
   concurrency guard are deployment gates. A local artifact compiled under a
   different Node major is not production release evidence.
 

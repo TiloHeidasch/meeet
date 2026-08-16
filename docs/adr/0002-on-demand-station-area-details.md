@@ -80,7 +80,7 @@ validation rejects any route that does not reconcile with them.
 - No-result and unclassified station areas are served directly from the
   cached public marker basis. They do not acquire admission, load an artifact,
   materialize a routing window, or invoke an access provider.
-- Detail requests share the existing one-request admission gate and 30-second
+- Detail requests share the existing one-request admission gate and 90-second
   deadline. They are therefore deliberately serialized with full-feed
   calculations.
 - Provenance is public and limited to the installed MVV artifact and nearby

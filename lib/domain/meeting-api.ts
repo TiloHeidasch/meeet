@@ -167,7 +167,7 @@ export async function handleMeetingPost(
   } catch (error) {
     if (error instanceof ProviderConfigurationError) throw error;
     if (deadline?.isExpired()) {
-      return jsonError(503, "TEMPORARILY_UNAVAILABLE", "The scheduled meeting calculation exceeded its 30-second deadline. Please try again shortly.");
+      return jsonError(503, "TEMPORARILY_UNAVAILABLE", "The scheduled meeting calculation exceeded its 90-second deadline. Please try again shortly.");
     }
     return scheduledErrorResponse(error);
   } finally {
@@ -255,7 +255,7 @@ export async function handleStationAreaDetailsPost(
     return Response.json(detail, { status: 200 });
   } catch (error) {
     if (error instanceof ProviderConfigurationError) throw error;
-    if (deadline?.isExpired()) return jsonError(503, "TEMPORARILY_UNAVAILABLE", "The scheduled station-area detail exceeded its 30-second deadline. Please try again shortly.");
+    if (deadline?.isExpired()) return jsonError(503, "TEMPORARILY_UNAVAILABLE", "The scheduled station-area detail exceeded its 90-second deadline. Please try again shortly.");
     if (error instanceof RangeError) return jsonError(400, "INVALID_REQUEST", error.message);
     if (error instanceof ProviderUnavailableError || error instanceof ScheduleArtifactUnavailableError) return scheduledErrorResponse(error);
     return jsonError(500, "DETAIL_FAILED", "The scheduled station-area detail could not be completed.");

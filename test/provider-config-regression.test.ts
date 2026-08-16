@@ -28,22 +28,13 @@ test("scheduled memory rejects supplied non-integer and undersized declarations"
   }
 });
 
-test("one-concurrency and 30-second scheduled policy defaults remain unchanged", () => {
+test("one-concurrency and 90-second scheduled policy defaults remain unchanged", () => {
   const config = readProviderConfig({ MEEET_PROVIDER_MODE: "fixture" });
   assert.equal(config.scheduledConcurrency, 1);
-  assert.equal(config.scheduledDeadlineMs, 30_000);
-  const explicit = readProviderConfig({
-    MEEET_PROVIDER_MODE: "fixture",
-    MEEET_SCHEDULED_DEADLINE_MS: "30000",
-  });
-  assert.equal(explicit.scheduledDeadlineMs, 30_000);
+  assert.equal(config.scheduledDeadlineMs, 90_000);
   assert.throws(
     () => readProviderConfig({ MEEET_PROVIDER_MODE: "fixture", MEEET_SCHEDULED_CONCURRENCY: "2" }),
     /MEEET_SCHEDULED_CONCURRENCY/,
-  );
-  assert.throws(
-    () => readProviderConfig({ MEEET_PROVIDER_MODE: "fixture", MEEET_SCHEDULED_DEADLINE_MS: "29999" }),
-    /MEEET_SCHEDULED_DEADLINE_MS/,
   );
   assert.throws(
     () => readProviderConfig({ MEEET_PROVIDER_MODE: "fixture", MEEET_SCHEDULED_DEADLINE_MS: "89999" }),

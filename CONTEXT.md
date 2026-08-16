@@ -72,5 +72,5 @@ fields.
 - Every response contains exactly two Participants, seed provenance, selected
   tolerance, schedule provenance, and the Munich-clipped grid surface.
 - Production artifacts are compiled under the pinned Node 24 engine. The
-  binary bundle, routing-window memory use, 30-second API budget, and request
+  binary bundle, routing-window memory use, 90-second API budget, and request
   concurrency limit are deployment gates.

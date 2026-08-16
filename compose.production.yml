@@ -34,7 +34,7 @@ services:
       MEEET_ALLOW_HTTP_PROVIDER_ENDPOINTS: "false"
       MEEET_SCHEDULE_ARTIFACT_PATH: /opt/meeet/schedule/mvv-scheduled-artifact.json
       MEEET_SCHEDULED_CONCURRENCY: "1"
-      MEEET_SCHEDULED_DEADLINE_MS: "30000"
+      MEEET_SCHEDULED_DEADLINE_MS: "90000"
       MEEET_SCHEDULED_MIN_MEMORY_GIB: "4"
     volumes:
       - type: bind

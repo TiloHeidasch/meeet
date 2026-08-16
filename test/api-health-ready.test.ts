@@ -37,7 +37,7 @@ test("readiness returns 204 for a valid production configured artifact without p
       MEEET_PROVIDER_DEPLOYMENT: "managed",
       MEEET_SCHEDULE_ARTIFACT_PATH: fixture.path,
       MEEET_SCHEDULED_CONCURRENCY: "1",
-      MEEET_SCHEDULED_DEADLINE_MS: "30000",
+      MEEET_SCHEDULED_DEADLINE_MS: "90000",
       MEEET_SCHEDULED_MIN_MEMORY_GIB: "4",
     }, () => Promise.resolve(readinessResponse()));
     assert.equal(response.status, 204);
@@ -83,7 +83,7 @@ test("readiness fails closed for missing, tampered, expired, wrong-node, and inv
         MEEET_PROVIDER_DEPLOYMENT: "managed",
         MEEET_SCHEDULE_ARTIFACT_PATH: candidate.path,
         MEEET_SCHEDULED_CONCURRENCY: "1",
-        MEEET_SCHEDULED_DEADLINE_MS: "30000",
+        MEEET_SCHEDULED_DEADLINE_MS: "90000",
         MEEET_SCHEDULED_MIN_MEMORY_GIB: "4",
         ...candidate.overrides,
       }, () => Promise.resolve(readinessResponse()));
