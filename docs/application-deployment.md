@@ -100,6 +100,26 @@ The app reads the manifest from the read-only `/opt/meeet/schedule` mount.
 Schedule compilation and rotation do not require adding a service to the live
 Compose file.
 
+## SSE calculation progress
+
+`POST /api/meeting/calculate/stream` streams truthful calculation phases as
+`text/event-stream` while the scheduled meeting calculation runs. The JSON
+`POST /api/meeting/calculate` endpoint remains unchanged.
+
+The stream response sets `Cache-Control: no-cache, no-transform` and
+`X-Accel-Buffering: no` so intermediaries neither cache nor buffer the
+response, and the app emits `: heartbeat` comment frames while quiet so idle
+connections are not closed by timeouts. The stream holds the single
+calculation admission slot for up to the 90-second deadline; a browser
+disconnect aborts the calculation and releases the slot exactly once, and a
+disconnected stream never produces a meeting result.
+
+The operator-owned Cloudflare Tunnel deployment requires no configuration
+change: `cloudflared` forwards the stream as-is, and the app's own headers and
+heartbeats handle buffering and idle timeouts. If the tunnel or edge were to
+buffer the response, progress events would arrive delayed or batched; the app
+cannot change external tunnel configuration.
+
 ## Local and repository-template operations
 
 For local work, the artifact compiler can also be run with:

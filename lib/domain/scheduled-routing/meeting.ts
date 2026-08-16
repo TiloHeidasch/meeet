@@ -20,6 +20,16 @@ import type {
 
 const MEETING_RESULT_CHECKPOINT = 32;
 
+export type MeetingCalculationPhase =
+  | "access-seeds"
+  | "scheduled-routing"
+  | "station-area-evaluation"
+  | "validating-result";
+
+export interface ScheduledMeetingCalculationHooks {
+  readonly onPhase?: (phase: MeetingCalculationPhase) => void | Promise<void>;
+}
+
 export interface ScheduledMeetingProviderBundle {
   readonly artifact?: ScheduledRoutingArtifact;
   readonly access?: ScheduledAccessSeedProvider;
@@ -67,8 +77,9 @@ export async function calculateScheduledMeeting(
   request: ScheduledMeetingRequest,
   providers: ScheduledMeetingProviderBundle,
   signal?: AbortSignal,
+  hooks?: ScheduledMeetingCalculationHooks,
 ): Promise<ScheduledMeetingResponse> {
-  const calculation = await calculateScheduledMeetingWithBasis(request, providers, signal);
+  const calculation = await calculateScheduledMeetingWithBasis(request, providers, signal, hooks);
   return calculation.response;
 }
 
@@ -76,6 +87,7 @@ export async function calculateScheduledMeetingWithBasis(
   request: ScheduledMeetingRequest,
   providers: ScheduledMeetingProviderBundle,
   signal?: AbortSignal,
+  hooks?: ScheduledMeetingCalculationHooks,
 ): Promise<ScheduledMeetingCalculation> {
   providers.deadlineCheck?.("meeting-start");
   const artifact = providers.artifact;
@@ -87,6 +99,7 @@ export async function calculateScheduledMeetingWithBasis(
   const transferRadiusMeters = providers.transferRadiusMeters ?? DEFAULT_TRANSFER_RADIUS_METERS;
   let seedSets: [readonly ScheduledAccessSeedCandidate[], readonly ScheduledAccessSeedCandidate[]];
   try {
+    await hooks?.onPhase?.("access-seeds");
     const resolvedSeeds = await Promise.all(request.participants.map((participant) => access.resolveAccessSeeds({
       origin: participant.origin,
       schedule: artifact,
@@ -103,6 +116,7 @@ export async function calculateScheduledMeetingWithBasis(
     seedSets[1].map(toScheduledAccessSeed),
   ];
   providers.deadlineCheck?.("meeting-surface");
+  await hooks?.onPhase?.("scheduled-routing");
   const surface = calculateScheduledSurface({
     schedule: artifact,
     accessSeedSets: scheduledSeedSets,
@@ -114,6 +128,7 @@ export async function calculateScheduledMeetingWithBasis(
     deadlineCheck: providers.deadlineCheck,
   });
   providers.deadlineCheck?.("meeting-surface");
+  await hooks?.onPhase?.("station-area-evaluation");
   const stationAreas = surface.stationAreas.map((candidate, index) => {
     if (index % MEETING_RESULT_CHECKPOINT === 0) providers.deadlineCheck?.("meeting-result");
     return {

@@ -1,6 +1,11 @@
 import { ProviderNotConfiguredError, ProviderUnavailableError, type MeetingProviders } from "./providers.ts";
 import type { ScheduledValidationIssue } from "../validation/meeting-v3.ts";
-import { calculateScheduledMeetingWithBasis, deepFreeze, type ScheduledCalculationBasis } from "./scheduled-routing/meeting.ts";
+import {
+  calculateScheduledMeetingWithBasis,
+  deepFreeze,
+  type ScheduledCalculationBasis,
+  type ScheduledMeetingCalculationHooks,
+} from "./scheduled-routing/meeting.ts";
 import { buildScheduledStationAreaCatalog } from "./scheduled-routing/surface.ts";
 import {
   parseScheduledMeetingRequest,
@@ -28,7 +33,11 @@ import {
   routeScheduledSelectedBoardingStop,
   SCHEDULED_DETAIL_SELECTION_POLICY,
 } from "./scheduled-routing/router.ts";
-import type { ScheduledMeetingRequest, ScheduledMeetingStationAreaDto } from "../validation/meeting-v3.ts";
+import type {
+  ScheduledMeetingRequest,
+  ScheduledMeetingResponse,
+  ScheduledMeetingStationAreaDto,
+} from "../validation/meeting-v3.ts";
 import {
   STATION_AREA_DETAILS_CONTRACT_VERSION,
   type StationAreaDetailParticipantDto,
@@ -81,49 +90,88 @@ export interface HandleMeetingPostOptions {
   readonly basisCache?: StationAreaCalculationBasisCache;
 }
 
+export interface HandleMeetingStreamPostOptions extends HandleMeetingPostOptions {
+  readonly heartbeatMs?: number;
+}
+
+export interface ScheduledCalculationErrorOutcome {
+  readonly status: number;
+  readonly code: MeetingApiErrorCode;
+  readonly message: string;
+  readonly issues?: readonly ScheduledValidationIssue[];
+}
+
+export type AcquiredScheduledMeetingCalculation = {
+  readonly kind: "acquired";
+  readonly parsed: ScheduledMeetingRequest;
+  readonly release: () => void;
+  readonly deadline: ScheduledCalculationDeadline;
+  readonly basisCache: StationAreaCalculationBasisCache;
+};
+
+export type AcquireScheduledMeetingCalculationResult =
+  | AcquiredScheduledMeetingCalculation
+  | ({ readonly kind: "error" } & ScheduledCalculationErrorOutcome);
+
+export type RunScheduledMeetingCalculationResult =
+  | { readonly kind: "result"; readonly result: ScheduledMeetingResponse; readonly calculationRef: string | null }
+  | ({ readonly kind: "error" } & ScheduledCalculationErrorOutcome);
+
+const MEETING_STREAM_DEFAULT_HEARTBEAT_MS = 15_000;
+
 export async function handleMeetingPost(
   request: Request,
   providersSource: MeetingProvidersSource,
   options: HandleMeetingPostOptions = {},
 ): Promise<Response> {
+  const acquired = await acquireScheduledMeetingCalculation(request, options);
+  if (acquired.kind === "error") {
+    return jsonError(acquired.status, acquired.code, acquired.message, acquired.issues);
+  }
+  const run = await runScheduledMeetingCalculation(acquired, providersSource, {});
+  if (run.kind === "error") {
+    return jsonError(run.status, run.code, run.message, run.issues);
+  }
+  return Response.json(run.result, {
+    status: 200,
+    headers: run.calculationRef === null ? {} : { [STATION_AREA_CALCULATION_REF_HEADER]: run.calculationRef },
+  });
+}
+
+export async function acquireScheduledMeetingCalculation(
+  request: Request,
+  options: HandleMeetingPostOptions = {},
+): Promise<AcquireScheduledMeetingCalculationResult> {
   const declaredLength = request.headers.get("content-length");
   if (declaredLength && isTooLargeContentLength(declaredLength)) {
-    return jsonError(
-      413,
-      "REQUEST_TOO_LARGE",
-      `Request body must not exceed ${MAX_MEETING_REQUEST_BODY_BYTES} bytes.`,
-    );
+    return { kind: "error", ...errorOutcome(413, "REQUEST_TOO_LARGE", `Request body must not exceed ${MAX_MEETING_REQUEST_BODY_BYTES} bytes.`) };
   }
 
   let bodyText: string;
   try {
     bodyText = await request.text();
   } catch {
-    return jsonError(400, "MALFORMED_JSON", "Request body could not be read as JSON.");
+    return { kind: "error", ...errorOutcome(400, "MALFORMED_JSON", "Request body could not be read as JSON.") };
   }
 
   if (new TextEncoder().encode(bodyText).byteLength > MAX_MEETING_REQUEST_BODY_BYTES) {
-    return jsonError(
-      413,
-      "REQUEST_TOO_LARGE",
-      `Request body must not exceed ${MAX_MEETING_REQUEST_BODY_BYTES} bytes.`,
-    );
+    return { kind: "error", ...errorOutcome(413, "REQUEST_TOO_LARGE", `Request body must not exceed ${MAX_MEETING_REQUEST_BODY_BYTES} bytes.`) };
   }
 
   let body: unknown;
   try {
     body = JSON.parse(bodyText) as unknown;
   } catch {
-    return jsonError(400, "MALFORMED_JSON", "Request body must contain valid JSON.");
+    return { kind: "error", ...errorOutcome(400, "MALFORMED_JSON", "Request body must contain valid JSON.") };
   }
 
   const parsedScheduled = parseScheduledMeetingRequest(body);
   if (!parsedScheduled.success) {
-    return jsonError(400, "INVALID_REQUEST", "Request body must use the meeet-meeting/v3 scheduled contract.", parsedScheduled.issues);
+    return { kind: "error", ...errorOutcome(400, "INVALID_REQUEST", "Request body must use the meeet-meeting/v3 scheduled contract.", parsedScheduled.issues) };
   }
   const release = (options.admission ?? scheduledCalculationAdmission).tryAcquire();
   if (release === null) {
-    return jsonError(503, "TEMPORARILY_UNAVAILABLE", "A scheduled meeting calculation is already in progress. Please try again shortly.");
+    return { kind: "error", ...errorOutcome(503, "TEMPORARILY_UNAVAILABLE", "A scheduled meeting calculation is already in progress. Please try again shortly.") };
   }
   let deadline: ScheduledCalculationDeadline | undefined;
   try {
@@ -135,45 +183,169 @@ export async function handleMeetingPost(
       requestSignal: request.signal,
     });
     deadline.check();
+    if (request.signal.aborted) {
+      deadline.dispose();
+      release();
+      return { kind: "error", ...errorOutcome(503, "TEMPORARILY_UNAVAILABLE", "The scheduled meeting calculation was cancelled before it could start.") };
+    }
+  } catch (error) {
+    deadline?.dispose();
+    release();
+    if (error instanceof ProviderConfigurationError) throw error;
+    if (deadline?.isExpired()) {
+      return { kind: "error", ...errorOutcome(503, "TEMPORARILY_UNAVAILABLE", "The scheduled meeting calculation exceeded its 90-second deadline. Please try again shortly.") };
+    }
+    return { kind: "error", ...scheduledErrorOutcome(error) };
+  }
+  return {
+    kind: "acquired",
+    parsed: parsedScheduled.data,
+    release,
+    deadline,
+    basisCache: options.basisCache ?? stationAreaCalculationBasisCache,
+  };
+}
+
+export async function runScheduledMeetingCalculation(
+  acquired: AcquiredScheduledMeetingCalculation,
+  providersSource: MeetingProvidersSource,
+  hooks: ScheduledMeetingCalculationHooks,
+): Promise<RunScheduledMeetingCalculationResult> {
+  const { parsed, release, deadline, basisCache } = acquired;
+  try {
+    deadline.check();
     const providers = typeof providersSource === "function" ? providersSource() : providersSource;
     deadline.check();
     const calculationProviders = withDeadlineCheckedAccess(providers, deadline);
-    const calculation = await calculateScheduledMeetingWithBasis(parsedScheduled.data, {
+    const calculation = await calculateScheduledMeetingWithBasis(parsed, {
       artifact: calculationProviders.scheduledArtifact,
       access: calculationProviders.scheduledAccess,
       deadlineCheck: deadline.check,
-    }, deadline.signal);
+    }, deadline.signal, hooks);
     const result = calculation.response;
     deadline.check();
     const stationAreaCatalog = calculationProviders.scheduledArtifact === undefined
       ? undefined
       : buildScheduledStationAreaCatalog(calculationProviders.scheduledArtifact, deadline.check);
-    if (!validateScheduledMeetingResponse(result, parsedScheduled.data, { stationAreaCatalog, deadlineCheck: deadline.check }).success) {
-      return jsonError(500, "CALCULATION_FAILED", "The scheduled meeting response failed validation.");
+    await hooks.onPhase?.("validating-result");
+    if (!validateScheduledMeetingResponse(result, parsed, { stationAreaCatalog, deadlineCheck: deadline.check }).success) {
+      return { kind: "error", ...errorOutcome(500, "CALCULATION_FAILED", "The scheduled meeting response failed validation.") };
     }
     deadline.check();
-    const basisCache = options.basisCache ?? stationAreaCalculationBasisCache;
-    let calculationReference: string;
+    let calculationReference: string | null;
     try {
       calculationReference = basisCache.put(calculation.basis);
     } catch (error) {
       if (isStationAreaCalculationBasisCacheLimitError(error)) {
-        return Response.json(result, { status: 200 });
+        calculationReference = null;
+      } else {
+        throw error;
       }
-      throw error;
     }
     deadline.check();
-    return Response.json(result, { status: 200, headers: { [STATION_AREA_CALCULATION_REF_HEADER]: calculationReference } });
+    return { kind: "result", result, calculationRef: calculationReference };
   } catch (error) {
     if (error instanceof ProviderConfigurationError) throw error;
-    if (deadline?.isExpired()) {
-      return jsonError(503, "TEMPORARILY_UNAVAILABLE", "The scheduled meeting calculation exceeded its 90-second deadline. Please try again shortly.");
+    if (deadline.isExpired()) {
+      return { kind: "error", ...errorOutcome(503, "TEMPORARILY_UNAVAILABLE", "The scheduled meeting calculation exceeded its 90-second deadline. Please try again shortly.") };
     }
-    return scheduledErrorResponse(error);
+    return { kind: "error", ...scheduledErrorOutcome(error) };
   } finally {
-    deadline?.dispose();
+    deadline.dispose();
     release();
   }
+}
+
+export async function handleMeetingStreamPost(
+  request: Request,
+  providersSource: MeetingProvidersSource,
+  options: HandleMeetingStreamPostOptions = {},
+): Promise<Response> {
+  const acquired = await acquireScheduledMeetingCalculation(request, options);
+  if (acquired.kind === "error") {
+    return jsonError(acquired.status, acquired.code, acquired.message, acquired.issues);
+  }
+  const heartbeatMs = options.heartbeatMs ?? MEETING_STREAM_DEFAULT_HEARTBEAT_MS;
+  const encoder = new TextEncoder();
+  const stream = new ReadableStream<Uint8Array>({
+    start(controller) {
+      let closed = false;
+      let lastWriteAt = Date.now();
+      const write = async (chunk: string): Promise<void> => {
+        if (closed) return;
+        try {
+          controller.enqueue(encoder.encode(chunk));
+          lastWriteAt = Date.now();
+        } catch {
+          closed = true;
+        }
+      };
+      const close = (): void => {
+        if (closed) return;
+        closed = true;
+        try {
+          controller.close();
+        } catch {
+          // The consumer already cancelled or closed the stream.
+        }
+      };
+      const heartbeat = setInterval(() => {
+        if (closed) return;
+        if (Date.now() - lastWriteAt >= heartbeatMs) {
+          try {
+            controller.enqueue(encoder.encode(": heartbeat\n\n"));
+            lastWriteAt = Date.now();
+          } catch {
+            closed = true;
+          }
+        }
+      }, heartbeatMs);
+      if (typeof heartbeat === "object" && heartbeat !== null && "unref" in heartbeat && typeof heartbeat.unref === "function") {
+        heartbeat.unref();
+      }
+      const hooks: ScheduledMeetingCalculationHooks = {
+        async onPhase(phase) {
+          await write(`event: progress\ndata: ${JSON.stringify({ contractVersion: "meeet-calculation-progress/v1", phase })}\n\n`);
+        },
+      };
+      void (async () => {
+        try {
+          const run = await runScheduledMeetingCalculation(acquired, providersSource, hooks);
+          if (run.kind === "error") {
+            await write(`event: error\ndata: ${JSON.stringify({ code: run.code, message: run.message })}\n\n`);
+          } else {
+            if (run.calculationRef !== null) {
+              await write(`event: ref\ndata: ${JSON.stringify({ calculationRef: run.calculationRef })}\n\n`);
+            }
+            await write(`event: result\ndata: ${JSON.stringify(run.result)}\n\n`);
+          }
+        } catch (error) {
+          const configurationFailure = error instanceof ProviderConfigurationError;
+          await write(`event: error\ndata: ${JSON.stringify({
+            code: configurationFailure ? "PROVIDER_CONFIGURATION_INVALID" : "CALCULATION_FAILED",
+            message: configurationFailure ? "Server provider configuration is invalid." : "The scheduled meeting calculation could not be completed.",
+          })}\n\n`);
+        } finally {
+          clearInterval(heartbeat);
+          close();
+        }
+      })();
+    },
+    cancel() {
+      // The client disconnected. Writes fail and stop; the request.signal abort
+      // propagates through the deadline composite signal and aborts downstream
+      // work, and the run's finally disposes the deadline and releases admission
+      // exactly once. A disconnected stream never produces a meeting result.
+    },
+  });
+  return new Response(stream, {
+    status: 200,
+    headers: {
+      "Content-Type": "text/event-stream",
+      "Cache-Control": "no-cache, no-transform",
+      "X-Accel-Buffering": "no",
+    },
+  });
 }
 
 export async function handleStationAreaDetailsPost(
@@ -431,18 +603,32 @@ function jsonError(
   return Response.json(response, { status });
 }
 
-function scheduledErrorResponse(error: unknown): Response {
+function errorOutcome(
+  status: number,
+  code: MeetingApiErrorCode,
+  message: string,
+  issues?: readonly ScheduledValidationIssue[],
+): ScheduledCalculationErrorOutcome {
+  return { status, code, message, ...(issues ? { issues } : {}) };
+}
+
+function scheduledErrorOutcome(error: unknown): ScheduledCalculationErrorOutcome {
   if (error instanceof RangeError) {
-    return jsonError(400, "INVALID_REQUEST", error.message);
+    return errorOutcome(400, "INVALID_REQUEST", error.message);
   }
   if (error instanceof ProviderUnavailableError) {
-    return jsonError(503, "PROVIDER_UNAVAILABLE", "A required scheduled meeting-data provider is currently unavailable.");
+    return errorOutcome(503, "PROVIDER_UNAVAILABLE", "A required scheduled meeting-data provider is currently unavailable.");
   }
   if (error instanceof ScheduleArtifactUnavailableError) {
-    return jsonError(503, "PROVIDER_UNAVAILABLE", "The configured scheduled timetable artifact is unavailable.");
+    return errorOutcome(503, "PROVIDER_UNAVAILABLE", "The configured scheduled timetable artifact is unavailable.");
   }
   if (error instanceof ProviderNotConfiguredError) {
-    return jsonError(503, "PROVIDER_NOT_CONFIGURED", "The compiled schedule and MVG access provider are not configured for this deployment.");
+    return errorOutcome(503, "PROVIDER_NOT_CONFIGURED", "The compiled schedule and MVG access provider are not configured for this deployment.");
   }
-  return jsonError(500, "CALCULATION_FAILED", "The scheduled meeting calculation could not be completed.");
+  return errorOutcome(500, "CALCULATION_FAILED", "The scheduled meeting calculation could not be completed.");
+}
+
+function scheduledErrorResponse(error: unknown): Response {
+  const outcome = scheduledErrorOutcome(error);
+  return jsonError(outcome.status, outcome.code, outcome.message, outcome.issues);
 }
