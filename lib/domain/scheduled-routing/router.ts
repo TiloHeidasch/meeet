@@ -577,6 +577,13 @@ function mergeContiguousTransitSegments(
   return result;
 }
 
+const routingWindowCache = new Map<string, ScheduledRoutingWindow>();
+const MAX_CACHED_ROUTING_WINDOWS = 4;
+
+export function clearScheduledRoutingWindowCache(): void {
+  routingWindowCache.clear();
+}
+
 export function createScheduledRoutingWindow(
   schedule: ScheduledRoutingArtifact,
   searchStartAt: string,
@@ -593,11 +600,20 @@ export function createScheduledRoutingWindow(
   const parsedStart = parseOffsetInstant(searchStartAt, schedule.timeZone);
   validateScheduledSearchWindow(schedule, parsedStart.epochSeconds);
   const horizonEndEpochSeconds = parsedStart.epochSeconds + ROUTING_HORIZON_SECONDS;
+  const isCacheable = !instrumentation.onCandidateServiceDate && !instrumentation.serviceDateAnchor;
+  const cacheKey = `${schedule.provenance.compiledArtifactId}:${parsedStart.canonicalAt}:${resolvedOptions.walkingVelocityMetersPerSecond}:${resolvedOptions.transferRadiusMeters}`;
+  if (isCacheable) {
+    const cached = routingWindowCache.get(cacheKey);
+    if (cached !== undefined && cached.schedule === schedule) {
+      resolvedOptions.deadlineCheck?.("routing-window");
+      return cached;
+    }
+  }
   const connections = materializeConnections(schedule, parsedStart.epochSeconds, horizonEndEpochSeconds, instrumentation, resolvedOptions.deadlineCheck);
   resolvedOptions.deadlineCheck?.("routing-window");
   const spatialIndex = buildSpatialIndex(schedule.boardingStops, resolvedOptions.transferRadiusMeters);
   resolvedOptions.deadlineCheck?.("routing-window");
-  return Object.freeze({
+  const window: ScheduledRoutingWindow = Object.freeze({
     schedule,
     searchStartAt: parsedStart.canonicalAt,
     searchStartEpochSeconds: parsedStart.epochSeconds,
@@ -608,6 +624,14 @@ export function createScheduledRoutingWindow(
     spatialIndex,
     deadlineCheck: resolvedOptions.deadlineCheck,
   });
+  if (isCacheable) {
+    if (routingWindowCache.size >= MAX_CACHED_ROUTING_WINDOWS) {
+      const firstKey = routingWindowCache.keys().next().value;
+      if (firstKey !== undefined) routingWindowCache.delete(firstKey);
+    }
+    routingWindowCache.set(cacheKey, window);
+  }
+  return window;
 }
 
 export function validateScheduledSearchWindow(schedule: ScheduledRoutingArtifact, searchStartEpochSeconds: number): void {
