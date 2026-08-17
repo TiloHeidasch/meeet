@@ -91,11 +91,10 @@ jobs:
         uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302
         with:
           images: ghcr.io/${{ steps.image.outputs.owner }}/meeet-artifact-compiler
-          # Derive the tag and OCI revision label from the checked-out
-          # revision, not from the workflow-dispatch branch head.
-          context: git
           tags: |
-            type=sha,format=long,prefix=sha-
+            type=raw,value=sha-${{ inputs.source_sha }}
+          labels: |
+            org.opencontainers.image.revision=${{ inputs.source_sha }}
 
       - name: Build and publish compiler
         id: build_compiler
