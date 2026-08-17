@@ -40,9 +40,9 @@ test("compiler dispatch requires and validates an explicit full source SHA", () 
 test("compiler workflow publishes only the immutable sha-<full-sha> compiler image", () => {
   assert.match(publishJob(compilerWorkflow), /target:\s*artifact-compiler/);
   assert.match(publishJob(compilerWorkflow), /platforms:\s*linux\/amd64,linux\/arm64/);
-  assert.match(publishJob(compilerWorkflow), /type=sha,format=long,prefix=sha-/);
+  assert.match(publishJob(compilerWorkflow), /type=raw,value=sha-\${{\s*inputs\.source_sha\s*}}/);
   assert.doesNotMatch(publishJob(compilerWorkflow), /type=ref/);
-  assert.match(publishJob(compilerWorkflow), /context:\s*git/);
+  assert.match(publishJob(compilerWorkflow), /org\.opencontainers\.image\.revision=\${{\s*inputs\.source_sha\s*}}/);
   assert.match(publishJob(compilerWorkflow), /provenance:\s*mode=max/);
   assert.match(publishJob(compilerWorkflow), /sbom:\s*true/);
   assert.match(publishJob(compilerWorkflow), /attest-build-provenance/);
