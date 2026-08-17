@@ -14,4 +14,5 @@ export type StationVerdict = {
   readonly name: string;
   readonly coordinate: { readonly latitude: number; readonly longitude: number };
   readonly verdict: "red" | "blue" | "fair" | "unclassified";
+  readonly mode?: "sbahn" | "ubahn" | "tram" | "bus";
 };

@@ -852,7 +852,7 @@ test("agency timezone and unsupported GTFS extensions are fail-closed", () => {
 
 test("station-level collapse drops intra-area legs and deduplicates consecutive same-area visits", () => {
   const schedule = FIXTURE_SCHEDULED_ARTIFACT;
-  assert.ok(schedule.stationAreas.every((area) => Object.keys(area).sort().join(",") === "coordinate,id,name"));
+  assert.ok(schedule.stationAreas.every((area) => Object.keys(area).sort().join(",") === "coordinate,id,mode,name"));
   assert.ok(schedule.connections.every((connection) => connection.fromStationAreaId !== connection.toStationAreaId));
   const collapse = schedule.connections.filter((connection) => connection.tripId === "fixture-collapse");
   assert.deepEqual(collapse.map((connection) => [connection.fromStationAreaId, connection.toStationAreaId]), [
@@ -892,4 +892,59 @@ test("station-level collapse keeps non-consecutive same-area visits as separate 
   assert.equal(returnTrip[1]?.toStopSequence, 2);
   assert.equal(returnTrip[2]?.fromStopSequence, 2);
   assert.equal(returnTrip[2]?.toStopSequence, 3);
+});
+
+test("station area modes are classified according to strict hierarchy: S-Bahn > U-Bahn > Tram > Bus", () => {
+  const customFiles: GtfsFeedFiles = {
+    ...FIXTURE_FILES,
+    "routes.txt": [
+      "route_id,route_short_name,route_long_name,route_type",
+      "sbahn-line,S1,S-Bahn 1,2",
+      "ubahn-line,U2,U-Bahn 2,1",
+      "tram-line,19,Tram 19,0",
+      "bus-line,100,Museumsbus,3",
+    ].join("\n"),
+    "stops.txt": [
+      "stop_id,stop_name,stop_lat,stop_lon,location_type,parent_station",
+      "multi-station,Multi Station,48.1374,11.5755,1,",
+      "multi-s,Multi S Platform,48.1374,11.5755,0,multi-station",
+      "multi-u,Multi U Platform,48.1374,11.5755,0,multi-station",
+      "u-tram-station,U-Tram Station,48.1400,11.5700,1,",
+      "ut-u,UT U Platform,48.1400,11.5700,0,u-tram-station",
+      "ut-t,UT T Platform,48.1400,11.5700,0,u-tram-station",
+      "tram-bus-station,Tram-Bus Station,48.1450,11.5650,1,",
+      "tb-t,TB T Platform,48.1450,11.5650,0,tram-bus-station",
+      "tb-b,TB B Platform,48.1450,11.5650,0,tram-bus-station",
+      "bus-only-station,Bus Only Station,48.1500,11.5600,1,",
+      "bo-b,BO B Platform,48.1500,11.5600,0,bus-only-station",
+    ].join("\n"),
+    "trips.txt": [
+      "route_id,service_id,trip_id",
+      "sbahn-line,weekday,s-trip",
+      "ubahn-line,weekday,u-trip",
+      "tram-line,weekday,t-trip",
+      "bus-line,weekday,b-trip",
+    ].join("\n"),
+    "stop_times.txt": [
+      "trip_id,arrival_time,departure_time,stop_id,stop_sequence",
+      "s-trip,08:00:00,08:00:00,multi-s,1",
+      "s-trip,08:10:00,08:10:00,bo-b,2",
+      "u-trip,08:00:00,08:00:00,multi-u,1",
+      "u-trip,08:10:00,08:10:00,ut-u,2",
+      "t-trip,08:00:00,08:00:00,ut-t,1",
+      "t-trip,08:10:00,08:10:00,tb-t,2",
+      "b-trip,08:00:00,08:00:00,tb-b,1",
+      "b-trip,08:10:00,08:10:00,bo-b,2",
+    ].join("\n"),
+  };
+  const compiled = importFixtureFiles(customFiles);
+  const byId = new Map(compiled.stationAreas.map((a) => [a.id, a]));
+  // Multi has S-Bahn and U-Bahn -> highest is S-Bahn
+  assert.equal(byId.get("multi-station")?.mode, "sbahn");
+  // U-Tram has U-Bahn and Tram -> highest is U-Bahn
+  assert.equal(byId.get("u-tram-station")?.mode, "ubahn");
+  // Tram-Bus has Tram and Bus -> highest is Tram
+  assert.equal(byId.get("tram-bus-station")?.mode, "tram");
+  // Bus-Only has S-Bahn visit (bo-b on s-trip) -> S-Bahn
+  assert.equal(byId.get("bus-only-station")?.mode, "sbahn");
 });

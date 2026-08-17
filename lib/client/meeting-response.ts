@@ -10,10 +10,12 @@ import type {
 export type MeetingRequest = ScheduledMeetingRequest & {
   readonly changeTimePreset: "quick" | "medium" | "long";
 };
+export type StationAreaMode = "sbahn" | "ubahn" | "tram" | "bus";
 export type StationAreaClassification = "red" | "blue" | "fair" | "unclassified";
 export type MeetingStationArea = {
   readonly stationAreaId: string; readonly name: string;
   readonly coordinate: { readonly latitude: number; readonly longitude: number };
+  readonly mode: StationAreaMode;
   readonly classification: StationAreaClassification;
   readonly redArrivalSeconds: number | null; readonly blueArrivalSeconds: number | null;
   readonly fasterParticipant: "red" | "blue" | null; readonly withinSelectedTolerance: boolean;
@@ -144,9 +146,9 @@ function originShape(value: unknown): value is { label: string; latitude: number
 function stationArea(value: unknown, index: number, status: unknown, tolerance: unknown, issues: ClientValidationIssue[]): boolean {
   const path = ["stationAreas", index];
   if (!object(value)) { fail(issues, path, "Station area must be an object."); return false; }
-  keys(value, ["stationAreaId", "name", "coordinate", "classification", "redArrivalSeconds", "blueArrivalSeconds", "fasterParticipant", "withinSelectedTolerance"], path, issues);
+  keys(value, ["stationAreaId", "name", "coordinate", "mode", "classification", "redArrivalSeconds", "blueArrivalSeconds", "fasterParticipant", "withinSelectedTolerance"], path, issues);
   if (object(value.coordinate)) keys(value.coordinate, ["latitude", "longitude"], [...path, "coordinate"], issues);
-  const valid = nonEmpty(value.stationAreaId) && nonEmpty(value.name) && insideOfficialMunichBoundary(value.coordinate) && ["red", "blue", "fair", "unclassified"].includes(String(value.classification)) && nullableWhole(value.redArrivalSeconds) && nullableWhole(value.blueArrivalSeconds) && (value.fasterParticipant === null || value.fasterParticipant === "red" || value.fasterParticipant === "blue") && typeof value.withinSelectedTolerance === "boolean";
+  const valid = nonEmpty(value.stationAreaId) && nonEmpty(value.name) && ["sbahn", "ubahn", "tram", "bus"].includes(String(value.mode)) && insideOfficialMunichBoundary(value.coordinate) && ["red", "blue", "fair", "unclassified"].includes(String(value.classification)) && nullableWhole(value.redArrivalSeconds) && nullableWhole(value.blueArrivalSeconds) && (value.fasterParticipant === null || value.fasterParticipant === "red" || value.fasterParticipant === "blue") && typeof value.withinSelectedTolerance === "boolean";
   const red = value.redArrivalSeconds; const blue = value.blueArrivalSeconds;
   if (status === "no-result" && (value.classification !== "unclassified" || red !== null || blue !== null || value.fasterParticipant !== null || value.withinSelectedTolerance !== false)) fail(issues, path, "No-result station areas must be unclassified and have no travel fields.");
   if (status === "ok" && nullableWhole(red) && nullableWhole(blue)) { const hasRed = red !== null; const hasBlue = blue !== null; const fair = hasRed && hasBlue && Math.abs(red - blue) * 100 <= (red + blue) * Number(tolerance); const expected = !hasRed && !hasBlue ? "unclassified" : fair ? "fair" : hasRed && hasBlue ? red! < blue! ? "red" : "blue" : hasRed ? "red" : "blue"; const faster = !hasRed && !hasBlue ? null : hasRed && hasBlue && red === blue ? null : hasRed && hasBlue ? red! < blue! ? "red" : "blue" : hasRed ? "red" : "blue"; const expectedTolerance = !hasRed && !hasBlue ? false : fair; if (value.classification !== expected || value.withinSelectedTolerance !== expectedTolerance || value.fasterParticipant !== faster) fail(issues, path, "Station area classification contradicts arrivals."); }

@@ -163,6 +163,7 @@ export async function calculateScheduledMeetingWithBasis(
         stationAreaId: candidate.stationAreaId,
         name: candidate.name,
         coordinate: candidate.coordinate,
+        mode: candidate.mode,
         classification: candidate.classification,
         redArrivalSeconds: candidate.redArrivalSeconds,
         blueArrivalSeconds: candidate.blueArrivalSeconds,
@@ -174,6 +175,7 @@ export async function calculateScheduledMeetingWithBasis(
         stationAreaId: candidate.stationAreaId,
         name: candidate.name,
         coordinate: candidate.coordinate,
+        mode: candidate.mode,
         verdict: candidate.classification,
       });
     },

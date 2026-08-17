@@ -194,6 +194,16 @@ test("throws on a ref event with an empty calculationRef", async () => {
   await assert.rejects(collect(streamResponse([missing])), CalculationStreamError);
 });
 
+test("parses station-verdict with mode and rejects invalid mode", async () => {
+  const withMode = `event: station-verdict\ndata: ${JSON.stringify({ contractVersion: CALCULATION_PROGRESS_CONTRACT_VERSION, stationAreaId: "area-1", name: "Area 1", coordinate: { latitude: 48.13, longitude: 11.58 }, verdict: "fair", mode: "sbahn" })}\n\n`;
+  const events = await collect(streamResponse([withMode]));
+  assert.deepEqual(events, [
+    { kind: "station-verdict", verdict: { stationAreaId: "area-1", name: "Area 1", coordinate: { latitude: 48.13, longitude: 11.58 }, verdict: "fair", mode: "sbahn" } },
+  ]);
+  const invalidMode = `event: station-verdict\ndata: ${JSON.stringify({ contractVersion: CALCULATION_PROGRESS_CONTRACT_VERSION, stationAreaId: "area-1", name: "Area 1", coordinate: { latitude: 48.13, longitude: 11.58 }, verdict: "fair", mode: "airplane" })}\n\n`;
+  await assert.rejects(collect(streamResponse([invalidMode])), CalculationStreamError);
+});
+
 test("propagates an abort mid-read", async () => {
   const controller = new AbortController();
   const response = new Response(

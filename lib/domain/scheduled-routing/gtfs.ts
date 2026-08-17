@@ -15,6 +15,7 @@ import type {
   ScheduledTrip,
   ServiceCalendar,
   ServiceException,
+  StationAreaMode,
 } from "./models.ts";
 import { addServiceDays, parseOffsetInstant, serviceDateAnchorEpochSeconds } from "./time.ts";
 
@@ -149,8 +150,9 @@ export function importGtfsSchedule(
 
   const routes = parseRoutes(routesTable);
   const stops = parseStops(stopsTable);
-  const stationAreas = createStationAreas(stops);
   const trips = parseTrips(tripsTable, routes);
+  const modesByArea = deriveStationAreaModes(stopTimesTable, trips, stops, routes);
+  const stationAreas = createStationAreas(stops, modesByArea);
   const calendars = parseCalendars(calendarTable);
   const exceptions = parseExceptions(exceptionsTable);
   validateServices(trips, calendars, exceptions, calendarTable !== null);
@@ -364,12 +366,76 @@ function parseStops(table: CsvTable): StopRecord[] {
   return stops;
 }
 
-function createStationAreas(stops: readonly StopRecord[]): ScheduledStationArea[] {
+export const MODE_PRIORITY: Record<StationAreaMode, number> = {
+  sbahn: 4,
+  ubahn: 3,
+  tram: 2,
+  bus: 1,
+};
+
+export function routeTypeToMode(routeType: number): StationAreaMode {
+  if (routeType === 2 || (routeType >= 100 && routeType <= 199)) return "sbahn";
+  if (routeType === 1 || (routeType >= 400 && routeType <= 499)) return "ubahn";
+  if (routeType === 0 || (routeType >= 900 && routeType <= 999)) return "tram";
+  return "bus";
+}
+
+function highestStationMode(modes?: ReadonlySet<StationAreaMode>): StationAreaMode {
+  if (!modes || modes.size === 0) return "bus";
+  let highest: StationAreaMode = "bus";
+  let highestRank = MODE_PRIORITY.bus;
+  for (const mode of modes) {
+    const rank = MODE_PRIORITY[mode];
+    if (rank > highestRank) {
+      highest = mode;
+      highestRank = rank;
+    }
+  }
+  return highest;
+}
+
+function deriveStationAreaModes(
+  stopTimesTable: CsvTable,
+  trips: readonly ScheduledTrip[],
+  stops: readonly StopRecord[],
+  routes: readonly ScheduledRoute[],
+): ReadonlyMap<string, ReadonlySet<StationAreaMode>> {
+  const tripById = new Map(trips.map((trip) => [trip.tripId, trip]));
+  const stopById = new Map(stops.map((stop) => [stop.id, stop]));
+  const routeById = new Map(routes.map((route) => [route.routeId, route]));
+  const modesByArea = new Map<string, Set<StationAreaMode>>();
+
+  for (const row of stopTimesTable.rows) {
+    const tripId = row.trip_id;
+    const stopId = row.stop_id;
+    if (!tripId || !stopId) continue;
+    const trip = tripById.get(tripId);
+    const stop = stopById.get(stopId);
+    if (!trip || !stop) continue;
+    const route = routeById.get(trip.routeId);
+    if (!route) continue;
+    const areaId = stop.parentStationId ?? stop.id;
+    const mode = routeTypeToMode(route.routeType);
+    let areaModes = modesByArea.get(areaId);
+    if (!areaModes) {
+      areaModes = new Set<StationAreaMode>();
+      modesByArea.set(areaId, areaModes);
+    }
+    areaModes.add(mode);
+  }
+  return modesByArea;
+}
+
+function createStationAreas(
+  stops: readonly StopRecord[],
+  modesByArea: ReadonlyMap<string, ReadonlySet<StationAreaMode>>,
+): ScheduledStationArea[] {
   const byId = new Map(stops.map((stop) => [stop.id, stop]));
   const areas: ScheduledStationArea[] = [];
   for (const stop of stops) {
     if (stop.locationType === 1) {
-      areas.push({ id: stop.id, name: stop.name, coordinate: coordinateOf(stop) });
+      const mode = highestStationMode(modesByArea.get(stop.id));
+      areas.push({ id: stop.id, name: stop.name, coordinate: coordinateOf(stop), mode });
     }
   }
   for (const stop of stops) {
@@ -379,7 +445,8 @@ function createStationAreas(stops: readonly StopRecord[]): ScheduledStationArea[
       throw new GtfsValidationError(`parent_station ${stop.parentStationId} does not identify a parent station.`, "stops.txt");
     }
     if (parent === null) {
-      areas.push({ id: stop.id, name: stop.name, coordinate: coordinateOf(stop) });
+      const mode = highestStationMode(modesByArea.get(stop.id));
+      areas.push({ id: stop.id, name: stop.name, coordinate: coordinateOf(stop), mode });
     }
   }
   return areas;

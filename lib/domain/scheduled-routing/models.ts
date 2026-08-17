@@ -41,11 +41,14 @@ export interface ScheduledRoute {
   readonly routeType: number;
 }
 
+export type StationAreaMode = "sbahn" | "ubahn" | "tram" | "bus";
+
 export interface ScheduledStationArea {
   /** Parent-station identity, or the boarding stop identity for a stand-alone stop. */
   readonly id: string;
   readonly name: string;
   readonly coordinate: ScheduledCoordinate;
+  readonly mode: StationAreaMode;
 }
 
 /** Only regular boarding/alighting and explicit no-board/no-alight are routable. */
@@ -179,6 +182,7 @@ export interface ScheduledStationAreaCandidate {
   readonly stationAreaId: string;
   readonly name: string;
   readonly coordinate: ScheduledCoordinate;
+  readonly mode: StationAreaMode;
   readonly classification: ScheduledCellClassification;
   readonly redArrivalSeconds: number | null;
   readonly blueArrivalSeconds: number | null;
@@ -190,6 +194,7 @@ export interface ScheduledStationAreaCatalogEntry {
   readonly stationAreaId: string;
   readonly name: string;
   readonly coordinate: ScheduledCoordinate;
+  readonly mode: StationAreaMode;
 }
 
 export interface ScheduledStationAreaCatalog {
