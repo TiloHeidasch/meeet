@@ -30,9 +30,9 @@ The live profile is an operator-owned configuration outside this repository:
 
   The operator chooses the runner tag or digest and the compiler image in the
   external Unraid `.env`; they are not stored in this repository. The compiler
-  image is selected by the operator, for example the digest emitted by the
-  manually dispatched `publish-compiler.yml` workflow (see
-  [Compiler image publication and pairing](#compiler-image-publication-and-pairing)).
+  image is selected by the operator, for example the digest-pinned value from
+  the unified image publication workflow (see
+  [Image publication and pairing](#image-publication-and-pairing)).
 - `MEEET_SCHEDULE_HOST_DIR` is bind-mounted read-only into the app at
   `/opt/meeet/schedule`, and read-write into the compiler at `/output`.
 - The tracked template uses the same shape: `cloudflared` runs
@@ -82,41 +82,26 @@ Use the runner image tag or digest and the compiler image selected by the
 operator. Changing them or the live `cloudflare/cloudflared:latest` image is an
 external Unraid configuration change.
 
-## Compiler image publication and pairing
+## Image publication and pairing
 
-The runner image and the artifact-compiler image are published by separate
-workflows:
+Pushes to `main` and release tags run the unified `publish-image.yml` workflow,
+which validates on Node 24 and builds and publishes both the runner
+(`ghcr.io/tiloheidasch/meeet`) and compiler
+(`ghcr.io/tiloheidasch/meeet-artifact-compiler`) multi-platform images
+(`linux/amd64`, `linux/arm64`) with immutable `sha-<full-sha>` tags, OCI
+revision labels, and provenance.
 
-- Routine pushes to `main` run `publish-runner.yml`, which builds and publishes
-  only the backend runner image (`ghcr.io/tiloheidasch/meeet`). It never
-  touches the compiler target.
-- The compiler image is published only through a deliberate, authenticated
-  GitHub Actions dispatch of `publish-compiler.yml`, never by a branch push.
-  Trigger it only after a successful push that changes the compiler image
-  target, compiler/import scripts, the GTFS/artifact model, or their locked
-  dependencies; app-only changes do not trigger it:
-
-  ```bash
-  gh workflow run publish-compiler.yml --ref <pushed-branch> -f source_sha=<full-commit-sha>
-  ```
-
-  The dispatch validates the given revision, runs the validation suite, and
-  publishes an immutable `sha-<full-sha>` multi-platform image with SBOM,
-  provenance, and attestation. It cannot deploy an application, rotate a
-  schedule artifact, alter the operator-owned Unraid deployment, or retag a
-  production image; the workflow summary emits the compiler digest.
-
-To rotate the MVV artifact, the operator pairs the manually published compiler
-digest with the runner revision in the external Unraid `.env`:
+The workflow summary emits digest-pinned deployment references for both images
+to pair in the operator-owned runtime `.env`:
 
 ```dotenv
-MEEET_IMAGE=ghcr.io/tiloheidasch/meeet:sha-<runner-commit>
+MEEET_IMAGE=ghcr.io/tiloheidasch/meeet@sha256:<runner-digest>
 MEEET_COMPILER_IMAGE=ghcr.io/tiloheidasch/meeet-artifact-compiler@sha256:<compiler-digest>
 ```
 
 At startup the one-shot `compiler` service runs exactly that compiler image.
 Because the artifact manifest records the compiler version
-(`meeet-scheduled-compiler/v1`), a different compiler digest recompiles the
+(`meeet-scheduled-compiler/v2`), a different compiler digest recompiles the
 artifact even when the underlying feed data is unchanged, which is what makes a
 new compiler revision effective for rotation.
 
