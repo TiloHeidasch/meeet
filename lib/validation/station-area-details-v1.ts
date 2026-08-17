@@ -26,7 +26,7 @@ export type StationAreaDetailsValidationResult =
   | { readonly success: false; readonly issues: readonly ScheduledValidationIssue[] };
 
 const DETAIL_KEYS = ["contractVersion", "status", "reason", "stationArea", "participants", "basis"] as const;
-const MARKER_KEYS = ["stationAreaId", "name", "coordinate", "classification", "redArrivalSeconds", "blueArrivalSeconds", "fasterParticipant", "withinSelectedTolerance"] as const;
+const MARKER_KEYS = ["stationAreaId", "name", "coordinate", "mode", "classification", "redArrivalSeconds", "blueArrivalSeconds", "fasterParticipant", "withinSelectedTolerance"] as const;
 const BASIS_KEYS = ["contractVersion", "searchStartAt", "selectedTolerancePercent", "changeTimeSeconds", "routingHorizonSeconds", "walkingVelocityMetersPerSecond", "walkingSecondsRoundingRule", "transferRadiusMeters", "deterministicSelectionPolicy", "schedule", "accessProvider"] as const;
 const PARTICIPANT_KEYS = ["id", "color", "origin", "status", "unavailableReason", "terminal"] as const;
 const TERMINAL_KEYS = ["totalSeconds", "arrivalAt"] as const;
@@ -77,6 +77,7 @@ function validateMarker(value: Record<string, unknown>, path: Array<string | num
   addUnknownKeys(value, MARKER_KEYS, path, issues);
   if (!isNonEmptyString(value.stationAreaId)) issues.push(issue([...path, "stationAreaId"], "invalid_value", "stationAreaId must be non-empty."));
   if (!isNonEmptyString(value.name)) issues.push(issue([...path, "name"], "invalid_value", "station-area name must be non-empty."));
+  if (value.mode !== "sbahn" && value.mode !== "ubahn" && value.mode !== "tram" && value.mode !== "bus") issues.push(issue([...path, "mode"], "invalid_enum", "station-area mode is invalid."));
   if (!isCoordinate(value.coordinate)) issues.push(issue([...path, "coordinate"], "invalid_coordinate", "station-area coordinate is invalid."));
   else if (!isWithinOfficialMunichBoundary(value.coordinate)) issues.push(issue([...path, "coordinate"], "outside_official_munich_boundary", "station-area coordinate must be inside Munich."));
   if (isRecord(value.coordinate)) addUnknownKeys(value.coordinate, ["latitude", "longitude"], [...path, "coordinate"], issues);
@@ -251,7 +252,7 @@ function deriveMarker(red: unknown, blue: unknown, tolerance: 5 | 10 | 15): { cl
 }
 
 function sameMarker(value: Record<string, unknown>, marker: ScheduledMeetingStationAreaDto): boolean {
-  return value.stationAreaId === marker.stationAreaId && value.name === marker.name && sameCoordinate(value.coordinate, marker.coordinate) && value.classification === marker.classification && value.redArrivalSeconds === marker.redArrivalSeconds && value.blueArrivalSeconds === marker.blueArrivalSeconds && value.fasterParticipant === marker.fasterParticipant && value.withinSelectedTolerance === marker.withinSelectedTolerance;
+  return value.stationAreaId === marker.stationAreaId && value.name === marker.name && value.mode === marker.mode && sameCoordinate(value.coordinate, marker.coordinate) && value.classification === marker.classification && value.redArrivalSeconds === marker.redArrivalSeconds && value.blueArrivalSeconds === marker.blueArrivalSeconds && value.fasterParticipant === marker.fasterParticipant && value.withinSelectedTolerance === marker.withinSelectedTolerance;
 }
 
 function sameCoordinate(value: unknown, expected: { readonly latitude: number; readonly longitude: number }): boolean {

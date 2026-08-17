@@ -203,6 +203,7 @@ test("non-exact provider coordinates cannot change canonical readiness, marker c
     stationAreaId: "fixture-a",
     name: "Fixture A",
     coordinate: { latitude: 48.1374, longitude: 11.5755 },
+    mode: "bus",
     classification: "fair",
     redArrivalSeconds: 299,
     blueArrivalSeconds: 330,
@@ -339,6 +340,7 @@ test("ok surfaces expose cached unclassified markers as explicit unavailable det
     id: "fixture-unclassified",
     name: "Fixture Unclassified",
     coordinate: { latitude: 48.15, longitude: 11.65 },
+    mode: "bus",
   } as const;
   const unreachableConnection = {
     ...FIXTURE_SCHEDULED_ARTIFACT.connections[0]!,
@@ -385,6 +387,7 @@ test("ok surfaces expose cached unclassified markers as explicit unavailable det
     stationAreaId: unreachableArea.id,
     name: unreachableArea.name,
     coordinate: unreachableArea.coordinate,
+    mode: "bus",
     classification: "unclassified",
     redArrivalSeconds: null,
     blueArrivalSeconds: null,

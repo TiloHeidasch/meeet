@@ -14,7 +14,7 @@ const request: MeetingRequest = {
 };
 
 function response(overrides: Record<string, unknown> = {}): Record<string, unknown> {
-  const stationArea = { stationAreaId: "station-area-1", name: "Marienplatz", coordinate: { latitude: 48.137, longitude: 11.576 }, classification: "fair", redArrivalSeconds: 600, blueArrivalSeconds: 660, fasterParticipant: "red", withinSelectedTolerance: true };
+  const stationArea = { stationAreaId: "station-area-1", name: "Marienplatz", coordinate: { latitude: 48.137, longitude: 11.576 }, mode: "sbahn", classification: "fair", redArrivalSeconds: 600, blueArrivalSeconds: 660, fasterParticipant: "red", withinSelectedTolerance: true };
   return {
     contractVersion: "meeet-meeting/v3", status: "ok", reason: null,
     participants: [
@@ -45,6 +45,9 @@ test("client adapter rejects station-area tampering and count mismatches", () =>
   const payload = response();
   (payload.stationAreas as Array<Record<string, unknown>>)[0]!.classification = "red";
   assert.equal(validateMeetingResponse(payload, request).success, false);
+  const invalidMode = response();
+  (invalidMode.stationAreas as Array<Record<string, unknown>>)[0]!.mode = "airplane";
+  assert.equal(validateMeetingResponse(invalidMode, request).success, false);
   const count = response();
   (((count.metadata as Record<string, unknown>).stationAreas as Record<string, unknown>).count as number) = 2;
   assert.equal(validateMeetingResponse(count, request).success, false);

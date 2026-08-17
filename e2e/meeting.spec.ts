@@ -19,10 +19,10 @@ const PRESET_SECONDS = { quick: 180, medium: 300, long: 600 } as const;
 
 function v3Fixture(request: { contractVersion: "meeet-meeting/v3"; participants: Array<{ id: string; origin: { label: string; latitude: number; longitude: number }; mode: "transit" }>; tolerancePercent: 5 | 10 | 15; searchStartAt: string; changeTimePreset: "quick" | "medium" | "long" }, reason: "ok" | "no-access-seeds" = "ok") {
   const stationAreas = [
-    { stationAreaId: "area-red", name: "Red area", coordinate: { latitude: 48.132, longitude: 11.555 }, classification: "red" as const, redArrivalSeconds: 1200, blueArrivalSeconds: null, fasterParticipant: "red" as const, withinSelectedTolerance: false },
-    { stationAreaId: "area-fair", name: "Fair area", coordinate: { latitude: 48.132, longitude: 11.585 }, classification: "fair" as const, redArrivalSeconds: 1800, blueArrivalSeconds: 1860, fasterParticipant: "red" as const, withinSelectedTolerance: true },
-    { stationAreaId: "area-blue", name: "Blue area", coordinate: { latitude: 48.132, longitude: 11.615 }, classification: "blue" as const, redArrivalSeconds: null, blueArrivalSeconds: 1300, fasterParticipant: "blue" as const, withinSelectedTolerance: false },
-    { stationAreaId: "area-unclassified", name: "Unclassified area", coordinate: { latitude: 48.14, longitude: 11.59 }, classification: "unclassified" as const, redArrivalSeconds: null, blueArrivalSeconds: null, fasterParticipant: null, withinSelectedTolerance: false },
+    { stationAreaId: "area-red", name: "Red area", coordinate: { latitude: 48.132, longitude: 11.555 }, mode: "sbahn" as const, classification: "red" as const, redArrivalSeconds: 1200, blueArrivalSeconds: null, fasterParticipant: "red" as const, withinSelectedTolerance: false },
+    { stationAreaId: "area-fair", name: "Fair area", coordinate: { latitude: 48.132, longitude: 11.585 }, mode: "ubahn" as const, classification: "fair" as const, redArrivalSeconds: 1800, blueArrivalSeconds: 1860, fasterParticipant: "red" as const, withinSelectedTolerance: true },
+    { stationAreaId: "area-blue", name: "Blue area", coordinate: { latitude: 48.132, longitude: 11.615 }, mode: "tram" as const, classification: "blue" as const, redArrivalSeconds: null, blueArrivalSeconds: 1300, fasterParticipant: "blue" as const, withinSelectedTolerance: false },
+    { stationAreaId: "area-unclassified", name: "Unclassified area", coordinate: { latitude: 48.14, longitude: 11.59 }, mode: "bus" as const, classification: "unclassified" as const, redArrivalSeconds: null, blueArrivalSeconds: null, fasterParticipant: null, withinSelectedTolerance: false },
   ];
   const acquisition = { sourceUrl: "https://example.test/mvv.zip", retrievedAt: "2026-08-01T00:00:00.000Z", rawArchiveByteSize: 100, rawArchiveSha256: "a".repeat(64), feedVersion: "mvv-fixture-2026-08", feedValidFrom: "2026-08-01", feedValidUntil: "2026-08-31", attribution: "Deterministic MVV fixture", officialAttribution: "MVV", officialLicense: { name: "CC BY 4.0", url: "https://creativecommons.org/licenses/by/4.0/" }, officialProvenance: { source: "feed" as const, policyId: null } };
   const seed = (id: string, coordinate: { latitude: number; longitude: number }) => ({ seedId: id, mvgStationId: id, stationAreaId: id, coordinate, accessSeconds: 120, provenance: { source: "fixture-static" as const, endpoint: "fixture", distanceMeters: 100, walkingSeconds: 120, note: "Deterministic browser fixture." } });
@@ -61,13 +61,14 @@ function progressFrame(phase: string): string {
   return sseFrame("progress", { contractVersion: "meeet-calculation-progress/v1", phase });
 }
 
-function verdictFrame(area: { stationAreaId: string; name: string; coordinate: { latitude: number; longitude: number }; classification: string }): string {
+function verdictFrame(area: { stationAreaId: string; name: string; coordinate: { latitude: number; longitude: number }; classification: string; mode?: string }): string {
   return sseFrame("station-verdict", {
     contractVersion: "meeet-calculation-progress/v1",
     stationAreaId: area.stationAreaId,
     name: area.name,
     coordinate: area.coordinate,
     verdict: area.classification,
+    ...(area.mode ? { mode: area.mode } : {}),
   });
 }
 
@@ -132,9 +133,9 @@ test.describe("v3 Munich meeting surface", () => {
   test("two origins produce a red/blue/fair territory surface with clear planning disclosures", async ({ page }) => {
     await setup(page); await openPlanner(page); await selectOrigin(page, 0, "Marienplatz"); await selectOrigin(page, 1, "Ostbahnhof"); await expect(page.locator(".meeet-origin-marker")).toHaveCount(2); await page.getByRole("radio", { name: "±5%" }).check();
     const request = page.waitForRequest((item) => item.url().endsWith("/api/meeting/calculate/stream")); await page.getByRole("button", { name: "Show meeting surface" }).click(); const body = (await request).postDataJSON(); expect(body.contractVersion).toBe("meeet-meeting/v3"); expect(body.participants).toHaveLength(2); expect(body.participants.every((participant: { mode: string }) => participant.mode === "transit")).toBe(true); expect(body.tolerancePercent).toBe(5); expect(body.changeTimePreset).toBe("medium"); expect(body.searchStartAt).toMatch(/T\d{2}:\d{2}:\d{2}\.000Z$/);
-    await expect(page.getByText("Surface ready", { exact: true })).toBeVisible(); await expect(page.locator(".map-frame")).toHaveAttribute("data-map-state", "ready"); await expect(page.locator(".map-frame")).toHaveAttribute("data-map-style", "configured"); await expect(page.locator(".map-frame")).toHaveAttribute("data-station-area-count", "4"); await expect(page.locator(".map-frame")).toHaveAttribute("data-station-marker-count", "4"); await expect(page.locator(".map-frame")).toHaveAttribute("data-territory-source", "shared"); await expect(page.locator(".map-frame")).toHaveAttribute("data-territory-fill-layers", "3"); const territoryFillOpacity = Number(await page.locator(".map-frame").getAttribute("data-territory-fill-opacity")); expect(Number.isFinite(territoryFillOpacity)).toBe(true); expect(territoryFillOpacity).toBeGreaterThan(0); expect(territoryFillOpacity).toBeLessThan(1); await expect(page.locator(".map-frame")).toHaveAttribute("data-territory-feature-count", "3"); await expect(page.locator(".maplibregl-ctrl-zoom-in")).toBeVisible(); await expect(page.getByText("Fair territory within tolerance", { exact: false })).toBeVisible(); await expect(page.getByText("Red is quicker", { exact: false })).toBeVisible(); await expect(page.getByText("Blue is quicker", { exact: false })).toBeVisible(); await expect(page.getByText("Gray diamonds are unclassified station areas", { exact: false })).toBeVisible(); await page.getByText("About this meeting surface", { exact: true }).click(); await expect(page.getByText(/installed scheduled MVV feed for Munich/)).toBeVisible(); await expect(page.getByText(/station areas into translucent territories/)).toBeVisible(); await expect(page.getByText(/not walking directions/)).toBeVisible(); await expect(page.getByRole("region", { name: /4 calculated station-area markers/ })).toBeVisible(); await selectOrigin(page, 0, "Ostbahnhof"); await expect(page.getByText("Surface ready", { exact: true })).toHaveCount(0); await expect(page.locator(".map-frame")).toHaveAttribute("data-territory-feature-count", "0");
+    await expect(page.getByText("Surface ready", { exact: true })).toBeVisible(); await expect(page.locator(".map-frame")).toHaveAttribute("data-map-state", "ready"); await expect(page.locator(".map-frame")).toHaveAttribute("data-map-style", "configured"); await expect(page.locator(".map-frame")).toHaveAttribute("data-station-area-count", "4"); await expect(page.locator(".map-frame")).toHaveAttribute("data-station-marker-count", "4"); await expect(page.locator(".map-frame")).toHaveAttribute("data-territory-source", "shared"); await expect(page.locator(".map-frame")).toHaveAttribute("data-territory-fill-layers", "3"); const territoryFillOpacity = Number(await page.locator(".map-frame").getAttribute("data-territory-fill-opacity")); expect(Number.isFinite(territoryFillOpacity)).toBe(true); expect(territoryFillOpacity).toBeGreaterThan(0); expect(territoryFillOpacity).toBeLessThan(1); await expect(page.locator(".map-frame")).toHaveAttribute("data-territory-feature-count", "3"); await expect(page.locator(".maplibregl-ctrl-zoom-in")).toBeVisible();     await expect(page.getByText("Fair territory within tolerance", { exact: false })).toBeVisible(); await expect(page.getByText("Red is quicker", { exact: false })).toBeVisible(); await expect(page.getByText("Blue is quicker", { exact: false })).toBeVisible(); await expect(page.getByText("Gray markers are unclassified station areas", { exact: false })).toBeVisible(); await page.getByText("About this meeting surface", { exact: true }).click(); await expect(page.getByText(/installed scheduled MVV feed for Munich/)).toBeVisible(); await expect(page.getByText(/station areas into translucent territories/)).toBeVisible(); await expect(page.getByText(/not walking directions/)).toBeVisible(); await expect(page.getByRole("region", { name: /4 calculated station-area markers/ })).toBeVisible(); await selectOrigin(page, 0, "Ostbahnhof"); await expect(page.getByText("Surface ready", { exact: true })).toHaveCount(0); await expect(page.locator(".map-frame")).toHaveAttribute("data-territory-feature-count", "0");
   });
-  test("shows an explicit no-result reason and retains the two origins", async ({ page }) => { await setup(page, "no-access-seeds"); await openPlanner(page); await selectOrigin(page, 0, "Marienplatz"); await selectOrigin(page, 1, "Ostbahnhof"); await page.getByRole("button", { name: "Show meeting surface" }).click(); await expect(page.getByText("No meeting surface yet", { exact: true })).toBeVisible(); await expect(page.getByText(/No nearby MVG access seed could be resolved/)).toBeVisible(); await expect(page.locator(".meeet-origin-marker")).toHaveCount(2); await expect(page.locator(".map-frame")).toHaveAttribute("data-station-area-count", "4"); await expect(page.locator(".map-frame")).toHaveAttribute("data-territory-feature-count", "0"); await expect(page.locator(".map-frame")).toHaveAttribute("data-territory-source", "shared"); await expect(page.getByRole("region", { name: /4 unclassified station-area markers/ })).toBeVisible(); await expect(page.getByText("Gray diamonds are unclassified station areas", { exact: false })).toBeVisible(); });
+  test("shows an explicit no-result reason and retains the two origins", async ({ page }) => { await setup(page, "no-access-seeds"); await openPlanner(page); await selectOrigin(page, 0, "Marienplatz"); await selectOrigin(page, 1, "Ostbahnhof"); await page.getByRole("button", { name: "Show meeting surface" }).click(); await expect(page.getByText("No meeting surface yet", { exact: true })).toBeVisible(); await expect(page.getByText(/No nearby MVG access seed could be resolved/)).toBeVisible(); await expect(page.locator(".meeet-origin-marker")).toHaveCount(2); await expect(page.locator(".map-frame")).toHaveAttribute("data-station-area-count", "4"); await expect(page.locator(".map-frame")).toHaveAttribute("data-territory-feature-count", "0"); await expect(page.locator(".map-frame")).toHaveAttribute("data-territory-source", "shared"); await expect(page.getByRole("region", { name: /4 unclassified station-area markers/ })).toBeVisible(); await expect(page.getByText("Gray markers are unclassified station areas", { exact: false })).toBeVisible(); });
   test("shows a scheduled-service error without stale surface claims", async ({ page }) => { await setup(page, "error"); await openPlanner(page); await selectOrigin(page, 0, "Marienplatz"); await selectOrigin(page, 1, "Ostbahnhof"); await page.getByRole("button", { name: "Show meeting surface" }).click(); await expect(page.locator(".form-message[role='alert']")).toContainText("scheduled service is temporarily unavailable"); await expect(page.getByText("Surface ready", { exact: true })).toHaveCount(0); });
   test("selects every station area with native keyboard and exposes participant totals", async ({ page }) => { await setup(page); await openPlanner(page); await selectOrigin(page, 0, "Marienplatz"); await selectOrigin(page, 1, "Ostbahnhof"); await page.getByRole("button", { name: "Show meeting surface" }).click(); for (const id of ["area-red", "area-blue", "area-fair", "area-unclassified"]) { const area = page.locator(`[data-station-area-id="${id}"]`); await area.focus(); await page.keyboard.press("Enter"); await expect(area).toHaveAttribute("aria-pressed", "true"); await expect(page.getByRole("heading", { name: "Station-area details" })).toBeVisible(); } const fair = page.locator('[data-station-area-id="area-fair"]'); await fair.focus(); await page.keyboard.press("Enter"); await expect(page.getByRole("heading", { name: "Participant 1" })).toBeVisible(); await page.getByText("Schedule and access provenance", { exact: true }).click(); await expect(page.locator(".detail-provenance-copy")).toContainText("fixture"); await expect(page.locator(".detail-provenance-copy")).toContainText("MVV"); await expect(page.locator(".detail-provenance-copy")).toContainText("Fixture"); await page.keyboard.press("Space"); await expect(fair).toHaveAttribute("aria-pressed", "true"); await expect(page.locator('[data-station-area-id="area-unclassified"]')).toHaveCount(1); });
   test("supports selecting a non-default change-time preset and preserves it in details", async ({ page }) => {
@@ -277,7 +278,7 @@ test.describe("v3 Munich meeting surface", () => {
     await expect(page.getByText("Surface ready", { exact: true })).toBeVisible();
     expect(streamCalls).toBe(2);
   });
-  test("differentiates diamond station markers from circular origin markers", async ({ page }) => {
+  test("differentiates mode-specific station markers from drop-shaped origin markers", async ({ page }) => {
     await setup(page);
     await openPlanner(page);
     await selectOrigin(page, 0, "Marienplatz");
@@ -285,14 +286,14 @@ test.describe("v3 Munich meeting surface", () => {
     await page.getByRole("button", { name: "Show meeting surface" }).click();
     await expect(page.locator('.map-frame[data-map-state="ready"]')).toHaveAttribute("data-station-markers-ready", "true");
 
-    // Origin markers are large circular DOM buttons with participant numbers
+    // Origin markers are drop-shaped pins without numeric labels
     const originMarkers = page.locator(".meeet-origin-marker");
     await expect(originMarkers).toHaveCount(2);
     const origin1 = originMarkers.first();
-    const origin1Radius = await origin1.evaluate((el) => getComputedStyle(el).borderRadius);
+    const origin1Svg = origin1.locator("svg");
+    await expect(origin1Svg).toBeVisible();
     const origin1Text = await origin1.textContent();
-    expect(origin1Radius).toBe("50%");
-    expect(origin1Text).toBe("1");
+    expect(origin1Text?.trim()).toBe("");
 
     // Station markers on MapLibre canvas use symbol layers
     const layerTypes = await page.evaluate(() => {
@@ -300,28 +301,26 @@ test.describe("v3 Munich meeting surface", () => {
       if (!map) throw new Error("Map instance unavailable");
       return ["meeet-stations-red", "meeet-stations-blue", "meeet-stations-fair", "meeet-stations-unclassified"].map((id) => {
         const layer = map.getLayer(id);
-        const image = String(map.getLayoutProperty(id, "icon-image") ?? "");
+        const image = map.getLayoutProperty(id, "icon-image");
         return { id, type: layer?.type, image };
       });
     });
     for (const layer of layerTypes) {
       expect(layer.type).toBe("symbol");
-      expect(layer.image).toMatch(/^meeet-station-diamond-/);
+      expect(layer.image).toBeDefined();
     }
 
-    // Legend swatches for all classifications consistently use the diamond transform
+    // Legend swatches for all classifications are visible
     for (const color of ["red", "blue", "fair", "neutral"]) {
       const swatch = page.locator(`.legend-swatch.${color}`);
       await expect(swatch).toBeVisible();
-      const transform = await swatch.evaluate((el) => getComputedStyle(el).transform);
-      expect(transform).not.toBe("none");
     }
 
-    // Station list items visually reflect the diamond shape distinction
+    // Station list items visually reflect the mode glyphs
     const stationMarkers = page.locator(".station-area-marker");
     await expect(stationMarkers.first()).toBeVisible();
-    const stationMarkerTransform = await stationMarkers.first().evaluate((el) => getComputedStyle(el).transform);
-    expect(stationMarkerTransform).not.toBe("none");
+    const glyphSvg = stationMarkers.first().locator("svg.station-glyph");
+    await expect(glyphSvg).toBeVisible();
 
     // Clicking station marker hit target on canvas selects the station area and updates details
     const canvas = page.locator(".maplibregl-canvas");
@@ -338,6 +337,10 @@ test.describe("v3 Munich meeting surface", () => {
     await request;
     const fairArea = page.locator('[data-station-area-id="area-fair"]');
     await expect(fairArea).toHaveAttribute("aria-pressed", "true");
+    const chevronTransform = await fairArea.locator(".station-chevron").evaluate((el) => getComputedStyle(el).transform);
+    expect(chevronTransform).not.toBe("none");
+    const glyphTransform = await fairArea.locator(".station-glyph").evaluate((el) => getComputedStyle(el).transform);
+    expect(glyphTransform).toBe("none");
     await expect(page.locator(".station-detail-panel")).toContainText("Fair area");
   });
 

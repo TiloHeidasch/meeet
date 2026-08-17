@@ -2,7 +2,7 @@
 
 import { useEffect, useMemo, useRef, useState, type FormEvent, type KeyboardEvent } from "react";
 import dynamic from "next/dynamic";
-import { validateMeetingResponse, type MeetingRequest, type MeetingResponse, type MeetingStationArea } from "@/lib/client/meeting-response";
+import { validateMeetingResponse, type MeetingRequest, type MeetingResponse, type MeetingStationArea, type StationAreaMode } from "@/lib/client/meeting-response";
 import { validateStationAreaDetails, type StationAreaDetail } from "@/lib/client/station-area-details";
 import { readCalculationStream, type CalculationProgressPhase, type StationVerdict } from "@/lib/client/calculation-stream";
 
@@ -32,7 +32,50 @@ const CHANGE_TIME_PRESETS: readonly { readonly value: ChangeTimePreset; readonly
 ];
 function classificationLabel(value: MeetingStationArea["classification"]) { return value === "red" ? "Red is quicker" : value === "blue" ? "Blue is quicker" : value === "fair" ? "Fair territory within tolerance" : "Unclassified"; }
 function classificationShort(value: MeetingStationArea["classification"]) { return value === "red" ? "Red territory" : value === "blue" ? "Blue territory" : value === "fair" ? "Fair · within tolerance" : "Unclassified · no fill"; }
-function Icon({ name }: { name: "pin" | "chevron" }) { return <svg aria-hidden="true" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">{name === "pin" ? <><path d="M12 21s7-6.1 7-12A7 7 0 0 0 5 9c0 5.9 7 12 7 12Z"/><circle cx="12" cy="9" r="2"/></> : <path d="m6 9 6 6 6-6"/>}</svg>; }
+function Icon({ name }: { name: "pin" | "chevron" }) { return <svg aria-hidden="true" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className={name === "chevron" ? "station-chevron" : undefined}>{name === "pin" ? <><path d="M12 21s7-6.1 7-12A7 7 0 0 0 5 9c0 5.9 7 12 7 12Z"/><circle cx="12" cy="9" r="2"/></> : <path d="m6 9 6 6 6-6"/>}</svg>; }
+
+const S_PATH = "M 472 131 L 471 132 L 458 132 L 457 133 L 448 133 L 447 134 L 434 135 L 433 136 L 428 136 L 398 143 L 376 150 L 356 158 L 330 171 L 312 182 L 286 202 L 265 223 L 253 238 L 242 255 L 229 282 L 223 300 L 219 317 L 218 329 L 217 330 L 217 340 L 216 341 L 217 384 L 218 385 L 220 403 L 227 428 L 231 438 L 243 461 L 249 470 L 266 490 L 292 512 L 319 529 L 350 544 L 406 564 L 409 564 L 416 567 L 444 574 L 448 576 L 455 577 L 459 579 L 496 588 L 500 590 L 507 591 L 546 603 L 549 605 L 557 607 L 572 614 L 574 614 L 590 622 L 604 631 L 622 647 L 630 658 L 636 670 L 640 687 L 640 705 L 637 716 L 632 726 L 624 737 L 608 752 L 596 760 L 578 769 L 564 774 L 548 778 L 537 779 L 536 780 L 496 781 L 495 780 L 483 780 L 482 779 L 468 778 L 467 777 L 462 777 L 461 776 L 456 776 L 446 773 L 442 773 L 405 762 L 402 760 L 387 755 L 380 751 L 378 751 L 343 733 L 312 713 L 276 684 L 248 656 L 232 637 L 222 623 L 222 770 L 248 791 L 290 817 L 332 837 L 352 845 L 360 847 L 363 849 L 366 849 L 369 851 L 375 852 L 395 859 L 419 865 L 423 865 L 428 867 L 443 869 L 444 870 L 450 870 L 451 871 L 463 872 L 464 873 L 472 873 L 473 874 L 501 875 L 502 876 L 542 875 L 543 874 L 561 873 L 562 872 L 568 872 L 569 871 L 590 868 L 610 863 L 617 860 L 620 860 L 647 850 L 674 837 L 700 821 L 728 799 L 751 776 L 767 756 L 777 741 L 793 711 L 799 696 L 806 673 L 806 669 L 809 658 L 809 652 L 810 651 L 810 642 L 811 641 L 810 600 L 809 599 L 809 592 L 808 591 L 806 576 L 798 550 L 789 531 L 778 514 L 771 505 L 752 486 L 726 467 L 694 450 L 692 450 L 667 439 L 619 424 L 571 412 L 554 409 L 541 405 L 537 405 L 505 397 L 501 395 L 494 394 L 477 388 L 474 388 L 443 376 L 421 364 L 409 355 L 398 344 L 392 336 L 386 325 L 382 313 L 381 302 L 380 301 L 380 284 L 381 283 L 382 274 L 390 256 L 404 240 L 418 230 L 441 220 L 458 217 L 459 216 L 466 216 L 467 215 L 508 215 L 509 216 L 519 216 L 520 217 L 527 217 L 528 218 L 546 220 L 572 226 L 603 236 L 623 245 L 625 245 L 662 264 L 689 281 L 716 301 L 752 333 L 766 348 L 766 225 L 743 208 L 721 194 L 679 172 L 677 172 L 670 168 L 645 158 L 603 145 L 595 144 L 576 139 L 566 138 L 565 137 L 559 137 L 558 136 L 552 136 L 544 134 L 536 134 L 535 133 L 508 132 L 507 131 Z";
+const U_PATH = "M418.3 39.4h-100v261.2c0 47.7-16.9 81.6-68.8 81.6-52.3 0-69.3-33.9-69.3-81.6V39.4H81.7v270.9c0 113.4 91.3 155 167.7 155 76 0 168.8-41.5 168.8-155l.1-270.9z";
+const T_PATH = "M 75 55 H 425 V 145 H 295 V 445 H 205 V 145 H 75 Z";
+const BUS_WHITE_CIRCLE = "m 180,0 c -99.41,0 -180,80.59 -180,180 0,99.41 80.59,180 180,180 99.41,0 180,-80.59 180,-180 0,-99.41 -80.59,-180 -180,-180 z";
+const BUS_RING = "m 352,180 c 0,96.57 -78.79,172 -172.03,172 C 86.73,352 8,276.57 8,180 c 0,-96.57 78.73,-172 171.97,-172 93.24,0 172.03,75.43 172.03,172 z m -48,0 c 0,-68.48 -55.52,-124 -124,-124 -68.48,0 -124,55.52 -124,124 0,68.48 55.52,124 124,124 68.48,0 124,-55.52 124,-124 z";
+const BUS_H = "m 113.26,260 c -0.7,0 -1.26,-0.56 -1.26,-1.26 l 0,-157.48 c 0,-0.7 0.56,-1.26 1.26,-1.26 l 33.48,0 c 0.7,0 1.26,0.56 1.26,1.26 l 0,60.74 64,0 0,-60.74 c 0,-0.7 0.56,-1.26 1.26,-1.26 l 33.48,0 c 0.7,0 1.26,0.56 1.26,1.26 l 0,157.48 c 0,0.7 -0.56,1.26 -1.26,1.26 l -33.48,0 c -0.7,0 -1.26,-0.56 -1.26,-1.26 l 0,-60.74 -64,0 0,60.74 c 0,0.7 -0.56,1.26 -1.26,1.26 l -33.48,0 z";
+
+function StationGlyph({ mode }: { mode: StationAreaMode }) {
+  if (mode === "sbahn") {
+    return (
+      <svg aria-hidden="true" width="16" height="16" viewBox="0 0 1000 1009" className="station-glyph">
+        <circle cx="501" cy="502" r="474.5" fill="currentColor" />
+        <path d={S_PATH} fill="#ffffff" />
+      </svg>
+    );
+  }
+  if (mode === "ubahn") {
+    return (
+      <svg aria-hidden="true" width="16" height="16" viewBox="0 0 500 500" className="station-glyph">
+        <rect width="500" height="500" rx="60" fill="currentColor" />
+        <path fill="#ffffff" d={U_PATH} />
+      </svg>
+    );
+  }
+  if (mode === "tram") {
+    return (
+      <svg aria-hidden="true" width="16" height="16" viewBox="0 0 500 500" className="station-glyph">
+        <rect width="500" height="500" rx="60" fill="currentColor" />
+        <path fill="#ffffff" d={T_PATH} />
+      </svg>
+    );
+  }
+  return (
+    <svg aria-hidden="true" width="16" height="16" viewBox="0 0 450 450" className="station-glyph">
+      <g transform="matrix(1.25,0,0,-1.25,0,450)">
+        <path fill="#ffffff" d={BUS_WHITE_CIRCLE} />
+        <path fill="currentColor" d={BUS_RING} />
+        <path fill="currentColor" d={BUS_H} />
+      </g>
+    </svg>
+  );
+}
 
 function LocationInput({ participant, index, error, disabled, onChange }: { participant: Participant; index: number; error?: string; disabled: boolean; onChange: (location: Location) => void }) {
   const [query, setQuery] = useState(participant.location?.label ?? ""); const [results, setResults] = useState<SearchResult[]>([]); const [searching, setSearching] = useState(false); const request = useRef(0);
@@ -41,8 +84,8 @@ function LocationInput({ participant, index, error, disabled, onChange }: { part
   function keyDown(event: KeyboardEvent<HTMLInputElement>) { if (event.key === "Escape") setResults([]); if (event.key === "Enter" && results[0]) { event.preventDefault(); choose(results[0]); } }
   const listboxId = `location-results-${index + 1}`; const inputId = `origin-input-${index + 1}`; return <fieldset className="origin-card"><legend className="sr-only">Participant {index + 1} origin</legend><div className="origin-title"><span className="origin-number" style={{ backgroundColor: COLORS[index] }}>{index + 1}</span><span>Participant {index + 1}</span><span className="origin-mode">Transit</span></div><label htmlFor={inputId}><span className="field-label">Starting point in Munich</span></label><span className="origin-input-wrap"><input id={inputId} value={query} disabled={disabled} onChange={(event) => { setQuery(event.target.value); setResults([]); }} onKeyDown={keyDown} role="combobox" aria-label={`Participant ${index + 1} starting point`} aria-controls={listboxId} aria-expanded={results.length > 0} className={error ? "input-error" : ""} placeholder="Search a street, station, or place" autoComplete="off" />{results.length > 0 && <ul id={listboxId} role="listbox" className="location-results">{results.map((result) => <li role="option" aria-selected="false" key={`${result.label}-${result.latitude}`}><button type="button" onClick={() => choose(result)}>{result.label}</button></li>)}</ul>}</span>{participant.location && <span className="selected-origin"><Icon name="pin"/> {participant.location.label}</span>}{searching && <span className="input-hint">Looking within Munich…</span>}{error && <span className="input-error-text">{error}</span>}</fieldset>;
 }
-function Legend() { return <div className="map-legend" aria-label="Station-area territory legend"><span><i className="legend-swatch red"/> Red is quicker</span><span><i className="legend-swatch blue"/> Blue is quicker</span><span><i className="legend-swatch fair"/> Fair territory within tolerance</span><span><i className="legend-swatch neutral"/> Gray diamonds are unclassified station areas; unclassified territories are unfilled</span></div>; }
-function ScheduleDisclosure({ result }: { result: MeetingResponse }) { const schedule = result.metadata.schedule; const acquisition = schedule.acquisition; const surface = result.metadata.surface; return <details className="disclosure"><summary>About this meeting surface</summary><div className="disclosure-copy"><p><strong>Munich / MVV scope.</strong> This search uses the installed scheduled MVV feed for Munich and nearby MVG access data. It is not a venue recommendation.</p><p><strong>Planned start:</strong> {formatDate(surface.searchStartAt)} · <strong>Tolerance:</strong> ±{surface.selectedTolerancePercent}%</p><p><strong>Schedule:</strong> {acquisition.feedVersion} · valid {schedule.serviceDateRange.firstDate} to {schedule.serviceDateRange.lastDate} · {schedule.timeZone}</p><p>The map groups calculated station areas into translucent territories. Unclassified territories are intentionally unfilled; gray diamonds identify unclassified station areas. The planned route calculation is evaluated separately using the disclosed scheduled-routing method; the final station segment uses a geometric walking estimate, not walking directions or navigation.</p><p><strong>Source:</strong> {acquisition.sourceUrl} · retrieved {formatDate(acquisition.retrievedAt)} · {acquisition.officialAttribution} · {acquisition.officialLicense.name}</p></div></details>; }
+function Legend() { return <div className="map-legend" aria-label="Station-area territory legend"><span><i className="legend-swatch red"/> Red is quicker</span><span><i className="legend-swatch blue"/> Blue is quicker</span><span><i className="legend-swatch fair"/> Fair territory within tolerance</span><span><i className="legend-swatch neutral"/> Gray markers are unclassified station areas; unclassified territories are unfilled</span></div>; }
+function ScheduleDisclosure({ result }: { result: MeetingResponse }) { const schedule = result.metadata.schedule; const acquisition = schedule.acquisition; const surface = result.metadata.surface; return <details className="disclosure"><summary>About this meeting surface</summary><div className="disclosure-copy"><p><strong>Munich / MVV scope.</strong> This search uses the installed scheduled MVV feed for Munich and nearby MVG access data. It is not a venue recommendation.</p><p><strong>Planned start:</strong> {formatDate(surface.searchStartAt)} · <strong>Tolerance:</strong> ±{surface.selectedTolerancePercent}%</p><p><strong>Schedule:</strong> {acquisition.feedVersion} · valid {schedule.serviceDateRange.firstDate} to {schedule.serviceDateRange.lastDate} · {schedule.timeZone}</p><p>The map groups calculated station areas into translucent territories. Unclassified territories are intentionally unfilled; gray markers identify unclassified station areas. The planned route calculation is evaluated separately using the disclosed scheduled-routing method; the final station segment uses a geometric walking estimate, not walking directions or navigation.</p><p><strong>Source:</strong> {acquisition.sourceUrl} · retrieved {formatDate(acquisition.retrievedAt)} · {acquisition.officialAttribution} · {acquisition.officialLicense.name}</p></div></details>; }
 function unavailableCopy(reason: string | null) { switch (reason) { case "no-access-seeds": return "No nearby access seed was available for this participant, so no planned MVV route can be shown."; case "no-reachable-stations": return "The scheduled MVV search could not reach a station for this participant."; case "station-area-unclassified": return "This station area is unclassified, so scheduled evidence is unavailable for this participant."; case "station-area-unavailable-for-participant": return "This station area has no scheduled evidence for this participant."; default: return "Scheduled evidence is unavailable for this participant."; } }
 function DetailProvenance({ basis }: { basis: StationAreaDetail["basis"] }) { const schedule = basis.schedule; const acquisition = isRecord(schedule.acquisition) ? schedule.acquisition : {}; const access = basis.accessProvider; const accessProvenance = isRecord(access.provenance) ? access.provenance : {}; return <details className="detail-provenance"><summary>Schedule and access provenance</summary><div className="detail-provenance-copy"><section><h3>Scheduled MVV feed</h3><p><strong>Feed:</strong> {String(schedule.feedId)} · <strong>Timezone:</strong> {String(schedule.timeZone)}</p><p><strong>Valid:</strong> {String(isRecord(schedule.serviceDateRange) ? schedule.serviceDateRange.firstDate : "—")} to {String(isRecord(schedule.serviceDateRange) ? schedule.serviceDateRange.lastDate : "—")}</p><p><strong>Feed version:</strong> {String(acquisition.feedVersion)} · <strong>Retrieved:</strong> {String(acquisition.retrievedAt)}</p><p><strong>Source:</strong> {String(acquisition.sourceUrl)}</p><p><strong>Official attribution:</strong> {String(acquisition.officialAttribution)} · <strong>License:</strong> {String(isRecord(acquisition.officialLicense) ? acquisition.officialLicense.name : "—")}</p></section><section><h3>Access data</h3><p><strong>Provider:</strong> {String(access.name)} · <strong>Data kind:</strong> {String(access.dataKind)}</p><p><strong>Deployment:</strong> {String(access.deployment)} · <strong>As of:</strong> {String(access.asOf)} · non-live access data</p><p><strong>Provenance:</strong> {String(accessProvenance.provider)} · version {String(accessProvenance.version)} · retrieved {String(accessProvenance.retrievedAt)}</p><p><strong>Attribution:</strong> {String(accessProvenance.attribution)}</p></section></div></details>; }
 
@@ -124,7 +167,9 @@ function StationAreaList({
                 aria-pressed={isSelected}
                 onClick={() => onSelect(area.stationAreaId)}
               >
-                <span className="station-area-marker" aria-hidden="true" />
+                <span className="station-area-marker" data-mode={area.mode} aria-hidden="true">
+                  <StationGlyph mode={area.mode} />
+                </span>
                 <span className="station-area-copy">
                   <strong>{area.name}</strong>
                   <small>{classificationShort(area.classification)}</small>
@@ -347,6 +392,7 @@ export default function MeetPlanner({ capability }: { capability: PlannerCapabil
     stationAreaId: verdict.stationAreaId,
     name: verdict.name,
     coordinate: verdict.coordinate,
+    mode: verdict.mode ?? "bus",
     classification: verdict.verdict,
     redArrivalSeconds: null,
     blueArrivalSeconds: null,

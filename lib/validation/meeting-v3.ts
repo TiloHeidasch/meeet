@@ -10,6 +10,7 @@ import {
   type ScheduledSurfaceMetadata,
   type ScheduledStationAreaCatalog,
   type ScheduledStationAreaMetadata,
+  type StationAreaMode,
 } from "../domain/scheduled-routing/models.ts";
 import type { ProviderDescriptor } from "../domain/types.ts";
 import type { ScheduledAccessSeedProvenance } from "../domain/providers.ts";
@@ -63,6 +64,7 @@ export interface ScheduledMeetingStationAreaDto {
   readonly stationAreaId: string;
   readonly name: string;
   readonly coordinate: { readonly latitude: number; readonly longitude: number };
+  readonly mode: StationAreaMode;
   readonly classification: ScheduledCellClassification;
   readonly redArrivalSeconds: number | null;
   readonly blueArrivalSeconds: number | null;
@@ -337,6 +339,7 @@ function validateStationAreaCatalog(input: Record<string, unknown>, catalog: Sch
     const path = ["stationAreas", index];
     if (candidate.stationAreaId !== entry.stationAreaId) issues.push(issue([...path, "stationAreaId"], "inconsistent", "Station-area candidates must use canonical catalog order and identity."));
     if (candidate.name !== entry.name) issues.push(issue([...path, "name"], "inconsistent", "Station-area candidate name must match the canonical catalog."));
+    if (candidate.mode !== entry.mode) issues.push(issue([...path, "mode"], "inconsistent", "Station-area candidate mode must match the canonical catalog."));
     if (!isRecord(candidate.coordinate) || candidate.coordinate.latitude !== entry.coordinate.latitude || candidate.coordinate.longitude !== entry.coordinate.longitude) issues.push(issue([...path, "coordinate"], "inconsistent", "Station-area candidate coordinate must match the canonical catalog."));
   }
 }
@@ -347,9 +350,10 @@ function validateStationArea(value: unknown, index: number, issues: ScheduledVal
     issues.push(issue(path, "invalid_type", "Station-area candidate must be an object."));
     return;
   }
-  addUnknownKeys(value, ["stationAreaId", "name", "coordinate", "classification", "redArrivalSeconds", "blueArrivalSeconds", "fasterParticipant", "withinSelectedTolerance"], path, issues);
+  addUnknownKeys(value, ["stationAreaId", "name", "coordinate", "mode", "classification", "redArrivalSeconds", "blueArrivalSeconds", "fasterParticipant", "withinSelectedTolerance"], path, issues);
   if (typeof value.stationAreaId !== "string" || value.stationAreaId.trim() === "") issues.push(issue([...path, "stationAreaId"], "invalid_value", "stationAreaId must be non-empty."));
   if (typeof value.name !== "string" || value.name.trim() === "") issues.push(issue([...path, "name"], "invalid_value", "Station-area name must be non-empty."));
+  if (value.mode !== "sbahn" && value.mode !== "ubahn" && value.mode !== "tram" && value.mode !== "bus") issues.push(issue([...path, "mode"], "invalid_enum", "Station-area mode is invalid."));
   if (!isCoordinate(value.coordinate)) issues.push(issue([...path, "coordinate"], "invalid_coordinate", "Station-area coordinate must be valid."));
   else if (!isWithinOfficialMunichBoundary(value.coordinate)) issues.push(issue([...path, "coordinate"], "outside_official_munich_boundary", "Station-area coordinate must be inside the official Munich application boundary."));
   if (isRecord(value.coordinate)) addUnknownKeys(value.coordinate, ["latitude", "longitude"], [...path, "coordinate"], issues);
@@ -468,7 +472,7 @@ function isScheduledSeedDto(value: unknown): value is ScheduledMeetingAccessSeed
 }
 
 function isScheduledStationAreaDto(value: unknown): value is ScheduledMeetingStationAreaDto {
-  return isRecord(value) && typeof value.stationAreaId === "string" && value.stationAreaId.trim() !== "" && typeof value.name === "string" && value.name.trim() !== "" && isCoordinate(value.coordinate) && isWithinOfficialMunichBoundary(value.coordinate) && (value.classification === "red" || value.classification === "blue" || value.classification === "fair" || value.classification === "unclassified") && isNullableWholeSecond(value.redArrivalSeconds) && isNullableWholeSecond(value.blueArrivalSeconds) && (value.fasterParticipant === null || value.fasterParticipant === "red" || value.fasterParticipant === "blue") && typeof value.withinSelectedTolerance === "boolean";
+  return isRecord(value) && typeof value.stationAreaId === "string" && value.stationAreaId.trim() !== "" && typeof value.name === "string" && value.name.trim() !== "" && (value.mode === "sbahn" || value.mode === "ubahn" || value.mode === "tram" || value.mode === "bus") && isCoordinate(value.coordinate) && isWithinOfficialMunichBoundary(value.coordinate) && (value.classification === "red" || value.classification === "blue" || value.classification === "fair" || value.classification === "unclassified") && isNullableWholeSecond(value.redArrivalSeconds) && isNullableWholeSecond(value.blueArrivalSeconds) && (value.fasterParticipant === null || value.fasterParticipant === "red" || value.fasterParticipant === "blue") && typeof value.withinSelectedTolerance === "boolean";
 }
 
 function isScheduledMetadataDto(value: unknown): value is ScheduledMeetingMetadataDto {

@@ -16,6 +16,7 @@ import {
   type ScheduledStationAreaCandidate,
   type ScheduledStationAreaCatalog,
   type ScheduledStationAreaCatalogEntry,
+  type StationAreaMode,
   type StationArrivalField,
 } from "./models.ts";
 import {
@@ -116,7 +117,7 @@ export function buildScheduledStationAreaCatalog(
     if (index % STATION_AREA_CHECKPOINT === 0) deadlineCheck?.("surface-cells");
     const area = areas[index];
     if (area === undefined || !isWithinOfficialMunichBoundary(area.coordinate)) continue;
-    entries.push({ stationAreaId: area.id, name: area.name, coordinate: area.coordinate });
+    entries.push({ stationAreaId: area.id, name: area.name, coordinate: area.coordinate, mode: area.mode });
   }
   return deepFreeze({ entries });
 }
@@ -153,6 +154,7 @@ export function createStationAreaCandidates(
         stationAreaId: area.stationAreaId,
         name: area.name,
         coordinate: area.coordinate,
+        mode: area.mode,
         classification: "unclassified",
         redArrivalSeconds: null,
         blueArrivalSeconds: null,
@@ -165,6 +167,7 @@ export function createStationAreaCandidates(
       area.stationAreaId,
       area.name,
       area.coordinate,
+      area.mode,
       red?.elapsedSeconds ?? null,
       blue?.elapsedSeconds ?? null,
       tolerancePercent,
@@ -206,6 +209,7 @@ export async function evaluateScheduledStationAreaCandidates(
           stationAreaId: area.stationAreaId,
           name: area.name,
           coordinate: area.coordinate,
+          mode: area.mode,
           classification: "unclassified",
           redArrivalSeconds: null,
           blueArrivalSeconds: null,
@@ -216,6 +220,7 @@ export async function evaluateScheduledStationAreaCandidates(
           area.stationAreaId,
           area.name,
           area.coordinate,
+          area.mode,
           red?.elapsedSeconds ?? null,
           blue?.elapsedSeconds ?? null,
           tolerancePercent,
@@ -230,24 +235,26 @@ function classifyStationArea(
   stationAreaId: string,
   name: string,
   coordinate: { readonly latitude: number; readonly longitude: number },
+  mode: StationAreaMode,
   redArrivalSeconds: number | null,
   blueArrivalSeconds: number | null,
   tolerancePercent: 5 | 10 | 15,
 ): ScheduledStationAreaCandidate {
   if (redArrivalSeconds === null && blueArrivalSeconds === null) {
-    return { stationAreaId, name, coordinate, classification: "unclassified", redArrivalSeconds: null, blueArrivalSeconds: null, fasterParticipant: null, withinSelectedTolerance: false };
+    return { stationAreaId, name, coordinate, mode, classification: "unclassified", redArrivalSeconds: null, blueArrivalSeconds: null, fasterParticipant: null, withinSelectedTolerance: false };
   }
   if (redArrivalSeconds === null) {
-    return { stationAreaId, name, coordinate, classification: "blue", redArrivalSeconds: null, blueArrivalSeconds, fasterParticipant: "blue", withinSelectedTolerance: false };
+    return { stationAreaId, name, coordinate, mode, classification: "blue", redArrivalSeconds: null, blueArrivalSeconds, fasterParticipant: "blue", withinSelectedTolerance: false };
   }
   if (blueArrivalSeconds === null) {
-    return { stationAreaId, name, coordinate, classification: "red", redArrivalSeconds, blueArrivalSeconds: null, fasterParticipant: "red", withinSelectedTolerance: false };
+    return { stationAreaId, name, coordinate, mode, classification: "red", redArrivalSeconds, blueArrivalSeconds: null, fasterParticipant: "red", withinSelectedTolerance: false };
   }
   const fair = isScheduledToleranceSatisfied(redArrivalSeconds, blueArrivalSeconds, tolerancePercent);
   return {
     stationAreaId,
     name,
     coordinate,
+    mode,
     classification: fair ? "fair" : redArrivalSeconds < blueArrivalSeconds ? "red" : "blue",
     redArrivalSeconds,
     blueArrivalSeconds,

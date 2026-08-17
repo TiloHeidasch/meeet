@@ -32,6 +32,7 @@ const area = (
   stationAreaId,
   name: stationAreaId,
   coordinate: { longitude, latitude },
+  mode: "sbahn",
   classification,
   redArrivalSeconds: null,
   blueArrivalSeconds: null,

@@ -86,6 +86,7 @@ function dispatch(eventName: string, data: string, onEvent: (event: CalculationS
       if (!isObject(parsed)) throw new CalculationStreamError("Invalid station-verdict event in calculation stream.");
       if (parsed.contractVersion !== CALCULATION_PROGRESS_CONTRACT_VERSION) throw new CalculationStreamError("Unsupported calculation progress contract version.");
       const coord = parsed.coordinate;
+      const validMode = parsed.mode === undefined || parsed.mode === "sbahn" || parsed.mode === "ubahn" || parsed.mode === "tram" || parsed.mode === "bus";
       if (
         typeof parsed.stationAreaId !== "string" ||
         parsed.stationAreaId.trim() === "" ||
@@ -93,7 +94,8 @@ function dispatch(eventName: string, data: string, onEvent: (event: CalculationS
         parsed.name.trim() === "" ||
         !insideOfficialMunichBoundary(coord) ||
         typeof parsed.verdict !== "string" ||
-        !["red", "blue", "fair", "unclassified"].includes(parsed.verdict)
+        !["red", "blue", "fair", "unclassified"].includes(parsed.verdict) ||
+        !validMode
       ) {
         throw new CalculationStreamError("Invalid station-verdict event in calculation stream.");
       }
@@ -107,6 +109,7 @@ function dispatch(eventName: string, data: string, onEvent: (event: CalculationS
             longitude: (coord as { latitude: number; longitude: number }).longitude,
           },
           verdict: parsed.verdict as "red" | "blue" | "fair" | "unclassified",
+          ...(parsed.mode ? { mode: parsed.mode as "sbahn" | "ubahn" | "tram" | "bus" } : {}),
         },
       });
       return;
