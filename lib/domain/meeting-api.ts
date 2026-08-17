@@ -29,10 +29,9 @@ import {
   type StationAreaCalculationBasisCache,
 } from "./station-area-details-cache.ts";
 import {
-  createScheduledRoutingWindow,
-  routeScheduledSelectedBoardingStop,
   SCHEDULED_DETAIL_SELECTION_POLICY,
 } from "./scheduled-routing/router.ts";
+import { CHANGE_TIME_PRESETS } from "./scheduled-routing/models.ts";
 import type {
   ScheduledMeetingRequest,
   ScheduledMeetingResponse,
@@ -403,14 +402,9 @@ export async function handleStationAreaDetailsPost(
     if (artifact.feedId !== basis.artifactIdentity.feedId || artifact.timeZone !== basis.artifactIdentity.timeZone || artifact.provenance.contentHash !== basis.artifactIdentity.scheduleContentHash || artifact.provenance.compiledArtifactId !== basis.artifactIdentity.compiledArtifactId) {
       return jsonError(409, "CALCULATION_REF_MISMATCH", "The calculation reference belongs to a different scheduled timetable artifact.");
     }
-    const window = createScheduledRoutingWindow(artifact, parsedScheduled.data.searchStartAt, {
-      walkingVelocityMetersPerSecond: basis.routingOptions.walkingVelocityMetersPerSecond,
-      transferRadiusMeters: basis.routingOptions.transferRadiusMeters,
-      deadlineCheck: deadline.check,
-    });
     const participants: [StationAreaDetailParticipantDto, StationAreaDetailParticipantDto] = [
-      detailParticipant("red", parsedScheduled.data.participants[0], marker, basis, artifact, window, deadline),
-      detailParticipant("blue", parsedScheduled.data.participants[1], marker, basis, artifact, window, deadline),
+      detailParticipant("red", parsedScheduled.data.participants[0], marker, basis, parsedScheduled.data.searchStartAt),
+      detailParticipant("blue", parsedScheduled.data.participants[1], marker, basis, parsedScheduled.data.searchStartAt),
     ];
     const detailBasis = makeDetailBasis(parsedScheduled.data, basis);
     const detail: StationAreaDetailsResponseDto = deepFreeze({
@@ -422,7 +416,7 @@ export async function handleStationAreaDetailsPost(
       basis: detailBasis,
     });
     deadline.check();
-    const validation = validateStationAreaDetailsResponse(detail, { request: parsedScheduled.data, selectedMarker: marker, artifactIdentity: basis.artifactIdentity, selectedBoardingStops: selectedBoardingStopContext(artifact, marker) });
+    const validation = validateStationAreaDetailsResponse(detail, { request: parsedScheduled.data, selectedMarker: marker, artifactIdentity: basis.artifactIdentity });
     if (!validation.success) return jsonError(500, "DETAIL_FAILED", "The station-area detail response failed strict validation.");
     return Response.json(detail, { status: 200 });
   } catch (error) {
@@ -437,25 +431,8 @@ export async function handleStationAreaDetailsPost(
   }
 }
 
-function getMarkerBoardingStopId(marker: ScheduledMeetingStationAreaDto, color: "red" | "blue"): string | null {
-  return color === "red" ? marker.redBoardingStopId : marker.blueBoardingStopId;
-}
-
 function getMarkerArrivalSeconds(marker: ScheduledMeetingStationAreaDto, color: "red" | "blue"): number | null {
   return color === "red" ? marker.redArrivalSeconds : marker.blueArrivalSeconds;
-}
-
-function selectedBoardingStopContext(
-  artifact: NonNullable<MeetingProviders["scheduledArtifact"]>,
-  marker: ScheduledMeetingStationAreaDto,
-): Partial<Record<"red" | "blue", { readonly boardingStopId: string; readonly coordinate: { readonly latitude: number; readonly longitude: number } }>> {
-  const result: Partial<Record<"red" | "blue", { readonly boardingStopId: string; readonly coordinate: { readonly latitude: number; readonly longitude: number } }>> = {};
-  for (const color of ["red", "blue"] as const) {
-    const boardingStopId = getMarkerBoardingStopId(marker, color);
-    const stop = boardingStopId === null ? undefined : artifact.boardingStops.find((candidate) => candidate.id === boardingStopId);
-    if (stop !== undefined) result[color] = { boardingStopId: stop.id, coordinate: stop.coordinate };
-  }
-  return result;
 }
 
 function makeDetailBasis(
@@ -466,6 +443,7 @@ function makeDetailBasis(
     contractVersion: "meeet-meeting/v3",
     searchStartAt: request.searchStartAt,
     selectedTolerancePercent: request.tolerancePercent,
+    changeTimeSeconds: CHANGE_TIME_PRESETS[request.changeTimePreset],
     routingHorizonSeconds: basis.routingOptions.routingHorizonSeconds as 86_400,
     walkingVelocityMetersPerSecond: basis.routingOptions.walkingVelocityMetersPerSecond,
     walkingSecondsRoundingRule: basis.routingOptions.walkingSecondsRoundingRule,
@@ -513,8 +491,7 @@ function unavailableDetailParticipant(
     origin: participant.origin,
     status: "unavailable",
     unavailableReason,
-    terminal: { boardingStopId: null, totalSeconds: null, arrivalAt: null },
-    segments: [],
+    terminal: { totalSeconds: null, arrivalAt: null },
   };
 }
 
@@ -523,45 +500,36 @@ function detailParticipant(
   participant: ScheduledMeetingRequest["participants"][number],
   marker: ScheduledMeetingStationAreaDto,
   basis: ScheduledCalculationBasis,
-  artifact: NonNullable<MeetingProviders["scheduledArtifact"]>,
-  window: ReturnType<typeof createScheduledRoutingWindow>,
-  deadline: ScheduledCalculationDeadline,
+  searchStartAt: string,
 ): StationAreaDetailParticipantDto {
-  deadline.check();
-  const selectedBoardingStopId = getMarkerBoardingStopId(marker, color);
   const selectedTotal = getMarkerArrivalSeconds(marker, color);
-  const expectedAvailable = selectedBoardingStopId !== null && selectedTotal !== null;
-  if (!expectedAvailable) {
+  if (selectedTotal === null) {
     return {
       id: participant.id,
       color,
       origin: participant.origin,
       status: "unavailable",
       unavailableReason: basis.status === "no-result" ? basis.reason : marker.classification === "unclassified" ? "station-area-unclassified" : "station-area-unavailable-for-participant",
-      terminal: { boardingStopId: null, totalSeconds: null, arrivalAt: null },
-      segments: [],
+      terminal: { totalSeconds: null, arrivalAt: null },
     };
   }
-  const route = routeScheduledSelectedBoardingStop(artifact, basis.canonicalAccessSeeds[color === "red" ? 0 : 1], selectedBoardingStopId, basis.canonicalRequest.searchStartAt, {
-    walkingVelocityMetersPerSecond: basis.routingOptions.walkingVelocityMetersPerSecond,
-    transferRadiusMeters: basis.routingOptions.transferRadiusMeters,
-    deadlineCheck: deadline.check,
-    origin: { latitude: participant.origin.latitude, longitude: participant.origin.longitude },
-  }, window, basis.accessSeedCandidates[color === "red" ? 0 : 1]);
-  if (route === null || route.totalSeconds !== selectedTotal || route.boardingStopId !== selectedBoardingStopId) throw new Error("Selected station-area route did not reconcile its cached marker.");
   return {
     id: participant.id,
     color,
     origin: participant.origin,
     status: "available",
     unavailableReason: null,
-    terminal: { boardingStopId: route.boardingStopId, totalSeconds: route.totalSeconds, arrivalAt: route.arrivalAt },
-    segments: route.segments,
+    terminal: { totalSeconds: selectedTotal, arrivalAt: arrivalAtSecondsAfter(searchStartAt, selectedTotal) },
   };
 }
 
+function arrivalAtSecondsAfter(searchStartAt: string, elapsedSeconds: number): string {
+  const startEpochSeconds = Date.parse(searchStartAt) / 1_000;
+  return new Date((startEpochSeconds + elapsedSeconds) * 1_000).toISOString();
+}
+
 function sameScheduledRequest(left: ScheduledMeetingRequest, right: ScheduledMeetingRequest): boolean {
-  return left.contractVersion === right.contractVersion && left.searchStartAt === right.searchStartAt && left.tolerancePercent === right.tolerancePercent && left.participants.length === right.participants.length && left.participants.every((participant, index) => {
+  return left.contractVersion === right.contractVersion && left.searchStartAt === right.searchStartAt && left.tolerancePercent === right.tolerancePercent && left.changeTimePreset === right.changeTimePreset && left.participants.length === right.participants.length && left.participants.every((participant, index) => {
     const other = right.participants[index];
     return other !== undefined && participant.id === other.id && participant.mode === other.mode && participant.origin.label === other.origin.label && participant.origin.latitude === other.origin.latitude && participant.origin.longitude === other.origin.longitude;
   });

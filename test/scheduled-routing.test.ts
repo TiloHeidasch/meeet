@@ -19,6 +19,7 @@ import {
   type ScheduledRoutingArtifact,
 } from "../lib/domain/scheduled-routing/index.ts";
 import { ScheduledCalculationDeadlineError } from "../lib/domain/scheduled-admission.ts";
+import { FIXTURE_SCHEDULED_ARTIFACT } from "../lib/fixtures/scheduled-routing.ts";
 
 const SEARCH_START = "2026-08-11T08:05:00+02:00";
 
@@ -202,8 +203,9 @@ function compareReferenceMaterializedConnections(left: ScheduledMaterializedConn
 
 test("GTFS import validates station areas, IDs, coordinates, columns, and freezes provenance", () => {
   const schedule = fixture();
-  assert.equal(schedule.stationAreas.find((area) => area.id === "station-b")?.boardingStopIds.length, 2);
-  assert.equal(schedule.boardingStops.find((stop) => stop.id === "b-1")?.stationAreaId, "station-b");
+  assert.equal(schedule.stationAreas.find((area) => area.id === "station-b")?.name, "Station B");
+  assert.equal("boardingStops" in schedule, false);
+  assert.equal(schedule.connections.find((connection) => connection.id === "through:0-1")?.fromStationAreaId, "station-a");
   assert.equal(schedule.connections[0]?.departureTimeSeconds, 28_800);
   assert.equal(schedule.provenance.hashAlgorithm, "sha256");
   assert.equal(schedule.provenance.contentHash, fixture().provenance.contentHash);
@@ -243,7 +245,7 @@ test("GTFS parser rejects non-chronological connections and accepts HH:MM:SS nex
   const badTimes = { ...FIXTURE_FILES, "stop_times.txt": FIXTURE_FILES["stop_times.txt"].replace("08:30:00,08:30:00,c-1,3", "08:19:00,08:30:00,c-1,3") };
   assert.throws(() => importFixtureFiles(badTimes), /chronological/);
   const schedule = fixture();
-  const midnight = schedule.connections.find((connection) => connection.id === "midnight:1-2");
+  const midnight = schedule.connections.find((connection) => connection.id === "midnight:0-1");
   assert.equal(midnight?.arrivalTimeSeconds, 24 * 3_600 + 10 * 60);
 });
 
@@ -343,7 +345,7 @@ test("date streams preserve continuation predecessors and do not authorize one b
 
   const lateWindow = createScheduledRoutingWindow(schedule, "2026-08-11T08:15:00+02:00", { walkingVelocityMetersPerSecond: 10, transferRadiusMeters: 100 });
   const lateThrough = lateWindow.connections.find((connection) => connection.source.tripId === "through");
-  assert.equal(lateThrough?.source.fromStopSequence, 2);
+  assert.equal(lateThrough?.source.fromStopSequence, 1);
   assert.equal(lateThrough?.previousContinuationKey, null);
 });
 
@@ -395,6 +397,17 @@ test("midnight rollover is routable from the preceding local service date", () =
 test("local coordinate interchange is available without an all-pairs transfer graph", () => {
   const transferFiles: GtfsFeedFiles = {
     ...FIXTURE_FILES,
+    "stops.txt": [
+      "stop_id,stop_name,stop_lat,stop_lon,location_type,parent_station",
+      "station-a,Station A,48.1000,11.5000,1,",
+      "a-1,Station A platform,48.1000,11.5000,0,station-a",
+      "station-b,Station B,48.1000,11.5100,1,",
+      "b-1,Station B platform 1,48.1000,11.5100,0,station-b",
+      "station-x,Station X,48.1001,11.5100,1,",
+      "x-1,Station X platform,48.1001,11.5100,0,station-x",
+      "station-c,Station C,48.1000,11.5200,1,",
+      "c-1,Station C platform,48.1000,11.5200,0,station-c",
+    ].join("\n"),
     "trips.txt": [
       "route_id,service_id,trip_id",
       "red,weekday,first-leg",
@@ -404,7 +417,7 @@ test("local coordinate interchange is available without an all-pairs transfer gr
       "trip_id,arrival_time,departure_time,stop_id,stop_sequence",
       "first-leg,08:10:00,08:10:00,a-1,1",
       "first-leg,08:20:00,08:20:00,b-1,2",
-      "second-leg,08:24:00,08:24:00,b-2,1",
+      "second-leg,08:24:00,08:24:00,x-1,1",
       "second-leg,08:34:00,08:34:00,c-1,2",
     ].join("\n"),
   };
@@ -453,7 +466,7 @@ test("linear CSA preserves equal-time numeric sequence 1 to 10 and exactly one t
   assert.equal(result.stationArrivals.find((arrival) => arrival.stationAreaId === "walk-only")?.elapsedSeconds, null);
 });
 
-test("same-instant zero-walk transfers do not depend on lexical cross-trip order", () => {
+test("same-instant transfers respect the change-time preset regardless of lexical cross-trip order", () => {
   const crossTripFiles: GtfsFeedFiles = {
     ...FIXTURE_FILES,
     "trips.txt": [
@@ -465,17 +478,17 @@ test("same-instant zero-walk transfers do not depend on lexical cross-trip order
       "trip_id,arrival_time,departure_time,stop_id,stop_sequence",
       "z-incoming,08:10:00,08:10:00,a-1,1",
       "z-incoming,08:10:00,08:10:00,b-1,2",
-      "a-outgoing,08:10:00,08:10:00,b-1,1",
-      "a-outgoing,08:20:00,08:20:00,c-1,2",
+      "a-outgoing,08:15:00,08:15:00,b-1,1",
+      "a-outgoing,08:25:00,08:25:00,c-1,2",
     ].join("\n"),
   };
   const schedule = importFixtureFiles(crossTripFiles);
   const result = routeScheduledEarliestArrivals(schedule, [{ stationAreaId: "station-a", accessSeconds: 0 }], SEARCH_START, { walkingVelocityMetersPerSecond: 10, transferRadiusMeters: 100 });
   assert.equal(result.stationArrivals.find((arrival) => arrival.stationAreaId === "station-b")?.elapsedSeconds, 5 * 60);
-  assert.equal(result.stationArrivals.find((arrival) => arrival.stationAreaId === "station-c")?.elapsedSeconds, 15 * 60);
+  assert.equal(result.stationArrivals.find((arrival) => arrival.stationAreaId === "station-c")?.elapsedSeconds, 20 * 60);
 });
 
-test("cross-stream zero-time transfers remain routable across consecutive service dates", () => {
+test("cross-stream same-area transfers remain routable across consecutive service dates", () => {
   const crossStreamFiles: GtfsFeedFiles = {
     ...FIXTURE_FILES,
     "trips.txt": "route_id,service_id,trip_id\nred,weekday,incoming\nblue,weekday,outgoing",
@@ -483,8 +496,8 @@ test("cross-stream zero-time transfers remain routable across consecutive servic
       "trip_id,arrival_time,departure_time,stop_id,stop_sequence",
       "incoming,25:50:00,25:50:00,a-1,1",
       "incoming,26:00:00,26:00:00,b-1,2",
-      "outgoing,02:00:00,02:00:00,b-1,1",
-      "outgoing,02:10:00,02:10:00,c-1,2",
+      "outgoing,02:05:00,02:05:00,b-1,1",
+      "outgoing,02:15:00,02:15:00,c-1,2",
     ].join("\n"),
   };
   const schedule = importFixtureFiles(crossStreamFiles);
@@ -492,7 +505,84 @@ test("cross-stream zero-time transfers remain routable across consecutive servic
   const window = createScheduledRoutingWindow(schedule, searchStartAt, { walkingVelocityMetersPerSecond: 10, transferRadiusMeters: 100 });
   assert.deepEqual(new Set(window.connections.map((connection) => connection.serviceDate)), new Set(["2026-08-11", "2026-08-12"]));
   const result = routeScheduledEarliestArrivals(schedule, [{ stationAreaId: "station-a", accessSeconds: 0 }], searchStartAt, { walkingVelocityMetersPerSecond: 10, transferRadiusMeters: 100 }, window);
-  assert.equal(result.stationArrivals.find((arrival) => arrival.stationAreaId === "station-c")?.elapsedSeconds, 20 * 60);
+  assert.equal(result.stationArrivals.find((arrival) => arrival.stationAreaId === "station-c")?.elapsedSeconds, 25 * 60);
+});
+
+test("same-area transfers cost the static change-time preset", () => {
+  const changeTimeFiles: GtfsFeedFiles = {
+    ...FIXTURE_FILES,
+    "trips.txt": "route_id,service_id,trip_id\nred,weekday,incoming\nblue,weekday,outgoing",
+    "stop_times.txt": [
+      "trip_id,arrival_time,departure_time,stop_id,stop_sequence",
+      "incoming,08:10:00,08:10:00,a-1,1",
+      "incoming,08:20:00,08:20:00,b-1,2",
+      "outgoing,08:24:00,08:24:00,b-2,1",
+      "outgoing,08:34:00,08:34:00,c-1,2",
+    ].join("\n"),
+  };
+  const schedule = importFixtureFiles(changeTimeFiles);
+  const quick = routeScheduledEarliestArrivals(schedule, [{ stationAreaId: "station-a", accessSeconds: 0 }], SEARCH_START, { walkingVelocityMetersPerSecond: 10, transferRadiusMeters: 100, changeTimeSeconds: 180 });
+  assert.equal(quick.stationArrivals.find((arrival) => arrival.stationAreaId === "station-c")?.elapsedSeconds, 29 * 60);
+  const long = routeScheduledEarliestArrivals(schedule, [{ stationAreaId: "station-a", accessSeconds: 0 }], SEARCH_START, { walkingVelocityMetersPerSecond: 10, transferRadiusMeters: 100, changeTimeSeconds: 600 });
+  assert.equal(long.stationArrivals.find((arrival) => arrival.stationAreaId === "station-c")?.elapsedSeconds, null);
+});
+
+test("different-area transfers cost walking time, not the change-time preset", () => {
+  const walkTransferFiles: GtfsFeedFiles = {
+    ...FIXTURE_FILES,
+    "stops.txt": [
+      "stop_id,stop_name,stop_lat,stop_lon,location_type,parent_station",
+      "station-a,Station A,48.1000,11.5000,1,",
+      "a-1,Station A platform,48.1000,11.5000,0,station-a",
+      "station-b,Station B,48.1000,11.5100,1,",
+      "b-1,Station B platform 1,48.1000,11.5100,0,station-b",
+      "station-x,Station X,48.1001,11.5100,1,",
+      "x-1,Station X platform,48.1001,11.5100,0,station-x",
+      "station-c,Station C,48.1000,11.5200,1,",
+      "c-1,Station C platform,48.1000,11.5200,0,station-c",
+    ].join("\n"),
+    "trips.txt": "route_id,service_id,trip_id\nred,weekday,incoming\nblue,weekday,outgoing",
+    "stop_times.txt": [
+      "trip_id,arrival_time,departure_time,stop_id,stop_sequence",
+      "incoming,08:10:00,08:10:00,a-1,1",
+      "incoming,08:20:00,08:20:00,b-1,2",
+      "outgoing,08:24:00,08:24:00,x-1,1",
+      "outgoing,08:34:00,08:34:00,c-1,2",
+    ].join("\n"),
+  };
+  const schedule = importFixtureFiles(walkTransferFiles);
+  const result = routeScheduledEarliestArrivals(schedule, [{ stationAreaId: "station-a", accessSeconds: 0 }], SEARCH_START, { walkingVelocityMetersPerSecond: 10, transferRadiusMeters: 100, changeTimeSeconds: 600 });
+  assert.equal(result.stationArrivals.find((arrival) => arrival.stationAreaId === "station-c")?.elapsedSeconds, 29 * 60);
+});
+
+test("no change time applies at the origin seed or the destination arrival", () => {
+  const originFiles: GtfsFeedFiles = {
+    ...FIXTURE_FILES,
+    "trips.txt": "route_id,service_id,trip_id\nblue,weekday,outgoing",
+    "stop_times.txt": [
+      "trip_id,arrival_time,departure_time,stop_id,stop_sequence",
+      "outgoing,08:10:00,08:10:00,b-2,1",
+      "outgoing,08:20:00,08:20:00,c-1,2",
+    ].join("\n"),
+  };
+  const schedule = importFixtureFiles(originFiles);
+  const result = routeScheduledEarliestArrivals(schedule, [{ stationAreaId: "station-b", accessSeconds: 0 }], SEARCH_START, { walkingVelocityMetersPerSecond: 10, transferRadiusMeters: 100, changeTimeSeconds: 600 });
+  assert.equal(result.stationArrivals.find((arrival) => arrival.stationAreaId === "station-c")?.elapsedSeconds, 15 * 60);
+});
+
+test("routing-window cache keys include the change-time preset and default to medium", () => {
+  const schedule = fixture();
+  const baseOptions = { walkingVelocityMetersPerSecond: 10, transferRadiusMeters: 100 };
+  const quickFirst = createScheduledRoutingWindow(schedule, SEARCH_START, { ...baseOptions, changeTimeSeconds: 180 });
+  const quickSecond = createScheduledRoutingWindow(schedule, SEARCH_START, { ...baseOptions, changeTimeSeconds: 180 });
+  assert.strictEqual(quickSecond, quickFirst);
+  assert.equal(quickFirst.changeTimeSeconds, 180);
+  const long = createScheduledRoutingWindow(schedule, SEARCH_START, { ...baseOptions, changeTimeSeconds: 600 });
+  assert.notStrictEqual(long, quickFirst);
+  assert.equal(long.changeTimeSeconds, 600);
+  const defaultWindow = createScheduledRoutingWindow(schedule, SEARCH_START, baseOptions);
+  assert.equal(defaultWindow.changeTimeSeconds, 300);
+  assert.throws(() => createScheduledRoutingWindow(schedule, SEARCH_START, { ...baseOptions, changeTimeSeconds: 240 }), /presets/);
 });
 
 test("surface classifies station areas across red, blue, and fair tolerance boundaries", () => {
@@ -551,29 +641,18 @@ test("scheduled routing checks injected deadlines at window, scan, and surface p
   );
 });
 
-test("exact boarding-stop seeds board only the resolved stop while area seeds retain station-area access", () => {
+test("area seeds board any connection departing the seeded station area", () => {
   const schedule = fixture();
-  const stopRestrictedSchedule = {
-    ...schedule,
-    connections: schedule.connections.filter((connection) => connection.fromStopId !== "b-2"),
-  };
-  const exactStop = routeScheduledEarliestArrivals(
-    stopRestrictedSchedule,
-    [{ stationAreaId: "station-b", boardingStopId: "b-2", accessSeconds: 0 }],
-    SEARCH_START,
-    { walkingVelocityMetersPerSecond: 10, transferRadiusMeters: 100 },
-  );
-  const areaSeed = routeScheduledEarliestArrivals(
-    stopRestrictedSchedule,
+  const result = routeScheduledEarliestArrivals(
+    schedule,
     [{ stationAreaId: "station-b", accessSeconds: 0 }],
     SEARCH_START,
     { walkingVelocityMetersPerSecond: 10, transferRadiusMeters: 100 },
   );
-  assert.equal(exactStop.stationArrivals.find((arrival) => arrival.stationAreaId === "station-c")?.arrivalAt, null);
-  assert.notEqual(areaSeed.stationArrivals.find((arrival) => arrival.stationAreaId === "station-c")?.arrivalAt, null);
+  assert.equal(result.stationArrivals.find((arrival) => arrival.stationAreaId === "station-c")?.elapsedSeconds, 20 * 60);
 });
 
-test("routing persists the fastest destination boarding-stop identity with a deterministic result", () => {
+test("routing persists the fastest destination station-area arrival with a deterministic result", () => {
   const fastestBoardingStopFiles: GtfsFeedFiles = {
     ...FIXTURE_FILES,
     "trips.txt": `${FIXTURE_FILES["trips.txt"]}\nred,weekday,fast-b2,Station B`,
@@ -587,11 +666,9 @@ test("routing persists the fastest destination boarding-stop identity with a det
   );
   const destination = result.stationArrivals.find((arrival) => arrival.stationAreaId === "station-b");
   assert.equal(destination?.elapsedSeconds, 10 * 60);
-  const destinationStop = result.boardingStopArrivals.find((arrival) => arrival.boardingStopId === "b-2");
-  assert.equal(destinationStop?.elapsedSeconds, 10 * 60);
 });
 
-test("equal-time fastest boarding stops use the scheduled stop-ID tie-break for station-area candidates", () => {
+test("equal-time arrivals to the same station area stay deterministic for station-area candidates", () => {
   const equalReadyBoardingStopsFiles: GtfsFeedFiles = {
     ...FIXTURE_FILES,
     "stops.txt": [
@@ -628,18 +705,10 @@ test("equal-time fastest boarding stops use the scheduled stop-ID tie-break for 
     transferRadiusMeters: 100,
   });
 
-  for (const participant of result.participants) {
-    assert.deepEqual(
-      participant.boardingStopArrivals
-        .filter((arrival) => arrival.boardingStopId === "b-a" || arrival.boardingStopId === "b-z")
-        .map((arrival) => [arrival.boardingStopId, arrival.elapsedSeconds]),
-      [["b-a", 10 * 60], ["b-z", 10 * 60]],
-    );
-  }
   const stationB = result.stationAreas.find((candidate) => candidate.stationAreaId === "station-b");
   assert.deepEqual(
-    [stationB?.redBoardingStopId, stationB?.blueBoardingStopId, stationB?.redArrivalSeconds, stationB?.blueArrivalSeconds],
-    ["b-a", "b-a", 10 * 60, 10 * 60],
+    [stationB?.redArrivalSeconds, stationB?.blueArrivalSeconds, stationB?.classification],
+    [10 * 60, 10 * 60, "fair"],
   );
 });
 
@@ -779,4 +848,48 @@ test("agency timezone and unsupported GTFS extensions are fail-closed", () => {
   }
   const onDemand = { ...FIXTURE_FILES, "stop_times.txt": FIXTURE_FILES["stop_times.txt"].replace("fast,08:12:00,08:12:00,a-1,1,0,0", "fast,08:12:00,08:12:00,a-1,1,2,0") };
   assert.throws(() => importGtfsSchedule(onDemand, { acquisition: ACQUISITION }), /pickup_type|on-demand|conditional/);
+});
+
+test("station-level collapse drops intra-area legs and deduplicates consecutive same-area visits", () => {
+  const schedule = FIXTURE_SCHEDULED_ARTIFACT;
+  assert.ok(schedule.stationAreas.every((area) => Object.keys(area).sort().join(",") === "coordinate,id,name"));
+  assert.ok(schedule.connections.every((connection) => connection.fromStationAreaId !== connection.toStationAreaId));
+  const collapse = schedule.connections.filter((connection) => connection.tripId === "fixture-collapse");
+  assert.deepEqual(collapse.map((connection) => [connection.fromStationAreaId, connection.toStationAreaId]), [
+    ["fixture-a", "fixture-b"],
+    ["fixture-b", "fixture-c"],
+  ]);
+  assert.equal(collapse[0]?.id, "fixture-collapse:0-1");
+  assert.equal(collapse[0]?.fromStopSequence, 0);
+  assert.equal(collapse[0]?.toStopSequence, 1);
+  assert.equal(collapse[1]?.id, "fixture-collapse:1-2");
+  assert.equal(collapse[1]?.fromStopSequence, 1);
+  assert.equal(collapse[1]?.toStopSequence, 2);
+});
+
+test("station-level collapse boards and alights at the earliest stop that allows the maneuver", () => {
+  const schedule = FIXTURE_SCHEDULED_ARTIFACT;
+  const collapse = schedule.connections.filter((connection) => connection.tripId === "fixture-collapse");
+  assert.equal(collapse[0]?.pickupType, 0);
+  assert.equal(collapse[0]?.departureTimeSeconds, 8 * 3600 + 42 * 60);
+  assert.equal(collapse[0]?.dropOffType, 0);
+  assert.equal(collapse[0]?.arrivalTimeSeconds, 8 * 3600 + 52 * 60);
+  assert.equal(collapse[1]?.pickupType, 0);
+  assert.equal(collapse[1]?.departureTimeSeconds, 8 * 3600 + 51 * 60);
+  assert.equal(collapse[1]?.dropOffType, 0);
+  assert.equal(collapse[1]?.arrivalTimeSeconds, 9 * 3600);
+});
+
+test("station-level collapse keeps non-consecutive same-area visits as separate connections", () => {
+  const schedule = FIXTURE_SCHEDULED_ARTIFACT;
+  const returnTrip = schedule.connections.filter((connection) => connection.tripId === "fixture-return");
+  assert.deepEqual(returnTrip.map((connection) => [connection.fromStationAreaId, connection.toStationAreaId]), [
+    ["fixture-a", "fixture-b"],
+    ["fixture-b", "fixture-c"],
+    ["fixture-c", "fixture-b"],
+  ]);
+  assert.equal(returnTrip[0]?.fromStopSequence, 0);
+  assert.equal(returnTrip[1]?.toStopSequence, 2);
+  assert.equal(returnTrip[2]?.fromStopSequence, 2);
+  assert.equal(returnTrip[2]?.toStopSequence, 3);
 });

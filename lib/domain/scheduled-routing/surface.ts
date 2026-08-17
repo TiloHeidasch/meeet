@@ -2,10 +2,10 @@ import "server-only";
 
 import { isWithinOfficialMunichBoundary } from "../boundary.ts";
 import {
+  CHANGE_TIME_PRESETS,
   ROUTING_HORIZON_SECONDS,
   SCHEDULED_ROUTING_CONTRACT_VERSION,
   WALKING_SECONDS_ROUNDING_RULE,
-  type BoardingStopArrivalField,
   type ScheduledAccessSeed,
   type ScheduledDeadlineCheck,
   type ScheduledParticipantSurface,
@@ -16,10 +16,10 @@ import {
   type ScheduledStationAreaCandidate,
   type ScheduledStationAreaCatalog,
   type ScheduledStationAreaCatalogEntry,
+  type StationArrivalField,
 } from "./models.ts";
 import {
   DEFAULT_TRANSFER_RADIUS_METERS,
-  DEFAULT_WALKING_VELOCITY_METERS_PER_SECOND,
   createScheduledRoutingWindow,
   isScheduledToleranceSatisfied,
   routeScheduledEarliestArrivals,
@@ -32,10 +32,12 @@ const STATION_AREA_CHECKPOINT = 32;
 export function calculateScheduledSurface(input: ScheduledSurfaceInput): ScheduledSurfaceResult {
   if (input.accessSeedSets.length !== 2) throw new RangeError("Scheduled surface calculation requires exactly two access-seed sets.");
   const transferRadiusMeters = input.transferRadiusMeters ?? DEFAULT_TRANSFER_RADIUS_METERS;
+  const changeTimeSeconds = input.changeTimeSeconds ?? CHANGE_TIME_PRESETS.medium;
   const stationAreaCatalog = buildScheduledStationAreaCatalog(input.schedule, input.deadlineCheck);
   const window = createScheduledRoutingWindow(input.schedule, input.searchStartAt, {
     walkingVelocityMetersPerSecond: input.walkingVelocityMetersPerSecond,
     transferRadiusMeters,
+    changeTimeSeconds,
     deadlineCheck: input.deadlineCheck,
   });
   validateInput(input);
@@ -47,10 +49,9 @@ export function calculateScheduledSurface(input: ScheduledSurfaceInput): Schedul
   const firstRoute = routes[0];
   const secondRoute = routes[1];
   const searchStartAt = window.searchStartAt;
-  const searchStartEpochSeconds = window.searchStartEpochSeconds;
   const participantSurfaces: [ScheduledParticipantSurface, ScheduledParticipantSurface] = [
-    createParticipantSurface(participantIds[0], input.schedule, firstRoute, input.walkingVelocityMetersPerSecond, searchStartEpochSeconds, input.deadlineCheck),
-    createParticipantSurface(participantIds[1], input.schedule, secondRoute, input.walkingVelocityMetersPerSecond, searchStartEpochSeconds, input.deadlineCheck),
+    createParticipantSurface(participantIds[0], input.schedule, firstRoute),
+    createParticipantSurface(participantIds[1], input.schedule, secondRoute),
   ];
   const firstReachable = firstRoute?.reachableStationAreaCount ?? 0;
   const secondReachable = secondRoute?.reachableStationAreaCount ?? 0;
@@ -65,20 +66,20 @@ export function calculateScheduledSurface(input: ScheduledSurfaceInput): Schedul
     searchStartAt,
     routingHorizonSeconds: ROUTING_HORIZON_SECONDS,
     selectedTolerancePercent: input.selectedTolerancePercent,
+    changeTimeSeconds,
     walkingVelocityMetersPerSecond: input.walkingVelocityMetersPerSecond,
     walkingSecondsRoundingRule: WALKING_SECONDS_ROUNDING_RULE,
     transferRadiusMeters,
     accessSeedCounts: [input.accessSeedSets[0].length, input.accessSeedSets[1].length],
     stationAreaCount: input.schedule.stationAreas.length,
-    boardingStopCount: input.schedule.boardingStops.length,
     connectionCount: input.schedule.connections.length,
     coverage: "scheduled-service-day-local-radius/v1",
     representativePointBasis: "inside-clipped-cell/v1",
   };
   const stationAreas = createStationAreaCandidates(
     stationAreaCatalog,
-    participantSurfaces[0].boardingStopArrivals,
-    participantSurfaces[1].boardingStopArrivals,
+    participantSurfaces[0].stationArrivals,
+    participantSurfaces[1].stationArrivals,
     noResult,
     input.selectedTolerancePercent,
     input.deadlineCheck,
@@ -100,98 +101,58 @@ function createParticipantSurface(
   participantId: string,
   schedule: ScheduledRoutingArtifact,
   route: ReturnType<typeof routeScheduledEarliestArrivals> | null | undefined,
-  velocityMetersPerSecond: number,
-  searchStartEpochSeconds: number,
-  deadlineCheck?: ScheduledDeadlineCheck,
 ): ScheduledParticipantSurface {
   const stationArrivals = route?.stationArrivals ?? schedule.stationAreas.map((area) => ({ stationAreaId: area.id, arrivalAt: null, elapsedSeconds: null }));
-  const boardingStopArrivals = route?.boardingStopArrivals ?? emptyBoardingStopArrivals(schedule.boardingStops, deadlineCheck);
-  return { participantId, stationArrivals, boardingStopArrivals };
-}
-
-function emptyBoardingStopArrivals(
-  stops: readonly ScheduledRoutingArtifact["boardingStops"][number][],
-  deadlineCheck?: ScheduledDeadlineCheck,
-): BoardingStopArrivalField[] {
-  return stops.map((stop, index) => {
-    if (index % STATION_AREA_CHECKPOINT === 0) deadlineCheck?.("surface-cells");
-    return { boardingStopId: stop.id, arrivalAt: null, elapsedSeconds: null };
-  });
+  return { participantId, stationArrivals };
 }
 
 export function buildScheduledStationAreaCatalog(
   schedule: ScheduledRoutingArtifact,
   deadlineCheck?: ScheduledDeadlineCheck,
 ): ScheduledStationAreaCatalog {
-  const connectedStopIds = new Set<string>();
-  for (let index = 0; index < schedule.connections.length; index += 1) {
-    if (index % STATION_AREA_CHECKPOINT === 0) deadlineCheck?.("surface-cells");
-    const connection = schedule.connections[index];
-    if (connection === undefined) continue;
-    connectedStopIds.add(connection.fromStopId);
-    connectedStopIds.add(connection.toStopId);
-  }
-  const stopsById = new Map<string, ScheduledRoutingArtifact["boardingStops"][number]>();
-  for (let index = 0; index < schedule.boardingStops.length; index += 1) {
-    if (index % STATION_AREA_CHECKPOINT === 0) deadlineCheck?.("surface-cells");
-    const stop = schedule.boardingStops[index];
-    if (stop !== undefined) stopsById.set(stop.id, stop);
-  }
   const entries: ScheduledStationAreaCatalogEntry[] = [];
   const areas = [...schedule.stationAreas].sort((left, right) => compareScheduledIds(left.id, right.id));
   for (let index = 0; index < areas.length; index += 1) {
     if (index % STATION_AREA_CHECKPOINT === 0) deadlineCheck?.("surface-cells");
     const area = areas[index];
     if (area === undefined || !isWithinOfficialMunichBoundary(area.coordinate)) continue;
-    const eligibleBoardingStopIds: string[] = [];
-    for (let stopIndex = 0; stopIndex < area.boardingStopIds.length; stopIndex += 1) {
-      if (stopIndex % STATION_AREA_CHECKPOINT === 0) deadlineCheck?.("surface-cells");
-      const stopId = area.boardingStopIds[stopIndex];
-      if (stopId === undefined) continue;
-      const stop = stopsById.get(stopId);
-      if (stop !== undefined && isWithinOfficialMunichBoundary(stop.coordinate) && connectedStopIds.has(stopId)) eligibleBoardingStopIds.push(stopId);
-    }
-    eligibleBoardingStopIds.sort(compareScheduledIds);
-    if (eligibleBoardingStopIds.length === 0) continue;
-    entries.push({ stationAreaId: area.id, name: area.name, coordinate: area.coordinate, eligibleBoardingStopIds });
+    entries.push({ stationAreaId: area.id, name: area.name, coordinate: area.coordinate });
   }
   return deepFreeze({ entries });
 }
 
 function createStationAreaCandidates(
   catalog: ScheduledStationAreaCatalog,
-  redArrivals: readonly BoardingStopArrivalField[],
-  blueArrivals: readonly BoardingStopArrivalField[],
+  redArrivals: readonly StationArrivalField[],
+  blueArrivals: readonly StationArrivalField[],
   noResult: boolean,
   tolerancePercent: 5 | 10 | 15,
   deadlineCheck?: ScheduledDeadlineCheck,
 ): ScheduledStationAreaCandidate[] {
-  const redByStop = new Map<string, BoardingStopArrivalField>();
+  const redByArea = new Map<string, StationArrivalField>();
   for (let index = 0; index < redArrivals.length; index += 1) {
     if (index % STATION_AREA_CHECKPOINT === 0) deadlineCheck?.("surface-cells");
     const arrival = redArrivals[index];
-    if (arrival !== undefined) redByStop.set(arrival.boardingStopId, arrival);
+    if (arrival !== undefined) redByArea.set(arrival.stationAreaId, arrival);
   }
-  const blueByStop = new Map<string, BoardingStopArrivalField>();
+  const blueByArea = new Map<string, StationArrivalField>();
   for (let index = 0; index < blueArrivals.length; index += 1) {
     if (index % STATION_AREA_CHECKPOINT === 0) deadlineCheck?.("surface-cells");
     const arrival = blueArrivals[index];
-    if (arrival !== undefined) blueByStop.set(arrival.boardingStopId, arrival);
+    if (arrival !== undefined) blueByArea.set(arrival.stationAreaId, arrival);
   }
   const candidates: ScheduledStationAreaCandidate[] = [];
   for (let index = 0; index < catalog.entries.length; index += 1) {
     if (index % STATION_AREA_CHECKPOINT === 0) deadlineCheck?.("surface-cells");
     const area = catalog.entries[index];
     if (area === undefined) continue;
-    const red = fastestEligibleBoardingStop(area.eligibleBoardingStopIds, redByStop, deadlineCheck);
-    const blue = fastestEligibleBoardingStop(area.eligibleBoardingStopIds, blueByStop, deadlineCheck);
+    const red = redByArea.get(area.stationAreaId);
+    const blue = blueByArea.get(area.stationAreaId);
     if (noResult) {
       candidates.push({
         stationAreaId: area.stationAreaId,
         name: area.name,
         coordinate: area.coordinate,
-        redBoardingStopId: null,
-        blueBoardingStopId: null,
         classification: "unclassified",
         redArrivalSeconds: null,
         blueArrivalSeconds: null,
@@ -204,8 +165,6 @@ function createStationAreaCandidates(
       area.stationAreaId,
       area.name,
       area.coordinate,
-      red?.boardingStopId ?? null,
-      blue?.boardingStopId ?? null,
       red?.elapsedSeconds ?? null,
       blue?.elapsedSeconds ?? null,
       tolerancePercent,
@@ -214,50 +173,28 @@ function createStationAreaCandidates(
   return candidates;
 }
 
-function fastestEligibleBoardingStop(
-  stopIds: readonly string[],
-  arrivals: ReadonlyMap<string, BoardingStopArrivalField>,
-  deadlineCheck?: ScheduledDeadlineCheck,
-): BoardingStopArrivalField | null {
-  let fastest: { readonly arrival: BoardingStopArrivalField; readonly elapsedSeconds: number } | null = null;
-  for (let index = 0; index < stopIds.length; index += 1) {
-    if (index % STATION_AREA_CHECKPOINT === 0) deadlineCheck?.("surface-cells");
-    const stopId = stopIds[index];
-    if (stopId === undefined) continue;
-    const arrival = arrivals.get(stopId);
-    const elapsedSeconds = arrival?.elapsedSeconds;
-    if (arrival === undefined || elapsedSeconds === null || elapsedSeconds === undefined) continue;
-    if (fastest === null || elapsedSeconds < fastest.elapsedSeconds || (elapsedSeconds === fastest.elapsedSeconds && compareScheduledIds(arrival.boardingStopId, fastest.arrival.boardingStopId) < 0)) fastest = { arrival, elapsedSeconds };
-  }
-  return fastest?.arrival ?? null;
-}
-
 function classifyStationArea(
   stationAreaId: string,
   name: string,
   coordinate: { readonly latitude: number; readonly longitude: number },
-  redBoardingStopId: string | null,
-  blueBoardingStopId: string | null,
   redArrivalSeconds: number | null,
   blueArrivalSeconds: number | null,
   tolerancePercent: 5 | 10 | 15,
 ): ScheduledStationAreaCandidate {
   if (redArrivalSeconds === null && blueArrivalSeconds === null) {
-    return { stationAreaId, name, coordinate, redBoardingStopId: null, blueBoardingStopId: null, classification: "unclassified", redArrivalSeconds: null, blueArrivalSeconds: null, fasterParticipant: null, withinSelectedTolerance: false };
+    return { stationAreaId, name, coordinate, classification: "unclassified", redArrivalSeconds: null, blueArrivalSeconds: null, fasterParticipant: null, withinSelectedTolerance: false };
   }
   if (redArrivalSeconds === null) {
-    return { stationAreaId, name, coordinate, redBoardingStopId: null, blueBoardingStopId, classification: "blue", redArrivalSeconds: null, blueArrivalSeconds, fasterParticipant: "blue", withinSelectedTolerance: false };
+    return { stationAreaId, name, coordinate, classification: "blue", redArrivalSeconds: null, blueArrivalSeconds, fasterParticipant: "blue", withinSelectedTolerance: false };
   }
   if (blueArrivalSeconds === null) {
-    return { stationAreaId, name, coordinate, redBoardingStopId, blueBoardingStopId: null, classification: "red", redArrivalSeconds, blueArrivalSeconds: null, fasterParticipant: "red", withinSelectedTolerance: false };
+    return { stationAreaId, name, coordinate, classification: "red", redArrivalSeconds, blueArrivalSeconds: null, fasterParticipant: "red", withinSelectedTolerance: false };
   }
   const fair = isScheduledToleranceSatisfied(redArrivalSeconds, blueArrivalSeconds, tolerancePercent);
   return {
     stationAreaId,
     name,
     coordinate,
-    redBoardingStopId,
-    blueBoardingStopId,
     classification: fair ? "fair" : redArrivalSeconds < blueArrivalSeconds ? "red" : "blue",
     redArrivalSeconds,
     blueArrivalSeconds,
@@ -280,7 +217,6 @@ function validateInput(input: ScheduledSurfaceInput): void {
 function validateAccessSeeds(seeds: readonly ScheduledAccessSeed[]): void {
   for (const seed of seeds) {
     if (seed.stationAreaId.trim() === "") throw new RangeError("Access seed stationAreaId must not be empty.");
-    if (seed.boardingStopId !== undefined && seed.boardingStopId.trim() === "") throw new RangeError("Access seed boardingStopId must not be empty.");
     if (!Number.isSafeInteger(seed.accessSeconds) || seed.accessSeconds < 0 || seed.accessSeconds > ROUTING_HORIZON_SECONDS) throw new RangeError("Access seed accessSeconds must be a whole number within the routing horizon.");
   }
 }

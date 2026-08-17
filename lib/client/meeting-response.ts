@@ -3,24 +3,28 @@
 // schedule artifacts, provider data, and credentials must stay out of it.
 import boundaryAsset from "../../data/official/munich-districts.json";
 import type {
-  ScheduledMeetingRequest as MeetingRequest,
+  ScheduledMeetingRequest,
   ScheduledMeetingResponseDto as ServerMeetingResponse,
 } from "../validation/meeting-v3.ts";
 
+export type MeetingRequest = ScheduledMeetingRequest & {
+  readonly changeTimePreset: "quick" | "medium" | "long";
+};
 export type StationAreaClassification = "red" | "blue" | "fair" | "unclassified";
 export type MeetingStationArea = {
   readonly stationAreaId: string; readonly name: string;
   readonly coordinate: { readonly latitude: number; readonly longitude: number };
-  readonly redBoardingStopId: string | null; readonly blueBoardingStopId: string | null;
   readonly classification: StationAreaClassification;
   readonly redArrivalSeconds: number | null; readonly blueArrivalSeconds: number | null;
   readonly fasterParticipant: "red" | "blue" | null; readonly withinSelectedTolerance: boolean;
 };
 export type MeetingResponse = Omit<ServerMeetingResponse, "metadata"> & {
   readonly stationAreas: readonly MeetingStationArea[];
-  readonly metadata: ServerMeetingResponse["metadata"] & { readonly stationAreas: { readonly count: number; readonly coverage: "official-munich-boundary-with-connected-artifact-boarding-stops/v1"; readonly selection: "all-eligible-scheduled-station-areas/v1" } };
+  readonly metadata: ServerMeetingResponse["metadata"] & {
+    readonly surface: ServerMeetingResponse["metadata"]["surface"] & { readonly changeTimeSeconds: 180 | 300 | 600 };
+    readonly stationAreas: { readonly count: number; readonly coverage: "official-munich-boundary-with-connected-artifact-station-areas/v1"; readonly selection: "all-eligible-scheduled-station-areas/v1" };
+  };
 };
-export type { MeetingRequest };
 export type ClientValidationIssue = { path: readonly (string | number)[]; message: string };
 export type ClientValidationResult =
   | { success: true; data: MeetingResponse }
@@ -52,13 +56,14 @@ function ringRelation(point: { latitude: number; longitude: number }, ring: unkn
 const position = (value: unknown): value is [number, number] => Array.isArray(value) && value.length === 2 && typeof value[0] === "number" && Number.isFinite(value[0]) && value[0] >= -180 && value[0] <= 180 && typeof value[1] === "number" && Number.isFinite(value[1]) && value[1] >= -90 && value[1] <= 90;
 const sha = (value: unknown): value is string => typeof value === "string" && /^[a-f0-9]{64}$/.test(value);
 const WALKING_ROUNDING = "ceil(distanceMetres / velocityMetresPerSecond), with zero distance taking zero seconds";
+const CHANGE_TIME_SECONDS = { quick: 180, medium: 300, long: 600 } as const;
 const nonEmpty = (value: unknown): value is string => typeof value === "string" && value.trim() !== "";
 
 function seed(value: unknown, path: (string | number)[], issues: ClientValidationIssue[]): boolean {
   if (!object(value)) { fail(issues, path, "Access seed must be an object."); return false; }
-  keys(value, ["seedId", "mvgStationId", "stationAreaId", "boardingStopId", "coordinate", "accessSeconds", "provenance"], path, issues);
+  keys(value, ["seedId", "mvgStationId", "stationAreaId", "coordinate", "accessSeconds", "provenance"], path, issues);
   const p = value.provenance;
-  const valid = nonEmpty(value.seedId) && nonEmpty(value.mvgStationId) && nonEmpty(value.stationAreaId) && (value.boardingStopId === undefined || nonEmpty(value.boardingStopId)) && whole(value.accessSeconds) && coordinate(value.coordinate) && object(p) && (p.source === "mvg-nearby" || p.source === "fixture-static") && nonEmpty(p.endpoint) && typeof p.distanceMeters === "number" && Number.isFinite(p.distanceMeters) && p.distanceMeters >= 0 && whole(p.walkingSeconds) && typeof p.note === "string";
+  const valid = nonEmpty(value.seedId) && nonEmpty(value.mvgStationId) && nonEmpty(value.stationAreaId) && whole(value.accessSeconds) && coordinate(value.coordinate) && object(p) && (p.source === "mvg-nearby" || p.source === "fixture-static") && nonEmpty(p.endpoint) && typeof p.distanceMeters === "number" && Number.isFinite(p.distanceMeters) && p.distanceMeters >= 0 && whole(p.walkingSeconds) && typeof p.note === "string";
   if (object(value.coordinate)) keys(value.coordinate, ["latitude", "longitude"], [...path, "coordinate"], issues);
   if (object(p)) keys(p, ["source", "endpoint", "distanceMeters", "walkingSeconds", "note"], [...path, "provenance"], issues);
   if (!valid) fail(issues, path, "Access seed fields or provenance are invalid.");
@@ -96,7 +101,7 @@ function metadata(value: unknown, request: MeetingRequest, participants: unknown
   const schedule = value.schedule; const surface = value.surface; const stationMetadata = value.stationAreas; const provider = value.accessProvider;
   if (!object(schedule) || !object(surface) || !object(stationMetadata) || !object(provider)) { fail(issues, ["metadata"], "Complete schedule, surface, station-area and provider metadata are required."); return false; }
   keys(schedule, ["contractVersion", "feedId", "timeZone", "scheduleContentHash", "compiledArtifactId", "serviceDateRange", "acquisition"], ["metadata", "schedule"], issues);
-  keys(surface, ["contractVersion", "scheduleContentHash", "compiledArtifactId", "feedId", "timeZone", "searchStartAt", "routingHorizonSeconds", "selectedTolerancePercent", "walkingVelocityMetersPerSecond", "walkingSecondsRoundingRule", "transferRadiusMeters", "accessSeedCounts", "stationAreaCount", "boardingStopCount", "connectionCount", "coverage", "representativePointBasis", "classificationMethod", "classificationBasis", "finalWalkingMethod"], ["metadata", "surface"], issues);
+  keys(surface, ["contractVersion", "scheduleContentHash", "compiledArtifactId", "feedId", "timeZone", "searchStartAt", "routingHorizonSeconds", "selectedTolerancePercent", "walkingVelocityMetersPerSecond", "walkingSecondsRoundingRule", "transferRadiusMeters", "accessSeedCounts", "stationAreaCount", "connectionCount", "changeTimeSeconds", "coverage", "representativePointBasis", "classificationMethod", "classificationBasis", "finalWalkingMethod"], ["metadata", "surface"], issues);
   keys(stationMetadata, ["count", "coverage", "selection"], ["metadata", "stationAreas"], issues);
   keys(provider, ["name", "deployment", "dataKind", "liveData", "asOf", "notes", "provenance"], ["metadata", "accessProvider"], issues);
   if (object(provider.provenance)) {
@@ -112,10 +117,10 @@ function metadata(value: unknown, request: MeetingRequest, participants: unknown
   }
   const range = schedule.serviceDateRange; const counts = surface.accessSeedCounts;
   if (object(range)) keys(range, ["firstDate", "lastDate"], ["metadata", "schedule", "serviceDateRange"], issues);
-  const valid = schedule.contractVersion === "meeet-scheduled-routing/v1" && nonEmpty(schedule.feedId) && schedule.timeZone === "Europe/Berlin" && sha(schedule.scheduleContentHash) && sha(schedule.compiledArtifactId) && object(range) && date(range.firstDate) && date(range.lastDate) && range.firstDate <= range.lastDate && acquisition(schedule.acquisition, ["metadata", "schedule", "acquisition"], issues) && surface.contractVersion === "meeet-scheduled-routing/v1" && sha(surface.scheduleContentHash) && sha(surface.compiledArtifactId) && surface.feedId === schedule.feedId && surface.timeZone === schedule.timeZone && surface.scheduleContentHash === schedule.scheduleContentHash && surface.compiledArtifactId === schedule.compiledArtifactId && instant(surface.searchStartAt) && surface.searchStartAt === request.searchStartAt && surface.routingHorizonSeconds === 86400 && (surface.selectedTolerancePercent === 5 || surface.selectedTolerancePercent === 10 || surface.selectedTolerancePercent === 15) && surface.selectedTolerancePercent === request.tolerancePercent && typeof surface.walkingVelocityMetersPerSecond === "number" && Number.isFinite(surface.walkingVelocityMetersPerSecond) && surface.walkingSecondsRoundingRule === WALKING_ROUNDING && typeof surface.transferRadiusMeters === "number" && Number.isFinite(surface.transferRadiusMeters) && Array.isArray(counts) && counts.length === 2 && counts.every(whole) && whole(surface.stationAreaCount) && whole(surface.boardingStopCount) && whole(surface.connectionCount) && surface.coverage === "scheduled-service-day-local-radius/v1" && surface.representativePointBasis === "inside-clipped-cell/v1" && surface.classificationMethod === "representative-point-with-geometric-final-station-walking/v1" && surface.classificationBasis === "representative-point" && surface.finalWalkingMethod === "geometric-station-walking-estimate-not-navigation" && value.coverage === "munich-clipped-scheduled-grid/v1" && providerShape(provider);
+  const valid = schedule.contractVersion === "meeet-scheduled-routing/v1" && nonEmpty(schedule.feedId) && schedule.timeZone === "Europe/Berlin" && sha(schedule.scheduleContentHash) && sha(schedule.compiledArtifactId) && object(range) && date(range.firstDate) && date(range.lastDate) && range.firstDate <= range.lastDate && acquisition(schedule.acquisition, ["metadata", "schedule", "acquisition"], issues) && surface.contractVersion === "meeet-scheduled-routing/v1" && sha(surface.scheduleContentHash) && sha(surface.compiledArtifactId) && surface.feedId === schedule.feedId && surface.timeZone === schedule.timeZone && surface.scheduleContentHash === schedule.scheduleContentHash && surface.compiledArtifactId === schedule.compiledArtifactId && instant(surface.searchStartAt) && surface.searchStartAt === request.searchStartAt && surface.routingHorizonSeconds === 86400 && (surface.selectedTolerancePercent === 5 || surface.selectedTolerancePercent === 10 || surface.selectedTolerancePercent === 15) && surface.selectedTolerancePercent === request.tolerancePercent && typeof surface.walkingVelocityMetersPerSecond === "number" && Number.isFinite(surface.walkingVelocityMetersPerSecond) && surface.walkingSecondsRoundingRule === WALKING_ROUNDING && typeof surface.transferRadiusMeters === "number" && Number.isFinite(surface.transferRadiusMeters) && Array.isArray(counts) && counts.length === 2 && counts.every(whole) && whole(surface.stationAreaCount) && whole(surface.connectionCount) && surface.changeTimeSeconds === CHANGE_TIME_SECONDS[request.changeTimePreset] && surface.coverage === "scheduled-service-day-local-radius/v1" && surface.representativePointBasis === "inside-clipped-cell/v1" && surface.classificationMethod === "representative-point-with-geometric-final-station-walking/v1" && surface.classificationBasis === "representative-point" && surface.finalWalkingMethod === "geometric-station-walking-estimate-not-navigation" && value.coverage === "munich-clipped-scheduled-grid/v1" && providerShape(provider);
   if (schedule.feedId !== surface.feedId || schedule.scheduleContentHash !== surface.scheduleContentHash || schedule.compiledArtifactId !== surface.compiledArtifactId || schedule.timeZone !== surface.timeZone) fail(issues, ["metadata"], "Schedule and surface identities must match.");
   if (Array.isArray(counts) && Array.isArray(participants)) participants.forEach((p, i) => { if (object(p) && Array.isArray(p.accessSeeds) && counts[i] !== p.accessSeeds.length) fail(issues, ["metadata", "surface", "accessSeedCounts", i], "Access-seed count does not match serialized seeds."); });
-  if (!valid || !whole(stationMetadata.count) || stationMetadata.count !== stationAreas.length || stationMetadata.coverage !== "official-munich-boundary-with-connected-artifact-boarding-stops/v1" || stationMetadata.selection !== "all-eligible-scheduled-station-areas/v1") fail(issues, ["metadata"], "Metadata fields are invalid.");
+  if (!valid || !whole(stationMetadata.count) || stationMetadata.count !== stationAreas.length || stationMetadata.coverage !== "official-munich-boundary-with-connected-artifact-station-areas/v1" || stationMetadata.selection !== "all-eligible-scheduled-station-areas/v1") fail(issues, ["metadata"], "Metadata fields are invalid.");
   return valid;
 }
 
@@ -139,11 +144,11 @@ function originShape(value: unknown): value is { label: string; latitude: number
 function stationArea(value: unknown, index: number, status: unknown, tolerance: unknown, issues: ClientValidationIssue[]): boolean {
   const path = ["stationAreas", index];
   if (!object(value)) { fail(issues, path, "Station area must be an object."); return false; }
-  keys(value, ["stationAreaId", "name", "coordinate", "redBoardingStopId", "blueBoardingStopId", "classification", "redArrivalSeconds", "blueArrivalSeconds", "fasterParticipant", "withinSelectedTolerance"], path, issues);
+  keys(value, ["stationAreaId", "name", "coordinate", "classification", "redArrivalSeconds", "blueArrivalSeconds", "fasterParticipant", "withinSelectedTolerance"], path, issues);
   if (object(value.coordinate)) keys(value.coordinate, ["latitude", "longitude"], [...path, "coordinate"], issues);
-  const valid = nonEmpty(value.stationAreaId) && nonEmpty(value.name) && insideOfficialMunichBoundary(value.coordinate) && (value.redBoardingStopId === null || nonEmpty(value.redBoardingStopId)) && (value.blueBoardingStopId === null || nonEmpty(value.blueBoardingStopId)) && ["red", "blue", "fair", "unclassified"].includes(String(value.classification)) && nullableWhole(value.redArrivalSeconds) && nullableWhole(value.blueArrivalSeconds) && (value.redBoardingStopId === null) === (value.redArrivalSeconds === null) && (value.blueBoardingStopId === null) === (value.blueArrivalSeconds === null) && (value.fasterParticipant === null || value.fasterParticipant === "red" || value.fasterParticipant === "blue") && typeof value.withinSelectedTolerance === "boolean";
+  const valid = nonEmpty(value.stationAreaId) && nonEmpty(value.name) && insideOfficialMunichBoundary(value.coordinate) && ["red", "blue", "fair", "unclassified"].includes(String(value.classification)) && nullableWhole(value.redArrivalSeconds) && nullableWhole(value.blueArrivalSeconds) && (value.fasterParticipant === null || value.fasterParticipant === "red" || value.fasterParticipant === "blue") && typeof value.withinSelectedTolerance === "boolean";
   const red = value.redArrivalSeconds; const blue = value.blueArrivalSeconds;
-  if (status === "no-result" && (value.classification !== "unclassified" || value.redBoardingStopId !== null || value.blueBoardingStopId !== null || red !== null || blue !== null || value.fasterParticipant !== null || value.withinSelectedTolerance !== false)) fail(issues, path, "No-result station areas must be unclassified and have no boarding stops or travel fields.");
+  if (status === "no-result" && (value.classification !== "unclassified" || red !== null || blue !== null || value.fasterParticipant !== null || value.withinSelectedTolerance !== false)) fail(issues, path, "No-result station areas must be unclassified and have no travel fields.");
   if (status === "ok" && nullableWhole(red) && nullableWhole(blue)) { const hasRed = red !== null; const hasBlue = blue !== null; const fair = hasRed && hasBlue && Math.abs(red - blue) * 100 <= (red + blue) * Number(tolerance); const expected = !hasRed && !hasBlue ? "unclassified" : fair ? "fair" : hasRed && hasBlue ? red! < blue! ? "red" : "blue" : hasRed ? "red" : "blue"; const faster = !hasRed && !hasBlue ? null : hasRed && hasBlue && red === blue ? null : hasRed && hasBlue ? red! < blue! ? "red" : "blue" : hasRed ? "red" : "blue"; const expectedTolerance = !hasRed && !hasBlue ? false : fair; if (value.classification !== expected || value.withinSelectedTolerance !== expectedTolerance || value.fasterParticipant !== faster) fail(issues, path, "Station area classification contradicts arrivals."); }
   if (!valid) fail(issues, path, "Station area fields are invalid.");
   return valid;
@@ -178,5 +183,5 @@ function isParsedResponse(value: unknown): value is MeetingResponse {
   if (!object(value) || value.contractVersion !== "meeet-meeting/v3" || (value.status !== "ok" && value.status !== "no-result") || !Array.isArray(value.participants) || value.participants.length !== 2 || !Array.isArray(value.stationAreas) || !object(value.metadata)) return false;
   const participantShape = (item: unknown) => object(item) && typeof item.id === "string" && (item.color === "red" || item.color === "blue") && item.mode === "transit" && originShape(item.origin) && Array.isArray(item.accessSeeds) && item.accessSeeds.every((seedValue) => object(seedValue) && object(seedValue.coordinate) && object(seedValue.provenance));
   const metadataShape = value.metadata;
-  return value.participants.every(participantShape) && value.stationAreas.every((area) => object(area) && typeof area.stationAreaId === "string" && coordinate(area.coordinate)) && object(metadataShape.stationAreas) && metadataShape.stationAreas.count === value.stationAreas.length && metadataShape.stationAreas.coverage === "official-munich-boundary-with-connected-artifact-boarding-stops/v1" && metadataShape.stationAreas.selection === "all-eligible-scheduled-station-areas/v1" && object(metadataShape.schedule) && object(metadataShape.surface) && object(metadataShape.accessProvider) && metadataShape.coverage === "munich-clipped-scheduled-grid/v1";
+  return value.participants.every(participantShape) && value.stationAreas.every((area) => object(area) && typeof area.stationAreaId === "string" && coordinate(area.coordinate)) && object(metadataShape.stationAreas) && metadataShape.stationAreas.count === value.stationAreas.length && metadataShape.stationAreas.coverage === "official-munich-boundary-with-connected-artifact-station-areas/v1" && metadataShape.stationAreas.selection === "all-eligible-scheduled-station-areas/v1" && object(metadataShape.schedule) && object(metadataShape.surface) && (metadataShape.surface.changeTimeSeconds === 180 || metadataShape.surface.changeTimeSeconds === 300 || metadataShape.surface.changeTimeSeconds === 600) && object(metadataShape.accessProvider) && metadataShape.coverage === "munich-clipped-scheduled-grid/v1";
 }

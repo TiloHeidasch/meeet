@@ -1,16 +1,16 @@
 import "server-only";
 
 import {
+  CHANGE_TIME_PRESETS,
   ROUTING_HORIZON_SECONDS,
   WALKING_SECONDS_ROUNDING_RULE,
   type ScheduledAccessSeed,
-  type ScheduledBoardingStop,
   type ScheduledConnection,
   type ScheduledDeadlineCheck,
-  type BoardingStopArrivalField,
   type ScheduledRoutingArtifact,
   type ScheduledRoutingOptions,
   type ScheduledRoutingResult,
+  type ScheduledStationArea,
   type StationArrivalField,
 } from "./models.ts";
 import {
@@ -22,10 +22,10 @@ import {
   serviceDateAnchorEpochSeconds,
   serviceDateRangeForSearch,
 } from "./time.ts";
-import type { ScheduledAccessSeedCandidate } from "../providers.ts";
 
 export const DEFAULT_WALKING_VELOCITY_METERS_PER_SECOND = 1.4;
 export const DEFAULT_TRANSFER_RADIUS_METERS = 250;
+export const DEFAULT_CHANGE_TIME_SECONDS = CHANGE_TIME_PRESETS.medium;
 const ROUTING_CONNECTION_CHECKPOINT = 2_048;
 
 export interface ScheduledMaterializedConnection {
@@ -41,12 +41,13 @@ export interface ScheduledMaterializedConnection {
 export interface ScheduledSpatialIndex {
   readonly bucketSizeDegrees: number;
   readonly buckets: ReadonlyMap<string, readonly string[]>;
-  readonly stops: ReadonlyMap<string, ScheduledBoardingStop>;
+  readonly areas: ReadonlyMap<string, ScheduledStationArea>;
 }
 
 interface ResolvedRoutingOptions {
   readonly walkingVelocityMetersPerSecond: number;
   readonly transferRadiusMeters: number;
+  readonly changeTimeSeconds: number;
   readonly deadlineCheck?: ScheduledDeadlineCheck;
 }
 
@@ -57,91 +58,13 @@ export interface ScheduledRoutingWindow {
   readonly horizonEndEpochSeconds: number;
   readonly walkingVelocityMetersPerSecond: number;
   readonly transferRadiusMeters: number;
+  readonly changeTimeSeconds: number;
   readonly connections: readonly ScheduledMaterializedConnection[];
   readonly spatialIndex: ScheduledSpatialIndex;
   readonly deadlineCheck?: ScheduledDeadlineCheck;
 }
 
 export const SCHEDULED_DETAIL_SELECTION_POLICY = "earliest-arrival/canonical-scan-first/v1";
-
-export type ScheduledSelectedRouteStop = {
-  readonly boardingStopId: string;
-  readonly stationAreaId: string;
-  readonly name: string;
-};
-
-export type ScheduledSelectedRouteStationArea = {
-  readonly stationAreaId: string;
-  readonly name: string;
-};
-
-export type ScheduledSelectedRouteCoordinate = {
-  readonly latitude: number;
-  readonly longitude: number;
-};
-
-export type ScheduledSelectedRouteSegment =
-  | {
-      readonly kind: "walk";
-      readonly purpose: "origin-access" | "station-area-access" | "transfer";
-      readonly durationSeconds: number;
-      readonly distanceMeters: number;
-      readonly from: ScheduledSelectedRouteCoordinate;
-      readonly to: ScheduledSelectedRouteCoordinate;
-      readonly estimate: "geometric-estimate-not-directions/v1";
-      readonly startAt: string;
-      readonly endAt: string;
-    }
-  | {
-      readonly kind: "wait";
-      readonly durationSeconds: number;
-      readonly at: ScheduledSelectedRouteStop;
-      readonly startAt: string;
-      readonly endAt: string;
-    }
-  | {
-      readonly kind: "transit";
-      readonly durationSeconds: number;
-      readonly startAt: string;
-      readonly endAt: string;
-      readonly source: "mvv-gtfs";
-      readonly serviceDate: string;
-      readonly serviceId: string;
-      readonly tripId: string;
-      readonly line: string;
-      readonly headsign: string;
-      readonly from: ScheduledSelectedRouteStop;
-      readonly to: ScheduledSelectedRouteStop;
-    }
-  | {
-      readonly kind: "identity-resolution";
-      readonly purpose: "station-access";
-      readonly durationSeconds: 0;
-      readonly startAt: string;
-      readonly endAt: string;
-      readonly source: "mvg-nearby-to-mvv-gtfs-identity/v1";
-      readonly target: "station-area" | "boarding-stop";
-      readonly from: ScheduledSelectedRouteCoordinate;
-      readonly to: ScheduledSelectedRouteStationArea | ScheduledSelectedRouteStop;
-      readonly toCoordinate: ScheduledSelectedRouteCoordinate;
-    };
-
-export interface ScheduledSelectedBoardingStopRoute {
-  readonly boardingStopId: string;
-  readonly stationAreaId: string;
-  readonly totalSeconds: number;
-  readonly arrivalAt: string;
-  readonly segments: readonly ScheduledSelectedRouteSegment[];
-}
-
-export interface ScheduledRoutingWitnessInstrumentation {
-  /** Server-test seam; witness capture is otherwise strictly opt-in. */
-  readonly onWitnessAllocation?: (kind: "ready-map" | "connection-map") => void;
-}
-
-export interface ScheduledSelectedBoardingStopOptions extends ScheduledRoutingOptions, ScheduledRoutingWitnessInstrumentation {
-  readonly origin?: ScheduledSelectedRouteCoordinate;
-}
 
 /** Narrow instrumentation seam for deterministic routing-window tests. */
 export interface ScheduledRoutingWindowInstrumentation {
@@ -152,13 +75,18 @@ export interface ScheduledRoutingWindowInstrumentation {
 /**
  * Connection-scan routing with bounded local transfers. A transfer is emitted
  * only from a transit arrival and is queried through a geographic bucket index;
- * the algorithm never computes a stop-to-stop all-pairs closure.
+ * the algorithm never computes an area-to-area all-pairs closure. Transfers
+ * operate on station areas: a same-area transfer costs the static change-time
+ * preset, and a different-area transfer within the radius costs the
+ * centroid-to-centroid walking time. No change time applies at the origin area
+ * (the participant walks in fresh) or at the destination area (the meeting is
+ * reached).
  */
 export function routeScheduledEarliestArrivals(
   schedule: ScheduledRoutingArtifact,
   accessSeeds: readonly ScheduledAccessSeed[],
   searchStartAt: string,
-  options: ScheduledRoutingOptions & ScheduledRoutingWitnessInstrumentation = {},
+  options: ScheduledRoutingOptions = {},
   suppliedWindow?: ScheduledRoutingWindow,
 ): ScheduledRoutingResult {
   const window = suppliedWindow ?? createScheduledRoutingWindow(schedule, searchStartAt, options);
@@ -174,18 +102,8 @@ export function routeScheduledEarliestArrivals(
       elapsedSeconds: epochSeconds === undefined ? null : epochSeconds - parsedStart.epochSeconds,
     };
   });
-  const boardingStopArrivals: BoardingStopArrivalField[] = schedule.boardingStops.map((stop, index) => {
-    if (index % ROUTING_CONNECTION_CHECKPOINT === 0) (options.deadlineCheck ?? window.deadlineCheck)?.("routing-scan");
-    const readyAt = scan.earliestReadyByStop.get(stop.id);
-    return {
-      boardingStopId: stop.id,
-      arrivalAt: readyAt === undefined ? null : formatEpochSeconds(readyAt),
-      elapsedSeconds: readyAt === undefined ? null : readyAt - parsedStart.epochSeconds,
-    };
-  });
   return Object.freeze({
     stationArrivals: Object.freeze(stationArrivals),
-    boardingStopArrivals: Object.freeze(boardingStopArrivals),
     reachableStationAreaCount: stationArrivals.filter((arrival) => arrival.arrivalAt !== null).length,
     searchStartAt: parsedStart.canonicalAt,
     searchStartEpochSeconds: parsedStart.epochSeconds,
@@ -193,24 +111,8 @@ export function routeScheduledEarliestArrivals(
   });
 }
 
-interface ScheduledReadyWitness {
-  readonly kind: "origin" | "transfer";
-  readonly seed?: ScheduledAccessSeed;
-  readonly seedIndex?: number;
-  readonly connectionKey?: string;
-  readonly fromStopId?: string;
-}
-
-interface ScheduledConnectionWitness {
-  readonly connection: ScheduledMaterializedConnection;
-  readonly previousKey: string | null;
-}
-
 interface ScheduledScanState {
-  readonly earliestReadyByStop: Map<string, number>;
   readonly earliestArrivalByArea: Map<string, number>;
-  readonly readyWitnessByStop?: Map<string, ScheduledReadyWitness>;
-  readonly connectionWitnessByKey?: Map<string, ScheduledConnectionWitness>;
   readonly window: ScheduledRoutingWindow;
   readonly parsedStartEpochSeconds: number;
 }
@@ -219,25 +121,18 @@ function scanScheduledConnections(
   schedule: ScheduledRoutingArtifact,
   accessSeeds: readonly ScheduledAccessSeed[],
   window: ScheduledRoutingWindow,
-  options: ScheduledRoutingOptions & ScheduledRoutingWitnessInstrumentation,
-  captureWitness = false,
+  options: ScheduledRoutingOptions,
 ): ScheduledScanState {
   const resolvedOptions: ResolvedRoutingOptions = {
     walkingVelocityMetersPerSecond: window.walkingVelocityMetersPerSecond,
     transferRadiusMeters: window.transferRadiusMeters,
+    changeTimeSeconds: window.changeTimeSeconds,
     deadlineCheck: options.deadlineCheck ?? window.deadlineCheck,
   };
   resolvedOptions.deadlineCheck?.("routing-scan");
   const stationById = new Map(schedule.stationAreas.map((area) => [area.id, area]));
-  const stopById = new Map(schedule.boardingStops.map((stop) => [stop.id, stop]));
-  const earliestReadyByStop = new Map<string, number>();
   const earliestArrivalByArea = new Map<string, number>();
-  const readyWitnessByStop = captureWitness ? new Map<string, ScheduledReadyWitness>() : undefined;
-  const connectionWitnessByKey = captureWitness ? new Map<string, ScheduledConnectionWitness>() : undefined;
-  if (captureWitness) {
-    options.onWitnessAllocation?.("ready-map");
-    options.onWitnessAllocation?.("connection-map");
-  }
+  const earliestBoardingReadyByArea = new Map<string, number>();
   const reachableConnectionKeys = new Set<string>();
   const continuationByPreviousKey = new Map<string, ScheduledMaterializedConnection>();
   for (let connectionIndex = 0; connectionIndex < window.connections.length; connectionIndex += 1) {
@@ -247,17 +142,20 @@ function scanScheduledConnections(
     if (connection.previousContinuationKey !== null) continuationByPreviousKey.set(connection.previousContinuationKey, connection);
   }
 
-  let enqueueForStop: ((stopId: string) => void) | null = null;
-  const updateReady = (stopId: string, readyAt: number, witness?: ScheduledReadyWitness): void => {
-    if (readyAt > window.horizonEndEpochSeconds) return;
-    const current = earliestReadyByStop.get(stopId);
-    if (current !== undefined && current <= readyAt) return;
-    earliestReadyByStop.set(stopId, readyAt);
-    if (readyWitnessByStop !== undefined && witness !== undefined) readyWitnessByStop.set(stopId, witness);
-    enqueueForStop?.(stopId);
-  };
+  let enqueueForArea: ((areaId: string) => void) | null = null;
   const updateArrivalMinimum = (stationAreaId: string, arrivalEpochSeconds: number): void => {
-    if (arrivalEpochSeconds <= window.horizonEndEpochSeconds) updateMinimum(earliestArrivalByArea, stationAreaId, arrivalEpochSeconds);
+    if (arrivalEpochSeconds > window.horizonEndEpochSeconds) return;
+    const current = earliestArrivalByArea.get(stationAreaId);
+    if (current !== undefined && current <= arrivalEpochSeconds) return;
+    earliestArrivalByArea.set(stationAreaId, arrivalEpochSeconds);
+  };
+
+  const updateBoardingReadyMinimum = (stationAreaId: string, readyEpochSeconds: number): void => {
+    if (readyEpochSeconds > window.horizonEndEpochSeconds) return;
+    const current = earliestBoardingReadyByArea.get(stationAreaId);
+    if (current !== undefined && current <= readyEpochSeconds) return;
+    earliestBoardingReadyByArea.set(stationAreaId, readyEpochSeconds);
+    enqueueForArea?.(stationAreaId);
   };
 
   for (let seedIndex = 0; seedIndex < accessSeeds.length; seedIndex += 1) {
@@ -268,25 +166,13 @@ function scanScheduledConnections(
     if (area === undefined) throw new RangeError(`Access seed references unknown station area ${seed.stationAreaId}.`);
     validateWholeNonNegative(seed.accessSeconds, "Access seed accessSeconds");
     if (seed.accessSeconds > ROUTING_HORIZON_SECONDS) throw new RangeError("Access seed accessSeconds must not exceed the 24-hour routing horizon.");
-    const stationArrival = window.searchStartEpochSeconds + seed.accessSeconds;
-    updateArrivalMinimum(area.id, stationArrival);
-    const stopIds = seed.boardingStopId === undefined ? area.boardingStopIds : [seed.boardingStopId];
-    if (seed.boardingStopId !== undefined && !area.boardingStopIds.includes(seed.boardingStopId)) {
-      throw new RangeError(`Access seed references boarding stop ${seed.boardingStopId} outside station area ${area.id}.`);
-    }
-    for (const stopId of stopIds) {
-      const stop = stopById.get(stopId);
-      if (stop === undefined) throw new Error("Station area references a missing boarding stop.");
-      const accessCoordinate = area.coordinate;
-      const accessWalkSeconds = seed.boardingStopId === undefined
-        ? walkingSeconds(accessCoordinate, stop.coordinate, resolvedOptions.walkingVelocityMetersPerSecond)
-        : 0;
-      updateReady(stop.id, stationArrival + accessWalkSeconds, captureWitness ? { kind: "origin", seed, seedIndex } : undefined);
-    }
+    const seedArrival = window.searchStartEpochSeconds + seed.accessSeconds;
+    updateArrivalMinimum(area.id, seedArrival);
+    updateBoardingReadyMinimum(area.id, seedArrival);
   }
 
   // Linear CSA with a bounded fixpoint for one departure-time bucket. This is
-  // the shared scan used by both the surface and the selected-stop witness.
+  // the shared scan used by the meeting surface.
   let bucketStart = 0;
   while (bucketStart < window.connections.length) {
     resolvedOptions.deadlineCheck?.("routing-scan");
@@ -295,14 +181,14 @@ function scanScheduledConnections(
     const departureEpochSeconds = firstConnection.departureEpochSeconds;
     let bucketEnd = bucketStart + 1;
     while (bucketEnd < window.connections.length && window.connections[bucketEnd]?.departureEpochSeconds === departureEpochSeconds) bucketEnd += 1;
-    const byFromStop = new Map<string, ScheduledMaterializedConnection[]>();
+    const byFromArea = new Map<string, ScheduledMaterializedConnection[]>();
     for (let index = bucketStart; index < bucketEnd; index += 1) {
       if ((index - bucketStart) % ROUTING_CONNECTION_CHECKPOINT === 0) resolvedOptions.deadlineCheck?.("routing-scan");
       const connection = window.connections[index];
       if (connection === undefined) continue;
-      const current = byFromStop.get(connection.source.fromStopId) ?? [];
+      const current = byFromArea.get(connection.source.fromStationAreaId) ?? [];
       current.push(connection);
-      byFromStop.set(connection.source.fromStopId, current);
+      byFromArea.set(connection.source.fromStationAreaId, current);
     }
     const queued = new Set<string>();
     const processed = new Set<string>();
@@ -310,14 +196,14 @@ function scanScheduledConnections(
     const enqueueConnection = (connection: ScheduledMaterializedConnection): void => {
       if (queued.has(connection.connectionKey) || processed.has(connection.connectionKey)) return;
       const previousReachable = connection.previousContinuationKey !== null && reachableConnectionKeys.has(connection.previousContinuationKey);
-      const readyAt = earliestReadyByStop.get(connection.source.fromStopId);
+      const readyAt = earliestBoardingReadyByArea.get(connection.source.fromStationAreaId);
       const canBoard = connection.source.pickupType === 0 && readyAt !== undefined && readyAt <= departureEpochSeconds;
       if (!canBoard && !previousReachable) return;
       queued.add(connection.connectionKey);
       queue.push(connection);
     };
-    enqueueForStop = (stopId) => {
-      for (const connection of byFromStop.get(stopId) ?? []) enqueueConnection(connection);
+    enqueueForArea = (areaId) => {
+      for (const connection of byFromArea.get(areaId) ?? []) enqueueConnection(connection);
     };
     for (let index = bucketStart; index < bucketEnd; index += 1) {
       if ((index - bucketStart) % ROUTING_CONNECTION_CHECKPOINT === 0) resolvedOptions.deadlineCheck?.("routing-scan");
@@ -330,251 +216,27 @@ function scanScheduledConnections(
       if (connection === undefined || processed.has(connection.connectionKey)) continue;
       processed.add(connection.connectionKey);
       reachableConnectionKeys.add(connection.connectionKey);
-      if (connectionWitnessByKey !== undefined) {
-        connectionWitnessByKey.set(connection.connectionKey, { connection, previousKey: connection.previousContinuationKey !== null && reachableConnectionKeys.has(connection.previousContinuationKey) ? connection.previousContinuationKey : null });
-      }
       const nextConnection = continuationByPreviousKey.get(connection.connectionKey);
       if (nextConnection !== undefined && nextConnection.departureEpochSeconds === departureEpochSeconds) enqueueConnection(nextConnection);
       if (connection.source.dropOffType !== 0) continue;
 
       updateArrivalMinimum(connection.source.toStationAreaId, connection.arrivalEpochSeconds);
-      const arrivalStop = stopById.get(connection.source.toStopId);
-      if (arrivalStop === undefined) throw new Error("Connection references a missing arrival stop.");
-      for (const transferStop of querySpatialIndex(window.spatialIndex, arrivalStop.coordinate, resolvedOptions.transferRadiusMeters)) {
-        const transferReady = connection.arrivalEpochSeconds + walkingSeconds(arrivalStop.coordinate, transferStop.coordinate, resolvedOptions.walkingVelocityMetersPerSecond);
-        updateArrivalMinimum(transferStop.stationAreaId, transferReady);
-        updateReady(transferStop.id, transferReady, captureWitness ? { kind: "transfer", connectionKey: connection.connectionKey, fromStopId: arrivalStop.id } : undefined);
+      const arrivalArea = stationById.get(connection.source.toStationAreaId);
+      if (arrivalArea === undefined) throw new Error("Connection references a missing arrival station area.");
+      for (const transferArea of querySpatialIndex(window.spatialIndex, arrivalArea.coordinate, resolvedOptions.transferRadiusMeters)) {
+        if (transferArea.id === arrivalArea.id) {
+          updateBoardingReadyMinimum(arrivalArea.id, connection.arrivalEpochSeconds + resolvedOptions.changeTimeSeconds);
+        } else {
+          const walkArrival = connection.arrivalEpochSeconds + walkingSeconds(arrivalArea.coordinate, transferArea.coordinate, resolvedOptions.walkingVelocityMetersPerSecond);
+          updateArrivalMinimum(transferArea.id, walkArrival);
+          updateBoardingReadyMinimum(transferArea.id, walkArrival);
+        }
       }
     }
-    enqueueForStop = null;
+    enqueueForArea = null;
     bucketStart = bucketEnd;
   }
-  return { earliestReadyByStop, earliestArrivalByArea, readyWitnessByStop, connectionWitnessByKey, window, parsedStartEpochSeconds: window.searchStartEpochSeconds };
-}
-
-/**
- * Deterministically reconstruct only the selected boarding stop's earliest
- * canonical route. It intentionally shares the exact CSA scan used by the
- * meeting surface and never traverses the full station-area result set.
- */
-export function routeScheduledSelectedBoardingStop(
-  schedule: ScheduledRoutingArtifact,
-  canonicalAccessSeeds: readonly ScheduledAccessSeed[],
-  selectedBoardingStopId: string,
-  searchStartAt: string,
-  options: ScheduledSelectedBoardingStopOptions = {},
-  suppliedWindow?: ScheduledRoutingWindow,
-  evidenceCandidates: readonly ScheduledAccessSeedCandidate[] = [],
-): ScheduledSelectedBoardingStopRoute | null {
-  const window = suppliedWindow ?? createScheduledRoutingWindow(schedule, searchStartAt, options);
-  if (window.schedule !== schedule) throw new RangeError("A routing window belongs to a different schedule artifact.");
-  const parsedStart = parseOffsetInstant(searchStartAt, schedule.timeZone);
-  if (parsedStart.epochSeconds !== window.searchStartEpochSeconds) throw new RangeError("A routing window belongs to a different search start.");
-  const selectedStop = schedule.boardingStops.find((stop) => stop.id === selectedBoardingStopId);
-  if (selectedStop === undefined) throw new RangeError(`Selected boarding stop ${selectedBoardingStopId} is not in the schedule artifact.`);
-  const scan = scanScheduledConnections(schedule, canonicalAccessSeeds, window, options, true);
-  const readyWitnessByStop = scan.readyWitnessByStop;
-  const connectionWitnessByKey = scan.connectionWitnessByKey;
-  if (readyWitnessByStop === undefined || connectionWitnessByKey === undefined) throw new Error("Selected route witness capture was not enabled.");
-  const readyEpochSeconds = scan.earliestReadyByStop.get(selectedBoardingStopId);
-  const witness = readyWitnessByStop.get(selectedBoardingStopId);
-  if (readyEpochSeconds === undefined || witness === undefined) return null;
-  const totalSeconds = readyEpochSeconds - scan.parsedStartEpochSeconds;
-  const segments: ScheduledSelectedRouteSegment[] = [];
-  const visitedConnections = new Set<string>();
-  const appendReady = (stopId: string): void => {
-    const readyWitness = readyWitnessByStop.get(stopId);
-    if (readyWitness === undefined) throw new Error(`Selected route lost boarding-stop witness ${stopId}.`);
-    if (readyWitness.kind === "origin") {
-      const seed = readyWitness.seed;
-      if (seed === undefined) throw new Error("Selected route lost origin seed witness.");
-      const area = schedule.stationAreas.find((candidate) => candidate.id === seed.stationAreaId);
-      const stop = schedule.boardingStops.find((candidate) => candidate.id === stopId);
-      if (area === undefined || stop === undefined) throw new Error("Selected route references a missing station area or stop.");
-      const isExactStopSeed = seed.boardingStopId !== undefined;
-      const candidate = readyWitness.seedIndex === undefined ? undefined : evidenceCandidates[readyWitness.seedIndex];
-      const hasResolvedCoordinate = candidate !== undefined;
-      const accessTargetCoordinate = hasResolvedCoordinate ? candidate.coordinate : isExactStopSeed ? stop.coordinate : area.coordinate;
-      const originCoordinate = options.origin ?? accessTargetCoordinate;
-      const origin = { latitude: originCoordinate.latitude, longitude: originCoordinate.longitude };
-      appendWalk(segments, "origin-access", seed.accessSeconds, haversineDistanceMeters(origin, accessTargetCoordinate), origin, accessTargetCoordinate, scan.parsedStartEpochSeconds);
-      let currentEpoch = scan.parsedStartEpochSeconds + seed.accessSeconds;
-      if (hasResolvedCoordinate) {
-        if (isExactStopSeed) appendIdentityResolution(segments, accessTargetCoordinate, routeStop(schedule, stop.id), stop.coordinate, "boarding-stop", currentEpoch);
-        else appendIdentityResolution(segments, accessTargetCoordinate, routeStationArea(schedule, area.id), area.coordinate, "station-area", currentEpoch);
-      }
-      if (!isExactStopSeed) {
-        const areaToStopSeconds = walkingSeconds(area.coordinate, stop.coordinate, window.walkingVelocityMetersPerSecond);
-        appendWalk(segments, "station-area-access", areaToStopSeconds, haversineDistanceMeters(area.coordinate, stop.coordinate), area.coordinate, stop.coordinate, currentEpoch);
-        currentEpoch += areaToStopSeconds;
-      }
-      if (currentEpoch !== scan.earliestReadyByStop.get(stopId)) throw new Error("Selected route origin witness does not reconcile its boarding readiness.");
-      return;
-    }
-    const connectionKey = readyWitness.connectionKey;
-    const fromStopId = readyWitness.fromStopId;
-    if (connectionKey === undefined || fromStopId === undefined) throw new Error("Selected route lost transfer witness.");
-    appendConnection(connectionKey);
-    const fromStop = schedule.boardingStops.find((candidate) => candidate.id === fromStopId);
-    const toStop = schedule.boardingStops.find((candidate) => candidate.id === stopId);
-    if (fromStop === undefined || toStop === undefined) throw new Error("Selected route transfer references a missing stop.");
-    const currentEpoch = epochAtEnd(segments, scan.parsedStartEpochSeconds);
-    const transferSeconds = walkingSeconds(fromStop.coordinate, toStop.coordinate, window.walkingVelocityMetersPerSecond);
-    if (fromStop.id !== toStop.id) appendWalk(segments, "transfer", transferSeconds, haversineDistanceMeters(fromStop.coordinate, toStop.coordinate), fromStop.coordinate, toStop.coordinate, currentEpoch);
-  };
-  const appendConnection = (connectionKey: string): void => {
-    if (visitedConnections.has(connectionKey)) throw new Error("Selected route witness contains a connection cycle.");
-    visitedConnections.add(connectionKey);
-    const connectionWitness = connectionWitnessByKey.get(connectionKey);
-    if (connectionWitness === undefined) throw new Error(`Selected route lost connection witness ${connectionKey}.`);
-    const connection = connectionWitness.connection;
-    if (connectionWitness.previousKey !== null) appendConnection(connectionWitness.previousKey);
-    else appendReady(connection.source.fromStopId);
-    const currentEpoch = epochAtEnd(segments, scan.parsedStartEpochSeconds);
-    if (currentEpoch > connection.departureEpochSeconds) throw new Error("Selected route witness boards after departure.");
-    if (currentEpoch < connection.departureEpochSeconds && connectionWitness.previousKey === null) {
-      const at = routeStop(schedule, connection.source.fromStopId);
-      appendWait(segments, connection.departureEpochSeconds - currentEpoch, at, currentEpoch);
-    }
-    const from = routeStop(schedule, connection.source.fromStopId);
-    const to = routeStop(schedule, connection.source.toStopId);
-    appendTransit(segments, schedule, connection, from, to);
-  };
-  appendReady(selectedBoardingStopId);
-  const compactedSegments = mergeContiguousTransitSegments(segments);
-  const computedTotal = epochAtEnd(compactedSegments, scan.parsedStartEpochSeconds) - scan.parsedStartEpochSeconds;
-  if (computedTotal !== totalSeconds) throw new Error("Selected route witness does not reconcile cached boarding-stop readiness.");
-  return Object.freeze({
-    boardingStopId: selectedStop.id,
-    stationAreaId: selectedStop.stationAreaId,
-    totalSeconds,
-    arrivalAt: formatEpochSeconds(scan.parsedStartEpochSeconds + totalSeconds),
-    segments: Object.freeze(compactedSegments),
-  });
-}
-
-function appendWalk(
-  segments: ScheduledSelectedRouteSegment[],
-  purpose: "origin-access" | "station-area-access" | "transfer",
-  durationSeconds: number,
-  distanceMeters: number,
-  from: ScheduledSelectedRouteCoordinate,
-  to: ScheduledSelectedRouteCoordinate,
-  startEpochSeconds: number,
-): void {
-  segments.push({
-    kind: "walk",
-    purpose,
-    durationSeconds,
-    distanceMeters,
-    from,
-    to,
-    estimate: "geometric-estimate-not-directions/v1",
-    startAt: formatEpochSeconds(startEpochSeconds),
-    endAt: formatEpochSeconds(startEpochSeconds + durationSeconds),
-  });
-}
-
-function appendWait(
-  segments: ScheduledSelectedRouteSegment[],
-  durationSeconds: number,
-  at: ScheduledSelectedRouteStop,
-  startEpochSeconds: number,
-): void {
-  segments.push({
-    kind: "wait",
-    durationSeconds,
-    at,
-    startAt: formatEpochSeconds(startEpochSeconds),
-    endAt: formatEpochSeconds(startEpochSeconds + durationSeconds),
-  });
-}
-
-function appendTransit(
-  segments: ScheduledSelectedRouteSegment[],
-  schedule: ScheduledRoutingArtifact,
-  connection: ScheduledMaterializedConnection,
-  from: ScheduledSelectedRouteStop,
-  to: ScheduledSelectedRouteStop,
-): void {
-  const trip = connection.source;
-  const tripHeadsign = schedule.trips.find((trip) => trip.tripId === connection.source.tripId)?.headsign;
-  const headsign = tripHeadsign?.trim() || connection.source.line.longName || connection.source.line.shortName || connection.source.tripId;
-  segments.push({
-    kind: "transit",
-    durationSeconds: connection.arrivalEpochSeconds - connection.departureEpochSeconds,
-    startAt: formatEpochSeconds(connection.departureEpochSeconds),
-    endAt: formatEpochSeconds(connection.arrivalEpochSeconds),
-    source: "mvv-gtfs",
-    serviceDate: connection.serviceDate,
-    serviceId: trip.serviceId,
-    tripId: trip.tripId,
-    line: trip.line.shortName || trip.line.routeId,
-    headsign,
-    from,
-    to,
-  });
-}
-
-function appendIdentityResolution(
-  segments: ScheduledSelectedRouteSegment[],
-  from: ScheduledSelectedRouteCoordinate,
-  to: ScheduledSelectedRouteStationArea | ScheduledSelectedRouteStop,
-  toCoordinate: ScheduledSelectedRouteCoordinate,
-  target: "station-area" | "boarding-stop",
-  epochSeconds: number,
-): void {
-  segments.push({
-    kind: "identity-resolution",
-    purpose: "station-access",
-    durationSeconds: 0,
-    startAt: formatEpochSeconds(epochSeconds),
-    endAt: formatEpochSeconds(epochSeconds),
-    source: "mvg-nearby-to-mvv-gtfs-identity/v1",
-    target,
-    from,
-    to,
-    toCoordinate,
-  });
-}
-
-function routeStationArea(schedule: ScheduledRoutingArtifact, stationAreaId: string): ScheduledSelectedRouteStationArea {
-  const area = schedule.stationAreas.find((candidate) => candidate.id === stationAreaId);
-  if (area === undefined) throw new Error(`Selected route references missing station area ${stationAreaId}.`);
-  return { stationAreaId: area.id, name: area.name };
-}
-
-function routeStop(schedule: ScheduledRoutingArtifact, stopId: string): ScheduledSelectedRouteStop {
-  const stop = schedule.boardingStops.find((candidate) => candidate.id === stopId);
-  if (stop === undefined) throw new Error(`Selected route references missing stop ${stopId}.`);
-  return { boardingStopId: stop.id, stationAreaId: stop.stationAreaId, name: stop.name };
-}
-
-function epochAtEnd(segments: readonly ScheduledSelectedRouteSegment[], fallbackEpochSeconds: number): number {
-  const last = segments[segments.length - 1];
-  return last === undefined ? fallbackEpochSeconds : Date.parse(last.endAt) / 1_000;
-}
-
-function mergeContiguousTransitSegments(
-  segments: readonly ScheduledSelectedRouteSegment[],
-): ScheduledSelectedRouteSegment[] {
-  const result: ScheduledSelectedRouteSegment[] = [];
-  for (const segment of segments) {
-    const previous = result[result.length - 1];
-    if (previous?.kind === "transit" && segment.kind === "transit" &&
-      previous.serviceDate === segment.serviceDate && previous.tripId === segment.tripId &&
-      Date.parse(previous.endAt) <= Date.parse(segment.startAt)) {
-      result[result.length - 1] = {
-        ...previous,
-        durationSeconds: (Date.parse(segment.endAt) - Date.parse(previous.startAt)) / 1_000,
-        endAt: segment.endAt,
-        to: segment.to,
-      };
-    } else {
-      result.push(segment);
-    }
-  }
-  return result;
+  return { earliestArrivalByArea, window, parsedStartEpochSeconds: window.searchStartEpochSeconds };
 }
 
 const routingWindowCache = new Map<string, ScheduledRoutingWindow>();
@@ -593,6 +255,7 @@ export function createScheduledRoutingWindow(
   const resolvedOptions: ResolvedRoutingOptions = {
     walkingVelocityMetersPerSecond: options.walkingVelocityMetersPerSecond ?? DEFAULT_WALKING_VELOCITY_METERS_PER_SECOND,
     transferRadiusMeters: options.transferRadiusMeters ?? DEFAULT_TRANSFER_RADIUS_METERS,
+    changeTimeSeconds: options.changeTimeSeconds ?? DEFAULT_CHANGE_TIME_SECONDS,
     deadlineCheck: options.deadlineCheck,
   };
   validateRoutingOptions(resolvedOptions);
@@ -601,7 +264,7 @@ export function createScheduledRoutingWindow(
   validateScheduledSearchWindow(schedule, parsedStart.epochSeconds);
   const horizonEndEpochSeconds = parsedStart.epochSeconds + ROUTING_HORIZON_SECONDS;
   const isCacheable = !instrumentation.onCandidateServiceDate && !instrumentation.serviceDateAnchor;
-  const cacheKey = `${schedule.provenance.compiledArtifactId}:${parsedStart.canonicalAt}:${resolvedOptions.walkingVelocityMetersPerSecond}:${resolvedOptions.transferRadiusMeters}`;
+  const cacheKey = `${schedule.provenance.compiledArtifactId}:${parsedStart.canonicalAt}:${resolvedOptions.walkingVelocityMetersPerSecond}:${resolvedOptions.transferRadiusMeters}:${resolvedOptions.changeTimeSeconds}`;
   if (isCacheable) {
     const cached = routingWindowCache.get(cacheKey);
     if (cached !== undefined && cached.schedule === schedule) {
@@ -611,7 +274,7 @@ export function createScheduledRoutingWindow(
   }
   const connections = materializeConnections(schedule, parsedStart.epochSeconds, horizonEndEpochSeconds, instrumentation, resolvedOptions.deadlineCheck);
   resolvedOptions.deadlineCheck?.("routing-window");
-  const spatialIndex = buildSpatialIndex(schedule.boardingStops, resolvedOptions.transferRadiusMeters);
+  const spatialIndex = buildSpatialIndex(schedule.stationAreas, resolvedOptions.transferRadiusMeters);
   resolvedOptions.deadlineCheck?.("routing-window");
   const window: ScheduledRoutingWindow = Object.freeze({
     schedule,
@@ -620,6 +283,7 @@ export function createScheduledRoutingWindow(
     horizonEndEpochSeconds,
     walkingVelocityMetersPerSecond: resolvedOptions.walkingVelocityMetersPerSecond,
     transferRadiusMeters: resolvedOptions.transferRadiusMeters,
+    changeTimeSeconds: resolvedOptions.changeTimeSeconds,
     connections: Object.freeze(connections),
     spatialIndex,
     deadlineCheck: resolvedOptions.deadlineCheck,
@@ -853,32 +517,32 @@ function activeServiceIdsForDate(schedule: ScheduledRoutingArtifact, serviceDate
   return activeServiceIds;
 }
 
-function buildSpatialIndex(stops: readonly ScheduledBoardingStop[], radiusMeters: number): ScheduledSpatialIndex {
+function buildSpatialIndex(areas: readonly ScheduledStationArea[], radiusMeters: number): ScheduledSpatialIndex {
   const bucketSizeDegrees = Math.max(radiusMeters / 111_000, 0.00001);
   const buckets = new Map<string, string[]>();
-  const stopMap = new Map<string, ScheduledBoardingStop>();
-  for (const stop of stops) {
-    stopMap.set(stop.id, stop);
-    const key = bucketKey(stop.coordinate, bucketSizeDegrees);
+  const areaMap = new Map<string, ScheduledStationArea>();
+  for (const area of areas) {
+    areaMap.set(area.id, area);
+    const key = bucketKey(area.coordinate, bucketSizeDegrees);
     const current = buckets.get(key) ?? [];
-    current.push(stop.id);
+    current.push(area.id);
     buckets.set(key, current);
   }
-  return { bucketSizeDegrees, buckets, stops: stopMap };
+  return { bucketSizeDegrees, buckets, areas: areaMap };
 }
 
 function querySpatialIndex(
   index: ScheduledSpatialIndex,
   coordinate: { readonly latitude: number; readonly longitude: number },
   radiusMeters: number,
-): ScheduledBoardingStop[] {
+): ScheduledStationArea[] {
   const latitudeRadius = radiusMeters / 111_000;
   const longitudeRadius = latitudeRadius / Math.max(Math.cos((coordinate.latitude * Math.PI) / 180), 0.1);
   const centerLatitudeBucket = Math.floor(coordinate.latitude / index.bucketSizeDegrees);
   const centerLongitudeBucket = Math.floor(coordinate.longitude / index.bucketSizeDegrees);
   const latitudeBuckets = Math.ceil(latitudeRadius / index.bucketSizeDegrees) + 1;
   const longitudeBuckets = Math.ceil(longitudeRadius / index.bucketSizeDegrees) + 1;
-  const candidates: ScheduledBoardingStop[] = [];
+  const candidates: ScheduledStationArea[] = [];
   const seen = new Set<string>();
   for (let latitudeOffset = -latitudeBuckets; latitudeOffset <= latitudeBuckets; latitudeOffset += 1) {
     for (let longitudeOffset = -longitudeBuckets; longitudeOffset <= longitudeBuckets; longitudeOffset += 1) {
@@ -886,8 +550,8 @@ function querySpatialIndex(
       for (const id of ids) {
         if (seen.has(id)) continue;
         seen.add(id);
-        const stop = index.stops.get(id);
-        if (stop !== undefined && haversineDistanceMeters(coordinate, stop.coordinate) <= radiusMeters) candidates.push(stop);
+        const area = index.areas.get(id);
+        if (area !== undefined && haversineDistanceMeters(coordinate, area.coordinate) <= radiusMeters) candidates.push(area);
       }
     }
   }
@@ -902,14 +566,10 @@ function compareMaterializedConnections(left: ScheduledMaterializedConnection, r
   return left.departureEpochSeconds - right.departureEpochSeconds || compareScheduledConnections(left.source, right.source) || left.arrivalEpochSeconds - right.arrivalEpochSeconds || left.instanceId.localeCompare(right.instanceId);
 }
 
-function updateMinimum(values: Map<string, number>, key: string, epochSeconds: number): void {
-  const current = values.get(key);
-  if (current === undefined || epochSeconds < current) values.set(key, epochSeconds);
-}
-
 function validateRoutingOptions(options: ResolvedRoutingOptions): void {
   if (!Number.isFinite(options.walkingVelocityMetersPerSecond) || options.walkingVelocityMetersPerSecond <= 0) throw new RangeError("Walking velocity must be a positive finite number.");
   if (!Number.isFinite(options.transferRadiusMeters) || options.transferRadiusMeters <= 0) throw new RangeError("Transfer radius must be a positive finite number.");
+  if (options.changeTimeSeconds !== CHANGE_TIME_PRESETS.quick && options.changeTimeSeconds !== CHANGE_TIME_PRESETS.medium && options.changeTimeSeconds !== CHANGE_TIME_PRESETS.long) throw new RangeError("Change time must be one of the scheduled change-time presets (180, 300, or 600 seconds).");
 }
 
 function validateWholeNonNegative(value: number, label: string): void {

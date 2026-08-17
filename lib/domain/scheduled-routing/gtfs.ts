@@ -7,7 +7,6 @@ import type {
   GtfsAcquisitionRecord,
   GtfsFileProvenance,
   ScheduledArtifactProvenance,
-  ScheduledBoardingStop,
   ScheduledConnection,
   ScheduledRoute,
   ScheduledRoutingArtifact,
@@ -151,12 +150,11 @@ export function importGtfsSchedule(
   const routes = parseRoutes(routesTable);
   const stops = parseStops(stopsTable);
   const stationAreas = createStationAreas(stops);
-  const boardingStops = createBoardingStops(stops, stationAreas);
   const trips = parseTrips(tripsTable, routes);
   const calendars = parseCalendars(calendarTable);
   const exceptions = parseExceptions(exceptionsTable);
   validateServices(trips, calendars, exceptions, calendarTable !== null);
-  const connections = parseConnections(stopTimesTable, trips, boardingStops, routes);
+  const connections = parseConnections(stopTimesTable, trips, stops, routes);
   const serviceDateRange = deriveServiceDateRange(calendars, exceptions, trips);
   if (serviceDateRange.firstDate < acquisition.feedValidFrom || serviceDateRange.lastDate > acquisition.feedValidUntil) {
     throw new GtfsValidationError("Compiled service validity exceeds the acquired feed validity.");
@@ -166,7 +164,6 @@ export function importGtfsSchedule(
   const sortedRoutes = sortByKey(routes, (route) => route.routeId);
   const sortedTrips = sortByKey(trips, (trip) => trip.tripId);
   const sortedStationAreas = sortByKey(stationAreas, (area) => area.id);
-  const sortedBoardingStops = sortByKey(boardingStops, (stop) => stop.id);
   const sortedCalendars = sortByKey(calendars, (calendar) => calendar.serviceId);
   const sortedExceptions = [...exceptions].sort((left, right) => compareScheduledIds(`${left.date}:${left.serviceId}`, `${right.date}:${right.serviceId}`));
   const sortedConnections = [...connections].sort(compareScheduledConnections);
@@ -180,7 +177,6 @@ export function importGtfsSchedule(
     routes: sortedRoutes,
     trips: sortedTrips,
     stationAreas: sortedStationAreas,
-    boardingStops: sortedBoardingStops,
     calendars: sortedCalendars,
     exceptions: sortedExceptions,
     connections: sortedConnections,
@@ -197,7 +193,6 @@ export function importGtfsSchedule(
     routes: sortedRoutes,
     trips: sortedTrips,
     stationAreas: sortedStationAreas,
-    boardingStops: sortedBoardingStops,
     calendars: sortedCalendars,
     exceptions: sortedExceptions,
     connections: sortedConnections,
@@ -374,7 +369,7 @@ function createStationAreas(stops: readonly StopRecord[]): ScheduledStationArea[
   const areas: ScheduledStationArea[] = [];
   for (const stop of stops) {
     if (stop.locationType === 1) {
-      areas.push({ id: stop.id, name: stop.name, coordinate: coordinateOf(stop), boardingStopIds: [], parentStationId: null });
+      areas.push({ id: stop.id, name: stop.name, coordinate: coordinateOf(stop) });
     }
   }
   for (const stop of stops) {
@@ -384,33 +379,10 @@ function createStationAreas(stops: readonly StopRecord[]): ScheduledStationArea[
       throw new GtfsValidationError(`parent_station ${stop.parentStationId} does not identify a parent station.`, "stops.txt");
     }
     if (parent === null) {
-      areas.push({ id: stop.id, name: stop.name, coordinate: coordinateOf(stop), boardingStopIds: [], parentStationId: null });
+      areas.push({ id: stop.id, name: stop.name, coordinate: coordinateOf(stop) });
     }
   }
-  const areaById = new Map(areas.map((area) => [area.id, area]));
-  const boardingByArea = new Map<string, string[]>();
-  for (const stop of stops) {
-    if (stop.locationType !== 0) continue;
-    const areaId = stop.parentStationId ?? stop.id;
-    const current = boardingByArea.get(areaId) ?? [];
-    current.push(stop.id);
-    boardingByArea.set(areaId, current);
-  }
-  return areas.map((area) => {
-    if (!areaById.has(area.id)) throw new Error("Station-area assembly lost an area.");
-    return { ...area, boardingStopIds: Object.freeze([...(boardingByArea.get(area.id) ?? [])].sort(compareScheduledIds)) };
-  });
-}
-
-function createBoardingStops(stops: readonly StopRecord[], areas: readonly ScheduledStationArea[]): ScheduledBoardingStop[] {
-  const areaIds = new Set(areas.map((area) => area.id));
-  return stops
-    .filter((stop) => stop.locationType === 0)
-    .map((stop) => {
-      const stationAreaId = stop.parentStationId ?? stop.id;
-      if (!areaIds.has(stationAreaId)) throw new Error("Boarding stop references an unassembled station area.");
-      return { id: stop.id, name: stop.name, coordinate: coordinateOf(stop), stationAreaId };
-    });
+  return areas;
 }
 
 function parseTrips(table: CsvTable, routes: readonly ScheduledRoute[]): ScheduledTrip[] {
@@ -495,14 +467,23 @@ function validateServices(
   }
 }
 
+interface AreaVisit {
+  readonly areaId: string;
+  readonly visitIndex: number;
+  readonly departureTimeSeconds: number;
+  readonly arrivalTimeSeconds: number;
+  readonly hasPickup: boolean;
+  readonly hasDropoff: boolean;
+}
+
 function parseConnections(
   table: CsvTable,
   trips: readonly ScheduledTrip[],
-  boardingStops: readonly ScheduledBoardingStop[],
+  stops: readonly StopRecord[],
   routes: readonly ScheduledRoute[],
 ): ScheduledConnection[] {
   const tripById = new Map(trips.map((trip) => [trip.tripId, trip]));
-  const stopById = new Map(boardingStops.map((stop) => [stop.id, stop]));
+  const stopById = new Map(stops.filter((stop) => stop.locationType === 0).map((stop) => [stop.id, stop]));
   const routeById = new Map(routes.map((route) => [route.routeId, route]));
   const rowsByTrip = new Map<string, StopTimeRecord[]>();
   const seenKeys = new Set<string>();
@@ -532,8 +513,6 @@ function parseConnections(
   for (const trip of trips) {
     const stopTimes = [...(rowsByTrip.get(trip.tripId) ?? [])].sort((left, right) => left.stopSequence - right.stopSequence);
     if (stopTimes.length < 2) throw new GtfsValidationError(`Trip ${trip.tripId} must have at least two stop_times rows.`, table.fileName);
-    const route = routeById.get(trip.routeId);
-    if (route === undefined) throw new Error("Trip route disappeared during connection assembly.");
     for (let index = 1; index < stopTimes.length; index += 1) {
       const previous = stopTimes[index - 1];
       const current = stopTimes[index];
@@ -541,29 +520,79 @@ function parseConnections(
       if (previous.departureTimeSeconds > current.arrivalTimeSeconds) {
         throw new GtfsValidationError(`Stop-time connection is not chronological for trip ${trip.tripId}.`, table.fileName);
       }
-      const fromStop = stopById.get(previous.stopId);
-      const toStop = stopById.get(current.stopId);
-      if (fromStop === undefined || toStop === undefined) throw new Error("Connection references a missing boarding stop.");
+    }
+    const route = routeById.get(trip.routeId);
+    if (route === undefined) throw new Error("Trip route disappeared during connection assembly.");
+    const visits = groupTripIntoAreaVisits(stopTimes, stopById);
+    for (let index = 1; index < visits.length; index += 1) {
+      const previous = visits[index - 1];
+      const current = visits[index];
+      if (previous === undefined || current === undefined) continue;
       connections.push({
-        id: `${trip.tripId}:${previous.stopSequence}-${current.stopSequence}`,
+        id: `${trip.tripId}:${previous.visitIndex}-${current.visitIndex}`,
         tripId: trip.tripId,
         routeId: trip.routeId,
         serviceId: trip.serviceId,
-        fromStopId: fromStop.id,
-        toStopId: toStop.id,
-        fromStationAreaId: fromStop.stationAreaId,
-        toStationAreaId: toStop.stationAreaId,
-        fromStopSequence: previous.stopSequence,
-        toStopSequence: current.stopSequence,
+        fromStationAreaId: previous.areaId,
+        toStationAreaId: current.areaId,
+        fromStopSequence: previous.visitIndex,
+        toStopSequence: current.visitIndex,
         departureTimeSeconds: previous.departureTimeSeconds,
         arrivalTimeSeconds: current.arrivalTimeSeconds,
-        pickupType: previous.pickupType,
-        dropOffType: current.dropOffType,
+        pickupType: previous.hasPickup ? 0 : 1,
+        dropOffType: current.hasDropoff ? 0 : 1,
         line: route,
       });
     }
   }
   return connections;
+}
+
+function groupTripIntoAreaVisits(
+  stopTimes: readonly StopTimeRecord[],
+  stopById: ReadonlyMap<string, StopRecord>,
+): AreaVisit[] {
+  const visits: AreaVisit[] = [];
+  let currentStops: StopTimeRecord[] = [];
+  let currentAreaId: string | null = null;
+  for (const stopTime of stopTimes) {
+    const stop = stopById.get(stopTime.stopId);
+    if (stop === undefined) throw new Error("Stop-time references a missing boarding stop.");
+    const areaId = stop.parentStationId ?? stop.id;
+    if (currentAreaId === null) {
+      currentAreaId = areaId;
+    } else if (areaId !== currentAreaId) {
+      visits.push(buildAreaVisit(currentStops, currentAreaId, visits.length));
+      currentStops = [];
+      currentAreaId = areaId;
+    }
+    currentStops.push(stopTime);
+  }
+  if (currentAreaId !== null) visits.push(buildAreaVisit(currentStops, currentAreaId, visits.length));
+  return visits;
+}
+
+function buildAreaVisit(stopTimes: readonly StopTimeRecord[], areaId: string, visitIndex: number): AreaVisit {
+  let departureTimeSeconds: number | null = null;
+  let arrivalTimeSeconds: number | null = null;
+  let hasPickup = false;
+  let hasDropoff = false;
+  for (const stopTime of stopTimes) {
+    if (stopTime.pickupType === 0) {
+      hasPickup = true;
+      if (departureTimeSeconds === null || stopTime.departureTimeSeconds < departureTimeSeconds) departureTimeSeconds = stopTime.departureTimeSeconds;
+    }
+    if (stopTime.dropOffType === 0) {
+      hasDropoff = true;
+      if (arrivalTimeSeconds === null || stopTime.arrivalTimeSeconds < arrivalTimeSeconds) arrivalTimeSeconds = stopTime.arrivalTimeSeconds;
+    }
+  }
+  // A visit with no boardable/alightable stop still carries the trip's
+  // through-movement times so consecutive connections stay chronological and
+  // the trip remains continuable past the area.
+  if (departureTimeSeconds === null) departureTimeSeconds = Math.min(...stopTimes.map((stopTime) => stopTime.departureTimeSeconds));
+  if (arrivalTimeSeconds === null) arrivalTimeSeconds = Math.min(...stopTimes.map((stopTime) => stopTime.arrivalTimeSeconds));
+  return { areaId, visitIndex, departureTimeSeconds, arrivalTimeSeconds, hasPickup, hasDropoff };
 }
 
 function createProvenance(

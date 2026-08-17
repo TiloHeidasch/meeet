@@ -33,7 +33,7 @@ const OFFICIAL_MVV_ATTRIBUTION = "Münchner Verkehrs- und Tarifverbund GmbH (MVV
 const DEFAULT_CC_BY_4_LICENSE_URL = "https://creativecommons.org/licenses/by/4.0/";
 const MVV_ATTRIBUTION_POLICY_ID = "mvv-cc-by-4.0-fallback/v1" as const;
 const SCHEDULED_BUNDLE_CONTRACT_VERSION = "meeet-scheduled-routing-bundle/v1" as const;
-export const SCHEDULED_COMPILER_VERSION = "meeet-scheduled-compiler/v1" as const;
+export const SCHEDULED_COMPILER_VERSION = "meeet-scheduled-compiler/v2" as const;
 const SCHEDULED_BUNDLE_ENCODING = "node-v8-structured-clone/1" as const;
 const MAX_BUNDLE_MANIFEST_BYTES = 1 * 1024 * 1024;
 const MAX_BUNDLE_PAYLOAD_BYTES = 1 * 1024 * 1024 * 1024;
@@ -43,7 +43,6 @@ interface ScheduledBundleCounts {
   readonly routes: number;
   readonly trips: number;
   readonly stationAreas: number;
-  readonly boardingStops: number;
   readonly calendars: number;
   readonly exceptions: number;
   readonly connections: number;
@@ -400,7 +399,7 @@ function isBundleManifest(value: unknown): value is ScheduledBundleManifest {
     isSha256(value.payloadSha256) && isSha256(value.compiledArtifactId) && isStrictProvenance(value.provenance) &&
     isString(summary.feedId) && summary.timeZone === "Europe/Berlin" && isStrictDateRange(summary.serviceDateRange) &&
     isSafeInteger(summary.maximumServiceDayTimeSeconds) && isStrictSearchStartBounds(summary.searchStartBounds) &&
-    isRecord(counts) && hasExactKeys(counts, ["routes", "trips", "stationAreas", "boardingStops", "calendars", "exceptions", "connections"]) &&
+    isRecord(counts) && hasExactKeys(counts, ["routes", "trips", "stationAreas", "calendars", "exceptions", "connections"]) &&
     Object.values(counts).every((count) => isSafeInteger(count) && count >= 0);
 }
 
@@ -442,11 +441,11 @@ function isStrictSearchStartBounds(value: unknown): boolean {
 
 function isScheduledArtifactCore(value: unknown): value is ScheduledArtifactCore {
   return isRecord(value) &&
-    hasExactKeys(value, ["contractVersion", "feedId", "timeZone", "maximumServiceDayTimeSeconds", "searchStartBounds", "serviceDateRange", "routes", "trips", "stationAreas", "boardingStops", "calendars", "exceptions", "connections"]) &&
+    hasExactKeys(value, ["contractVersion", "feedId", "timeZone", "maximumServiceDayTimeSeconds", "searchStartBounds", "serviceDateRange", "routes", "trips", "stationAreas", "calendars", "exceptions", "connections"]) &&
     value.contractVersion === SCHEDULED_ROUTING_CONTRACT_VERSION &&
     isString(value.feedId) && value.timeZone === "Europe/Berlin" && isSafeInteger(value.maximumServiceDayTimeSeconds) &&
     isSearchStartBounds(value.searchStartBounds) && isDateRange(value.serviceDateRange) &&
-    Array.isArray(value.routes) && Array.isArray(value.trips) && Array.isArray(value.stationAreas) && Array.isArray(value.boardingStops) && Array.isArray(value.calendars) && Array.isArray(value.exceptions) && Array.isArray(value.connections);
+    Array.isArray(value.routes) && Array.isArray(value.trips) && Array.isArray(value.stationAreas) && Array.isArray(value.calendars) && Array.isArray(value.exceptions) && Array.isArray(value.connections);
 }
 
 function hasExactKeys(value: Record<string, unknown>, expected: readonly string[]): boolean {
@@ -466,7 +465,6 @@ function bundleSummary(core: ScheduledArtifactCore): ScheduledBundleSummary {
       routes: core.routes.length,
       trips: core.trips.length,
       stationAreas: core.stationAreas.length,
-      boardingStops: core.boardingStops.length,
       calendars: core.calendars.length,
       exceptions: core.exceptions.length,
       connections: core.connections.length,
@@ -741,18 +739,16 @@ function isScheduledRoutingArtifact(value: unknown): value is ScheduledRoutingAr
     !isDateRange(value.serviceDateRange) ||
     !Array.isArray(value.connections) ||
     !Array.isArray(value.stationAreas) ||
-    !Array.isArray(value.boardingStops) ||
     !Array.isArray(value.trips) ||
     !Array.isArray(value.routes) ||
     !Array.isArray(value.calendars) ||
     !Array.isArray(value.exceptions) ||
-    !isRecordArray(value.routes, ["routeId", "shortName", "longName", "routeType"]) ||
-    !isRecordArray(value.trips, ["tripId", "routeId", "serviceId", "headsign"]) ||
-    !isRecordArray(value.stationAreas, ["id", "name", "coordinate", "boardingStopIds", "parentStationId"]) ||
-    !isRecordArray(value.boardingStops, ["id", "name", "coordinate", "stationAreaId"]) ||
-    !isRecordArray(value.calendars, ["serviceId", "startDate", "endDate", "weekdays"]) ||
-    !isRecordArray(value.exceptions, ["serviceId", "date", "exceptionType"]) ||
-    !isRecordArray(value.connections, ["id", "tripId", "routeId", "serviceId", "fromStopId", "toStopId", "fromStationAreaId", "toStationAreaId", "fromStopSequence", "toStopSequence", "departureTimeSeconds", "arrivalTimeSeconds", "pickupType", "dropOffType", "line"]) ||
+    !isExactRecordArray(value.routes, ["routeId", "shortName", "longName", "routeType"]) ||
+    !isExactRecordArray(value.trips, ["tripId", "routeId", "serviceId", "headsign"]) ||
+    !isExactRecordArray(value.stationAreas, ["id", "name", "coordinate"]) ||
+    !isExactRecordArray(value.calendars, ["serviceId", "startDate", "endDate", "weekdays"]) ||
+    !isExactRecordArray(value.exceptions, ["serviceId", "date", "exceptionType"]) ||
+    !isExactRecordArray(value.connections, ["id", "tripId", "routeId", "serviceId", "fromStationAreaId", "toStationAreaId", "fromStopSequence", "toStopSequence", "departureTimeSeconds", "arrivalTimeSeconds", "pickupType", "dropOffType", "line"]) ||
     !isRecord(provenance)
   ) return false;
   const acquisition = provenance.acquisition;
@@ -761,7 +757,7 @@ function isScheduledRoutingArtifact(value: unknown): value is ScheduledRoutingAr
     isSha256(provenance.contentHash) &&
     isString(provenance.feedId) &&
     provenance.timeZone === "Europe/Berlin" &&
-    isRecordArray(provenance.files, ["fileName", "sha256", "byteLength"]) &&
+    isExactRecordArray(provenance.files, ["fileName", "sha256", "byteLength"]) &&
     isSha256(provenance.compiledArtifactId) &&
     isRecord(acquisition) &&
     acquisition.sourceUrl === SCHEDULED_MVV_FEED_URL &&
@@ -784,34 +780,24 @@ function isScheduledRoutingArtifact(value: unknown): value is ScheduledRoutingAr
 }
 
 function validateArtifactStructure(artifact: ScheduledRoutingArtifact): void {
-  if (artifact.routes.some((route) => typeof route.routeId !== "string" || typeof route.shortName !== "string" || typeof route.longName !== "string") || artifact.trips.some((trip) => typeof trip.tripId !== "string" || typeof trip.routeId !== "string" || typeof trip.serviceId !== "string" || typeof trip.headsign !== "string") || artifact.stationAreas.some((area) => typeof area.id !== "string" || typeof area.name !== "string" || !isRecord(area.coordinate) || !Array.isArray(area.boardingStopIds)) || artifact.boardingStops.some((stop) => typeof stop.id !== "string" || typeof stop.name !== "string" || !isRecord(stop.coordinate) || typeof stop.stationAreaId !== "string") || artifact.calendars.some((calendar) => typeof calendar.serviceId !== "string" || !Array.isArray(calendar.weekdays)) || artifact.exceptions.some((exception) => typeof exception.serviceId !== "string" || typeof exception.date !== "string") || artifact.connections.some((connection) => typeof connection.id !== "string" || typeof connection.tripId !== "string" || typeof connection.routeId !== "string" || typeof connection.serviceId !== "string" || typeof connection.fromStopId !== "string" || typeof connection.toStopId !== "string" || typeof connection.fromStationAreaId !== "string" || typeof connection.toStationAreaId !== "string" || !isRecord(connection.line))) throw invalidArtifact("nested field type");
+  if ("boardingStops" in artifact) throw invalidArtifact("boarding stops");
+  if (artifact.routes.some((route) => typeof route.routeId !== "string" || typeof route.shortName !== "string" || typeof route.longName !== "string") || artifact.trips.some((trip) => typeof trip.tripId !== "string" || typeof trip.routeId !== "string" || typeof trip.serviceId !== "string" || typeof trip.headsign !== "string") || artifact.stationAreas.some((area) => typeof area.id !== "string" || typeof area.name !== "string" || !isRecord(area.coordinate) || "boardingStopIds" in area || "parentStationId" in area) || artifact.calendars.some((calendar) => typeof calendar.serviceId !== "string" || !Array.isArray(calendar.weekdays)) || artifact.exceptions.some((exception) => typeof exception.serviceId !== "string" || typeof exception.date !== "string") || artifact.connections.some((connection) => typeof connection.id !== "string" || typeof connection.tripId !== "string" || typeof connection.routeId !== "string" || typeof connection.serviceId !== "string" || "fromStopId" in connection || "toStopId" in connection || typeof connection.fromStationAreaId !== "string" || typeof connection.toStationAreaId !== "string" || !isRecord(connection.line))) throw invalidArtifact("nested field type");
   const routeIds = uniqueSorted(artifact.routes.map((route) => route.routeId), "routes");
-  const tripIds = uniqueSorted(artifact.trips.map((trip) => trip.tripId), "trips");
+  uniqueSorted(artifact.trips.map((trip) => trip.tripId), "trips");
   const areaIds = uniqueSorted(artifact.stationAreas.map((area) => area.id), "stationAreas");
-  const boardingIds = uniqueSorted(artifact.boardingStops.map((stop) => stop.id), "boardingStops");
   const serviceIds = new Set<string>([
     ...artifact.calendars.map((calendar) => calendar.serviceId),
     ...artifact.exceptions.map((exception) => exception.serviceId),
   ]);
   const routeIdSet = new Set(routeIds);
-  const tripIdSet = new Set(tripIds);
   const areaIdSet = new Set(areaIds);
-  const boardingIdSet = new Set(boardingIds);
   const routeById = new Map(artifact.routes.map((route) => [route.routeId, route]));
   const tripById = new Map(artifact.trips.map((trip) => [trip.tripId, trip]));
-  const stopById = new Map(artifact.boardingStops.map((stop) => [stop.id, stop]));
   uniqueSorted(artifact.calendars.map((calendar) => calendar.serviceId), "calendars");
   const connectionIds = new Set<string>();
   if (artifact.routes.some((route) => !Number.isSafeInteger(route.routeType) || route.routeType < 0 || route.routeType > 999)) throw invalidArtifact("route type");
   for (const area of artifact.stationAreas) {
     validateCoordinate(area.coordinate, "station area coordinate");
-    if (!isSortedUnique(area.boardingStopIds)) throw invalidArtifact("station-area boarding stop order");
-    if (area.parentStationId !== null && !areaIdSet.has(area.parentStationId)) throw invalidArtifact("station area parent reference");
-    for (const stopId of area.boardingStopIds) if (!boardingIdSet.has(stopId)) throw invalidArtifact("station-area boarding stop reference");
-  }
-  for (const stop of artifact.boardingStops) {
-    validateCoordinate(stop.coordinate, "boarding stop coordinate");
-    if (!areaIdSet.has(stop.stationAreaId)) throw invalidArtifact("boarding stop station-area reference");
   }
   for (const trip of artifact.trips) {
     if (!routeIdSet.has(trip.routeId) || !serviceIds.has(trip.serviceId)) throw invalidArtifact("trip reference");
@@ -828,7 +814,7 @@ function validateArtifactStructure(artifact: ScheduledRoutingArtifact): void {
     connectionIds.add(connection.id);
     const trip = tripById.get(connection.tripId);
     const route = routeById.get(connection.routeId);
-    if (trip === undefined || route === undefined || trip.routeId !== connection.routeId || trip.serviceId !== connection.serviceId || !boardingIdSet.has(connection.fromStopId) || !boardingIdSet.has(connection.toStopId) || !areaIdSet.has(connection.fromStationAreaId) || !areaIdSet.has(connection.toStationAreaId) || stopById.get(connection.fromStopId)?.stationAreaId !== connection.fromStationAreaId || stopById.get(connection.toStopId)?.stationAreaId !== connection.toStationAreaId || connection.fromStopSequence >= connection.toStopSequence || connection.departureTimeSeconds < 0 || connection.arrivalTimeSeconds < connection.departureTimeSeconds || connection.pickupType < 0 || connection.pickupType > 1 || connection.dropOffType < 0 || connection.dropOffType > 1 || connection.line.routeId !== route.routeId || typeof connection.line.shortName !== "string" || typeof connection.line.longName !== "string") throw invalidArtifact("connection reference or timing");
+    if (trip === undefined || route === undefined || trip.routeId !== connection.routeId || trip.serviceId !== connection.serviceId || !areaIdSet.has(connection.fromStationAreaId) || !areaIdSet.has(connection.toStationAreaId) || connection.fromStopSequence >= connection.toStopSequence || connection.departureTimeSeconds < 0 || connection.arrivalTimeSeconds < connection.departureTimeSeconds || connection.pickupType < 0 || connection.pickupType > 1 || connection.dropOffType < 0 || connection.dropOffType > 1 || connection.line.routeId !== route.routeId || typeof connection.line.shortName !== "string" || typeof connection.line.longName !== "string") throw invalidArtifact("connection reference or timing");
     if (previousConnection !== undefined && compareScheduledConnections(previousConnection, connection) > 0) throw invalidArtifact("connection sort order");
     previousConnection = connection;
     maximumTime = Math.max(maximumTime, connection.departureTimeSeconds, connection.arrivalTimeSeconds);
@@ -896,8 +882,8 @@ function isSearchStartBounds(value: unknown): boolean {
     isSafeInteger(value.maximumServiceDayTimeSeconds);
 }
 
-function isRecordArray(value: unknown, requiredKeys: readonly string[]): value is readonly Record<string, unknown>[] {
-  return Array.isArray(value) && value.every((entry) => isRecord(entry) && requiredKeys.every((key) => key in entry));
+function isExactRecordArray(value: unknown, requiredKeys: readonly string[]): value is readonly Record<string, unknown>[] {
+  return Array.isArray(value) && value.every((entry) => isRecord(entry) && hasExactKeys(entry, requiredKeys));
 }
 
 function sha256Bytes(value: Uint8Array): string {
