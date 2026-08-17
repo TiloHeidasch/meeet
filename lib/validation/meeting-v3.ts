@@ -1,13 +1,15 @@
 import { isWithinOfficialMunichBoundary } from "../domain/boundary.ts";
 import { MEETING_TIME_ZONE } from "../domain/types.ts";
 import { parseOffsetInstant } from "../domain/scheduled-routing/time.ts";
-import type {
-  GtfsAcquisitionRecord,
-  ScheduledCellClassification,
-  ScheduledDeadlineCheck,
-  ScheduledSurfaceMetadata,
-  ScheduledStationAreaCatalog,
-  ScheduledStationAreaMetadata,
+import {
+  CHANGE_TIME_PRESETS,
+  type GtfsAcquisitionRecord,
+  type ScheduledCellClassification,
+  type ScheduledChangeTimePreset,
+  type ScheduledDeadlineCheck,
+  type ScheduledSurfaceMetadata,
+  type ScheduledStationAreaCatalog,
+  type ScheduledStationAreaMetadata,
 } from "../domain/scheduled-routing/models.ts";
 import type { ProviderDescriptor } from "../domain/types.ts";
 import type { ScheduledAccessSeedProvenance } from "../domain/providers.ts";
@@ -26,6 +28,7 @@ export interface ScheduledMeetingRequest {
   readonly contractVersion: "meeet-meeting/v3";
   readonly participants: readonly [ScheduledMeetingParticipantInput, ScheduledMeetingParticipantInput];
   readonly tolerancePercent: 5 | 10 | 15;
+  readonly changeTimePreset: ScheduledChangeTimePreset;
   readonly searchStartAt: string;
 }
 
@@ -43,7 +46,6 @@ export interface ScheduledMeetingAccessSeedDto {
   readonly seedId: string;
   readonly mvgStationId: string;
   readonly stationAreaId: string;
-  readonly boardingStopId?: string;
   readonly coordinate: { readonly latitude: number; readonly longitude: number };
   readonly accessSeconds: number;
   readonly provenance: ScheduledAccessSeedProvenance;
@@ -61,8 +63,6 @@ export interface ScheduledMeetingStationAreaDto {
   readonly stationAreaId: string;
   readonly name: string;
   readonly coordinate: { readonly latitude: number; readonly longitude: number };
-  readonly redBoardingStopId: string | null;
-  readonly blueBoardingStopId: string | null;
   readonly classification: ScheduledCellClassification;
   readonly redArrivalSeconds: number | null;
   readonly blueArrivalSeconds: number | null;
@@ -111,7 +111,7 @@ export interface ScheduledMeetingResponseValidationContext {
   readonly deadlineCheck?: ScheduledDeadlineCheck;
 }
 
-const REQUEST_KEYS = ["contractVersion", "participants", "tolerancePercent", "searchStartAt"] as const;
+const REQUEST_KEYS = ["contractVersion", "participants", "tolerancePercent", "changeTimePreset", "searchStartAt"] as const;
 const PARTICIPANT_KEYS = ["id", "origin", "mode"] as const;
 const ORIGIN_KEYS = ["label", "latitude", "longitude"] as const;
 
@@ -121,6 +121,7 @@ export function parseScheduledMeetingRequest(input: unknown): ScheduledRequestVa
   addUnknownKeys(input, REQUEST_KEYS, [], issues);
   if (input.contractVersion !== "meeet-meeting/v3") issues.push(issue(["contractVersion"], "invalid_value", "contractVersion must be meeet-meeting/v3."));
   const tolerancePercent = parseTolerance(input.tolerancePercent, issues);
+  const changeTimePreset = parseChangeTimePreset(input.changeTimePreset, issues);
   const searchStartAt = parseSearchStartAt(input.searchStartAt, issues);
   const participantsValue = input.participants;
   const participants: ScheduledMeetingParticipantInput[] = [];
@@ -145,6 +146,7 @@ export function parseScheduledMeetingRequest(input: unknown): ScheduledRequestVa
       contractVersion: "meeet-meeting/v3",
       participants: [participants[0]!, participants[1]!],
       tolerancePercent,
+      changeTimePreset,
       searchStartAt,
     },
   };
@@ -231,6 +233,18 @@ function parseTolerance(value: unknown, issues: ScheduledValidationIssue[]): 5 |
   return value;
 }
 
+function parseChangeTimePreset(value: unknown, issues: ScheduledValidationIssue[]): ScheduledChangeTimePreset {
+  if (value !== "quick" && value !== "medium" && value !== "long") {
+    issues.push(issue(["changeTimePreset"], "invalid_enum", "changeTimePreset must be quick, medium, or long."));
+    return "medium";
+  }
+  return value;
+}
+
+function effectiveChangeTimeSeconds(preset: ScheduledChangeTimePreset): number {
+  return CHANGE_TIME_PRESETS[preset];
+}
+
 function parseSearchStartAt(value: unknown, issues: ScheduledValidationIssue[]): string | undefined {
   const fractionalMatch = typeof value === "string" ? /\.(\d+)(?=(?:Z|[+-]\d{2}:\d{2})$)/.exec(value) : null;
   if (typeof value !== "string" || (fractionalMatch !== null && /[1-9]/.test(fractionalMatch[1] ?? ""))) {
@@ -272,6 +286,7 @@ function validateResponseInvariants(value: Record<string, unknown>, metadata: Re
 
   if (surface.searchStartAt !== request.searchStartAt) issues.push(issue(["metadata", "surface", "searchStartAt"], "inconsistent", "Surface searchStartAt must match the parsed scheduled request."));
   if (surface.selectedTolerancePercent !== request.tolerancePercent) issues.push(issue(["metadata", "surface", "selectedTolerancePercent"], "inconsistent", "Surface selectedTolerancePercent must match the parsed scheduled request."));
+  if (surface.changeTimeSeconds !== effectiveChangeTimeSeconds(request.changeTimePreset)) issues.push(issue(["metadata", "surface", "changeTimeSeconds"], "inconsistent", "Surface changeTimeSeconds must match the parsed scheduled request preset."));
 
   if (typeof surface.searchStartAt !== "string" || typeof surface.timeZone !== "string") {
     return;
@@ -323,12 +338,6 @@ function validateStationAreaCatalog(input: Record<string, unknown>, catalog: Sch
     if (candidate.stationAreaId !== entry.stationAreaId) issues.push(issue([...path, "stationAreaId"], "inconsistent", "Station-area candidates must use canonical catalog order and identity."));
     if (candidate.name !== entry.name) issues.push(issue([...path, "name"], "inconsistent", "Station-area candidate name must match the canonical catalog."));
     if (!isRecord(candidate.coordinate) || candidate.coordinate.latitude !== entry.coordinate.latitude || candidate.coordinate.longitude !== entry.coordinate.longitude) issues.push(issue([...path, "coordinate"], "inconsistent", "Station-area candidate coordinate must match the canonical catalog."));
-    for (const color of ["red", "blue"] as const) {
-      const boardingStopId = candidate[`${color}BoardingStopId`];
-      if (boardingStopId !== null && (typeof boardingStopId !== "string" || !entry.eligibleBoardingStopIds.includes(boardingStopId))) {
-        issues.push(issue([...path, `${color}BoardingStopId`], "inconsistent", "Selected boarding stop must belong to the station-area eligible catalog."));
-      }
-    }
   }
 }
 
@@ -338,14 +347,12 @@ function validateStationArea(value: unknown, index: number, issues: ScheduledVal
     issues.push(issue(path, "invalid_type", "Station-area candidate must be an object."));
     return;
   }
-  addUnknownKeys(value, ["stationAreaId", "name", "coordinate", "redBoardingStopId", "blueBoardingStopId", "classification", "redArrivalSeconds", "blueArrivalSeconds", "fasterParticipant", "withinSelectedTolerance"], path, issues);
+  addUnknownKeys(value, ["stationAreaId", "name", "coordinate", "classification", "redArrivalSeconds", "blueArrivalSeconds", "fasterParticipant", "withinSelectedTolerance"], path, issues);
   if (typeof value.stationAreaId !== "string" || value.stationAreaId.trim() === "") issues.push(issue([...path, "stationAreaId"], "invalid_value", "stationAreaId must be non-empty."));
   if (typeof value.name !== "string" || value.name.trim() === "") issues.push(issue([...path, "name"], "invalid_value", "Station-area name must be non-empty."));
   if (!isCoordinate(value.coordinate)) issues.push(issue([...path, "coordinate"], "invalid_coordinate", "Station-area coordinate must be valid."));
   else if (!isWithinOfficialMunichBoundary(value.coordinate)) issues.push(issue([...path, "coordinate"], "outside_official_munich_boundary", "Station-area coordinate must be inside the official Munich application boundary."));
   if (isRecord(value.coordinate)) addUnknownKeys(value.coordinate, ["latitude", "longitude"], [...path, "coordinate"], issues);
-  if (!isNullableNonEmptyString(value.redBoardingStopId)) issues.push(issue([...path, "redBoardingStopId"], "invalid_value", "redBoardingStopId must be a non-empty string or null."));
-  if (!isNullableNonEmptyString(value.blueBoardingStopId)) issues.push(issue([...path, "blueBoardingStopId"], "invalid_value", "blueBoardingStopId must be a non-empty string or null."));
   if (value.classification !== "red" && value.classification !== "blue" && value.classification !== "fair" && value.classification !== "unclassified") issues.push(issue([...path, "classification"], "invalid_enum", "Station-area classification is invalid."));
   if (!isNullableWholeSecond(value.redArrivalSeconds)) issues.push(issue([...path, "redArrivalSeconds"], "invalid_value", "redArrivalSeconds must be a whole second or null."));
   if (!isNullableWholeSecond(value.blueArrivalSeconds)) issues.push(issue([...path, "blueArrivalSeconds"], "invalid_value", "blueArrivalSeconds must be a whole second or null."));
@@ -359,23 +366,17 @@ function validateDerivedStationAreaInvariant(value: unknown, index: number, stat
   const classification = value.classification;
   const red = value.redArrivalSeconds;
   const blue = value.blueArrivalSeconds;
-  const redStop = value.redBoardingStopId;
-  const blueStop = value.blueBoardingStopId;
   const fasterParticipant = value.fasterParticipant;
   const withinSelectedTolerance = value.withinSelectedTolerance;
 
   if (status === "no-result") {
-    if (classification !== "unclassified" || red !== null || blue !== null || redStop !== null || blueStop !== null || fasterParticipant !== null || withinSelectedTolerance !== false) {
-      issues.push(issue(path, "inconsistent", "No-result station areas must be unclassified with null arrivals, boarding stops, no faster participant, and false tolerance."));
+    if (classification !== "unclassified" || red !== null || blue !== null || fasterParticipant !== null || withinSelectedTolerance !== false) {
+      issues.push(issue(path, "inconsistent", "No-result station areas must be unclassified with null arrivals, no faster participant, and false tolerance."));
     }
     return;
   }
 
-  if ((isWholeSecond(red) && !isNonEmptyString(redStop)) || (red === null && redStop !== null) || (isWholeSecond(blue) && !isNonEmptyString(blueStop)) || (blue === null && blueStop !== null)) {
-    issues.push(issue(path, "inconsistent", "A reachable station area must expose its selected boarding stop, and an unreachable area must expose null."));
-    return;
-  }
-  if (!isNullableWholeSecond(red) || !isNullableWholeSecond(blue) || !isNullableNonEmptyString(redStop) || !isNullableNonEmptyString(blueStop)) return;
+  if (!isNullableWholeSecond(red) || !isNullableWholeSecond(blue)) return;
   let expectedClassification: ScheduledCellClassification = "unclassified";
   let expectedFasterParticipant: "red" | "blue" | null = null;
   let expectedWithinSelectedTolerance = false;
@@ -390,10 +391,8 @@ function validateDerivedStationAreaInvariant(value: unknown, index: number, stat
     expectedClassification = "blue";
     expectedFasterParticipant = "blue";
   }
-  const expectedRedStop = isWholeSecond(red) ? redStop : null;
-  const expectedBlueStop = isWholeSecond(blue) ? blueStop : null;
-  if (classification !== expectedClassification || redStop !== expectedRedStop || blueStop !== expectedBlueStop || fasterParticipant !== expectedFasterParticipant || withinSelectedTolerance !== expectedWithinSelectedTolerance) {
-    issues.push(issue(path, "inconsistent", "Station-area classification, boarding identities, faster participant, and tolerance flag must be derived from its arrival fields."));
+  if (classification !== expectedClassification || fasterParticipant !== expectedFasterParticipant || withinSelectedTolerance !== expectedWithinSelectedTolerance) {
+    issues.push(issue(path, "inconsistent", "Station-area classification, faster participant, and tolerance flag must be derived from its arrival fields."));
   }
 }
 
@@ -417,8 +416,8 @@ function validateResponseParticipant(value: unknown, index: number, issues: Sche
   } else {
     value.accessSeeds.forEach((seed, seedIndex) => {
       const seedPath = [...path, "accessSeeds", seedIndex];
-      if (isRecord(seed)) addUnknownKeys(seed, ["seedId", "mvgStationId", "stationAreaId", "boardingStopId", "coordinate", "accessSeconds", "provenance"], seedPath, issues);
-      if (!isRecord(seed) || typeof seed.seedId !== "string" || seed.seedId.trim() === "" || typeof seed.mvgStationId !== "string" || seed.mvgStationId.trim() === "" || typeof seed.stationAreaId !== "string" || seed.stationAreaId.trim() === "" || (seed.boardingStopId !== undefined && (typeof seed.boardingStopId !== "string" || seed.boardingStopId.trim() === "")) || !isWholeSecond(seed.accessSeconds) || !isRecord(seed.coordinate) || !isCoordinate(seed.coordinate) || !isRecord(seed.provenance) || (seed.provenance.source !== "mvg-nearby" && seed.provenance.source !== "fixture-static") || typeof seed.provenance.endpoint !== "string" || typeof seed.provenance.distanceMeters !== "number" || !Number.isFinite(seed.provenance.distanceMeters) || seed.provenance.distanceMeters < 0 || !isWholeSecond(seed.provenance.walkingSeconds) || typeof seed.provenance.note !== "string") {
+      if (isRecord(seed)) addUnknownKeys(seed, ["seedId", "mvgStationId", "stationAreaId", "coordinate", "accessSeconds", "provenance"], seedPath, issues);
+      if (!isRecord(seed) || typeof seed.seedId !== "string" || seed.seedId.trim() === "" || typeof seed.mvgStationId !== "string" || seed.mvgStationId.trim() === "" || typeof seed.stationAreaId !== "string" || seed.stationAreaId.trim() === "" || !isWholeSecond(seed.accessSeconds) || !isRecord(seed.coordinate) || !isCoordinate(seed.coordinate) || !isRecord(seed.provenance) || (seed.provenance.source !== "mvg-nearby" && seed.provenance.source !== "fixture-static") || typeof seed.provenance.endpoint !== "string" || typeof seed.provenance.distanceMeters !== "number" || !Number.isFinite(seed.provenance.distanceMeters) || seed.provenance.distanceMeters < 0 || !isWholeSecond(seed.provenance.walkingSeconds) || typeof seed.provenance.note !== "string") {
         issues.push(issue(seedPath, "invalid_value", "Response access seed provenance is invalid."));
       }
       if (isRecord(seed?.coordinate)) addUnknownKeys(seed.coordinate, ["latitude", "longitude"], [...seedPath, "coordinate"], issues);
@@ -439,7 +438,7 @@ function validateResponseMetadata(value: Record<string, unknown>, issues: Schedu
     if (isRecord(schedule.acquisition.officialLicense)) addUnknownKeys(schedule.acquisition.officialLicense, ["name", "url"], [...acquisitionPath, "officialLicense"], issues);
     if (isRecord(schedule.acquisition.officialProvenance)) addUnknownKeys(schedule.acquisition.officialProvenance, ["source", "policyId"], [...acquisitionPath, "officialProvenance"], issues);
   }
-  if (isRecord(value.surface)) addUnknownKeys(value.surface, ["contractVersion", "scheduleContentHash", "compiledArtifactId", "feedId", "timeZone", "searchStartAt", "routingHorizonSeconds", "selectedTolerancePercent", "walkingVelocityMetersPerSecond", "walkingSecondsRoundingRule", "transferRadiusMeters", "accessSeedCounts", "stationAreaCount", "boardingStopCount", "connectionCount", "coverage", "representativePointBasis", "classificationMethod", "classificationBasis", "finalWalkingMethod"], [...path, "surface"], issues);
+  if (isRecord(value.surface)) addUnknownKeys(value.surface, ["contractVersion", "scheduleContentHash", "compiledArtifactId", "feedId", "timeZone", "searchStartAt", "routingHorizonSeconds", "selectedTolerancePercent", "changeTimeSeconds", "walkingVelocityMetersPerSecond", "walkingSecondsRoundingRule", "transferRadiusMeters", "accessSeedCounts", "stationAreaCount", "connectionCount", "coverage", "representativePointBasis", "classificationMethod", "classificationBasis", "finalWalkingMethod"], [...path, "surface"], issues);
   if (isRecord(value.stationAreas)) addUnknownKeys(value.stationAreas, ["count", "coverage", "selection"], [...path, "stationAreas"], issues);
   if (isRecord(value.accessProvider)) {
     const providerPath = [...path, "accessProvider"];
@@ -465,11 +464,11 @@ function isScheduledParticipantDto(value: unknown): value is ScheduledMeetingPar
 }
 
 function isScheduledSeedDto(value: unknown): value is ScheduledMeetingAccessSeedDto {
-  return isRecord(value) && typeof value.seedId === "string" && value.seedId.trim() !== "" && typeof value.mvgStationId === "string" && value.mvgStationId.trim() !== "" && typeof value.stationAreaId === "string" && value.stationAreaId.trim() !== "" && (value.boardingStopId === undefined || (typeof value.boardingStopId === "string" && value.boardingStopId.trim() !== "")) && isWholeSecond(value.accessSeconds) && isCoordinate(value.coordinate) && isRecord(value.provenance) && (value.provenance.source === "mvg-nearby" || value.provenance.source === "fixture-static") && typeof value.provenance.endpoint === "string" && typeof value.provenance.distanceMeters === "number" && Number.isFinite(value.provenance.distanceMeters) && value.provenance.distanceMeters >= 0 && isWholeSecond(value.provenance.walkingSeconds) && typeof value.provenance.note === "string";
+  return isRecord(value) && typeof value.seedId === "string" && value.seedId.trim() !== "" && typeof value.mvgStationId === "string" && value.mvgStationId.trim() !== "" && typeof value.stationAreaId === "string" && value.stationAreaId.trim() !== "" && isWholeSecond(value.accessSeconds) && isCoordinate(value.coordinate) && isRecord(value.provenance) && (value.provenance.source === "mvg-nearby" || value.provenance.source === "fixture-static") && typeof value.provenance.endpoint === "string" && typeof value.provenance.distanceMeters === "number" && Number.isFinite(value.provenance.distanceMeters) && value.provenance.distanceMeters >= 0 && isWholeSecond(value.provenance.walkingSeconds) && typeof value.provenance.note === "string";
 }
 
 function isScheduledStationAreaDto(value: unknown): value is ScheduledMeetingStationAreaDto {
-  return isRecord(value) && typeof value.stationAreaId === "string" && value.stationAreaId.trim() !== "" && typeof value.name === "string" && value.name.trim() !== "" && isCoordinate(value.coordinate) && isWithinOfficialMunichBoundary(value.coordinate) && isNullableNonEmptyString(value.redBoardingStopId) && isNullableNonEmptyString(value.blueBoardingStopId) && (value.classification === "red" || value.classification === "blue" || value.classification === "fair" || value.classification === "unclassified") && isNullableWholeSecond(value.redArrivalSeconds) && isNullableWholeSecond(value.blueArrivalSeconds) && (value.fasterParticipant === null || value.fasterParticipant === "red" || value.fasterParticipant === "blue") && typeof value.withinSelectedTolerance === "boolean";
+  return isRecord(value) && typeof value.stationAreaId === "string" && value.stationAreaId.trim() !== "" && typeof value.name === "string" && value.name.trim() !== "" && isCoordinate(value.coordinate) && isWithinOfficialMunichBoundary(value.coordinate) && (value.classification === "red" || value.classification === "blue" || value.classification === "fair" || value.classification === "unclassified") && isNullableWholeSecond(value.redArrivalSeconds) && isNullableWholeSecond(value.blueArrivalSeconds) && (value.fasterParticipant === null || value.fasterParticipant === "red" || value.fasterParticipant === "blue") && typeof value.withinSelectedTolerance === "boolean";
 }
 
 function isScheduledMetadataDto(value: unknown): value is ScheduledMeetingMetadataDto {
@@ -480,12 +479,12 @@ function isScheduledMetadataDto(value: unknown): value is ScheduledMeetingMetada
 }
 
 function isScheduledStationAreaMetadata(value: unknown): value is ScheduledStationAreaMetadata {
-  return isRecord(value) && typeof value.count === "number" && Number.isSafeInteger(value.count) && value.count >= 0 && value.coverage === "official-munich-boundary-with-connected-artifact-boarding-stops/v1" && value.selection === "all-eligible-scheduled-station-areas/v1";
+  return isRecord(value) && typeof value.count === "number" && Number.isSafeInteger(value.count) && value.count >= 0 && value.coverage === "official-munich-boundary-with-connected-artifact-station-areas/v1" && value.selection === "all-eligible-scheduled-station-areas/v1";
 }
 
 function isSurfaceMetadata(value: unknown): value is ScheduledMeetingMetadataDto["surface"] {
   if (!isRecord(value)) return false;
-  return value.contractVersion === "meeet-scheduled-routing/v1" && typeof value.scheduleContentHash === "string" && typeof value.compiledArtifactId === "string" && typeof value.feedId === "string" && value.timeZone === MEETING_TIME_ZONE && typeof value.searchStartAt === "string" && value.routingHorizonSeconds === 86_400 && (value.selectedTolerancePercent === 5 || value.selectedTolerancePercent === 10 || value.selectedTolerancePercent === 15) && typeof value.walkingVelocityMetersPerSecond === "number" && typeof value.walkingSecondsRoundingRule === "string" && typeof value.transferRadiusMeters === "number" && Array.isArray(value.accessSeedCounts) && value.accessSeedCounts.length === 2 && value.accessSeedCounts.every((count) => Number.isSafeInteger(count) && count >= 0) && Number.isSafeInteger(value.stationAreaCount) && Number.isSafeInteger(value.boardingStopCount) && Number.isSafeInteger(value.connectionCount) && value.coverage === "scheduled-service-day-local-radius/v1" && value.representativePointBasis === "inside-clipped-cell/v1";
+  return value.contractVersion === "meeet-scheduled-routing/v1" && typeof value.scheduleContentHash === "string" && typeof value.compiledArtifactId === "string" && typeof value.feedId === "string" && value.timeZone === MEETING_TIME_ZONE && typeof value.searchStartAt === "string" && value.routingHorizonSeconds === 86_400 && (value.selectedTolerancePercent === 5 || value.selectedTolerancePercent === 10 || value.selectedTolerancePercent === 15) && (value.changeTimeSeconds === 180 || value.changeTimeSeconds === 300 || value.changeTimeSeconds === 600) && typeof value.walkingVelocityMetersPerSecond === "number" && typeof value.walkingSecondsRoundingRule === "string" && typeof value.transferRadiusMeters === "number" && Array.isArray(value.accessSeedCounts) && value.accessSeedCounts.length === 2 && value.accessSeedCounts.every((count) => Number.isSafeInteger(count) && count >= 0) && Number.isSafeInteger(value.stationAreaCount) && Number.isSafeInteger(value.connectionCount) && value.coverage === "scheduled-service-day-local-radius/v1" && value.representativePointBasis === "inside-clipped-cell/v1";
 }
 
 function isProviderDescriptor(value: unknown): value is ProviderDescriptor {
@@ -532,14 +531,6 @@ function isCoordinate(value: unknown): value is { readonly latitude: number; rea
 
 function isNullableWholeSecond(value: unknown): value is number | null {
   return value === null || isWholeSecond(value);
-}
-
-function isNullableNonEmptyString(value: unknown): value is string | null {
-  return value === null || (typeof value === "string" && value.trim() !== "");
-}
-
-function isNonEmptyString(value: unknown): value is string {
-  return typeof value === "string" && value.trim() !== "";
 }
 
 function isWholeSecond(value: unknown): value is number {

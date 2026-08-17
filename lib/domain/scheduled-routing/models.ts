@@ -8,6 +8,10 @@ export const SCHEDULED_ROUTING_CONTRACT_VERSION = "meeet-scheduled-routing/v1";
 export type SelectedTolerancePercent = 5 | 10 | 15;
 export const SCHEDULED_TOLERANCE_OPTIONS: readonly SelectedTolerancePercent[] = Object.freeze([5, 10, 15]);
 
+/** Static intra-station change-time presets in seconds (ADR 0003). */
+export const CHANGE_TIME_PRESETS = { quick: 180, medium: 300, long: 600 } as const;
+export type ScheduledChangeTimePreset = keyof typeof CHANGE_TIME_PRESETS;
+
 export const SECONDS_PER_DAY = 86_400;
 export const ROUTING_HORIZON_SECONDS = SECONDS_PER_DAY;
 export const WALKING_SECONDS_ROUNDING_RULE =
@@ -42,15 +46,6 @@ export interface ScheduledStationArea {
   readonly id: string;
   readonly name: string;
   readonly coordinate: ScheduledCoordinate;
-  readonly boardingStopIds: readonly string[];
-  readonly parentStationId: string | null;
-}
-
-export interface ScheduledBoardingStop {
-  readonly id: string;
-  readonly name: string;
-  readonly coordinate: ScheduledCoordinate;
-  readonly stationAreaId: string;
 }
 
 /** Only regular boarding/alighting and explicit no-board/no-alight are routable. */
@@ -69,10 +64,9 @@ export interface ScheduledConnection {
   readonly tripId: string;
   readonly routeId: string;
   readonly serviceId: string;
-  readonly fromStopId: string;
-  readonly toStopId: string;
   readonly fromStationAreaId: string;
   readonly toStationAreaId: string;
+  /** Area-visit indices within the trip; consecutive connections continue the trip. */
   readonly fromStopSequence: number;
   readonly toStopSequence: number;
   readonly departureTimeSeconds: number;
@@ -155,7 +149,6 @@ export interface ScheduledRoutingArtifact {
   readonly routes: readonly ScheduledRoute[];
   readonly trips: readonly ScheduledTrip[];
   readonly stationAreas: readonly ScheduledStationArea[];
-  readonly boardingStops: readonly ScheduledBoardingStop[];
   readonly calendars: readonly ServiceCalendar[];
   readonly exceptions: readonly ServiceException[];
   readonly connections: readonly ScheduledConnection[];
@@ -165,8 +158,6 @@ export interface ScheduledRoutingArtifact {
 /** A bounded origin-to-station seed resolved by a later MVG adapter. */
 export interface ScheduledAccessSeed {
   readonly stationAreaId: string;
-  /** Exact boarding stop identity when the access provider resolved a stop. */
-  readonly boardingStopId?: string;
   /** Seconds from searchStartAt until the participant can board this area. */
   readonly accessSeconds: number;
 }
@@ -177,16 +168,9 @@ export interface StationArrivalField {
   readonly elapsedSeconds: number | null;
 }
 
-export interface BoardingStopArrivalField {
-  readonly boardingStopId: string;
-  readonly arrivalAt: string | null;
-  readonly elapsedSeconds: number | null;
-}
-
 export interface ScheduledParticipantSurface {
   readonly participantId: string;
   readonly stationArrivals: readonly StationArrivalField[];
-  readonly boardingStopArrivals: readonly BoardingStopArrivalField[];
 }
 
 export type ScheduledCellClassification = "red" | "blue" | "fair" | "unclassified";
@@ -195,8 +179,6 @@ export interface ScheduledStationAreaCandidate {
   readonly stationAreaId: string;
   readonly name: string;
   readonly coordinate: ScheduledCoordinate;
-  readonly redBoardingStopId: string | null;
-  readonly blueBoardingStopId: string | null;
   readonly classification: ScheduledCellClassification;
   readonly redArrivalSeconds: number | null;
   readonly blueArrivalSeconds: number | null;
@@ -208,7 +190,6 @@ export interface ScheduledStationAreaCatalogEntry {
   readonly stationAreaId: string;
   readonly name: string;
   readonly coordinate: ScheduledCoordinate;
-  readonly eligibleBoardingStopIds: readonly string[];
 }
 
 export interface ScheduledStationAreaCatalog {
@@ -217,7 +198,7 @@ export interface ScheduledStationAreaCatalog {
 
 export interface ScheduledStationAreaMetadata {
   readonly count: number;
-  readonly coverage: "official-munich-boundary-with-connected-artifact-boarding-stops/v1";
+  readonly coverage: "official-munich-boundary-with-connected-artifact-station-areas/v1";
   readonly selection: "all-eligible-scheduled-station-areas/v1";
 }
 
@@ -230,12 +211,12 @@ export interface ScheduledSurfaceMetadata {
   readonly searchStartAt: string;
   readonly routingHorizonSeconds: number;
   readonly selectedTolerancePercent: SelectedTolerancePercent;
+  readonly changeTimeSeconds: number;
   readonly walkingVelocityMetersPerSecond: number;
   readonly walkingSecondsRoundingRule: typeof WALKING_SECONDS_ROUNDING_RULE;
   readonly transferRadiusMeters: number;
   readonly accessSeedCounts: readonly [number, number];
   readonly stationAreaCount: number;
-  readonly boardingStopCount: number;
   readonly connectionCount: number;
   readonly coverage: "scheduled-service-day-local-radius/v1";
   readonly representativePointBasis: "inside-clipped-cell/v1";
@@ -255,6 +236,8 @@ export interface ScheduledSurfaceInput {
   readonly accessSeedSets: readonly [readonly ScheduledAccessSeed[], readonly ScheduledAccessSeed[]];
   readonly searchStartAt: string;
   readonly selectedTolerancePercent: SelectedTolerancePercent;
+  /** Static intra-station change time in seconds; defaults to the medium preset. */
+  readonly changeTimeSeconds?: number;
   readonly walkingVelocityMetersPerSecond: number;
   readonly transferRadiusMeters?: number;
   readonly participantIds?: readonly [string, string];
@@ -264,12 +247,13 @@ export interface ScheduledSurfaceInput {
 export interface ScheduledRoutingOptions {
   readonly walkingVelocityMetersPerSecond?: number;
   readonly transferRadiusMeters?: number;
+  /** Static intra-station change time in seconds; defaults to the medium preset. */
+  readonly changeTimeSeconds?: number;
   readonly deadlineCheck?: ScheduledDeadlineCheck;
 }
 
 export interface ScheduledRoutingResult {
   readonly stationArrivals: readonly StationArrivalField[];
-  readonly boardingStopArrivals: readonly BoardingStopArrivalField[];
   readonly reachableStationAreaCount: number;
   readonly searchStartAt: string;
   readonly searchStartEpochSeconds: number;

@@ -12,11 +12,12 @@ import {
   createScheduledRoutingWindow,
   routeScheduledEarliestArrivals,
 } from "./router.ts";
-import type {
-  ScheduledAccessSeed,
-  ScheduledRoutingArtifact,
-  ScheduledDeadlineCheck,
-  ScheduledParticipantSurface,
+import {
+  CHANGE_TIME_PRESETS,
+  type ScheduledAccessSeed,
+  type ScheduledRoutingArtifact,
+  type ScheduledDeadlineCheck,
+  type ScheduledParticipantSurface,
 } from "./models.ts";
 import type { ScheduledMeetingRequest, ScheduledMeetingParticipantInput } from "../../validation/meeting-v3.ts";
 import type {
@@ -63,6 +64,7 @@ export interface ScheduledCalculationBasis {
   };
   readonly routingOptions: {
     readonly routingHorizonSeconds: number;
+    readonly changeTimeSeconds: number;
     readonly walkingVelocityMetersPerSecond: number;
     readonly walkingSecondsRoundingRule: string;
     readonly transferRadiusMeters: number;
@@ -101,6 +103,7 @@ export async function calculateScheduledMeetingWithBasis(
   const access = providers.access;
   if (access === undefined) throw new ProviderNotConfiguredError("routing");
   if (signal?.aborted) throw new ProviderUnavailableError("routing");
+  const changeTimeSeconds = CHANGE_TIME_PRESETS[request.changeTimePreset];
   const walkingVelocityMetersPerSecond = providers.walkingVelocityMetersPerSecond ?? DEFAULT_WALKING_VELOCITY_METERS_PER_SECOND;
   const transferRadiusMeters = providers.transferRadiusMeters ?? DEFAULT_TRANSFER_RADIUS_METERS;
   let seedSets: [readonly ScheduledAccessSeedCandidate[], readonly ScheduledAccessSeedCandidate[]];
@@ -127,6 +130,7 @@ export async function calculateScheduledMeetingWithBasis(
   const window = createScheduledRoutingWindow(artifact, request.searchStartAt, {
     walkingVelocityMetersPerSecond,
     transferRadiusMeters,
+    changeTimeSeconds,
     deadlineCheck: providers.deadlineCheck,
   });
   const routes = scheduledSeedSets.map((seeds) => {
@@ -136,8 +140,8 @@ export async function calculateScheduledMeetingWithBasis(
   const firstRoute = routes[0];
   const secondRoute = routes[1];
   const participantSurfaces: [ScheduledParticipantSurface, ScheduledParticipantSurface] = [
-    createParticipantSurface(request.participants[0].id, artifact, firstRoute, walkingVelocityMetersPerSecond, window.searchStartEpochSeconds, providers.deadlineCheck),
-    createParticipantSurface(request.participants[1].id, artifact, secondRoute, walkingVelocityMetersPerSecond, window.searchStartEpochSeconds, providers.deadlineCheck),
+    createParticipantSurface(request.participants[0].id, artifact, firstRoute),
+    createParticipantSurface(request.participants[1].id, artifact, secondRoute),
   ];
   const firstReachable = firstRoute?.reachableStationAreaCount ?? 0;
   const secondReachable = secondRoute?.reachableStationAreaCount ?? 0;
@@ -149,8 +153,8 @@ export async function calculateScheduledMeetingWithBasis(
   const stationAreas: ScheduledMeetingStationAreaDto[] = [];
   await evaluateScheduledStationAreaCandidates(
     stationAreaCatalog,
-    participantSurfaces[0].boardingStopArrivals,
-    participantSurfaces[1].boardingStopArrivals,
+    participantSurfaces[0].stationArrivals,
+    participantSurfaces[1].stationArrivals,
     noResult,
     request.tolerancePercent,
     providers.deadlineCheck,
@@ -159,8 +163,6 @@ export async function calculateScheduledMeetingWithBasis(
         stationAreaId: candidate.stationAreaId,
         name: candidate.name,
         coordinate: candidate.coordinate,
-        redBoardingStopId: candidate.redBoardingStopId,
-        blueBoardingStopId: candidate.blueBoardingStopId,
         classification: candidate.classification,
         redArrivalSeconds: candidate.redArrivalSeconds,
         blueArrivalSeconds: candidate.blueArrivalSeconds,
@@ -205,12 +207,12 @@ export async function calculateScheduledMeetingWithBasis(
         searchStartAt: window.searchStartAt,
         routingHorizonSeconds: 86400,
         selectedTolerancePercent: request.tolerancePercent,
+        changeTimeSeconds,
         walkingVelocityMetersPerSecond,
         walkingSecondsRoundingRule: "ceil(distanceMetres / velocityMetresPerSecond), with zero distance taking zero seconds",
         transferRadiusMeters,
         accessSeedCounts: [scheduledSeedSets[0].length, scheduledSeedSets[1].length],
         stationAreaCount: artifact.stationAreas.length,
-        boardingStopCount: artifact.boardingStops.length,
         connectionCount: artifact.connections.length,
         coverage: "scheduled-service-day-local-radius/v1",
         representativePointBasis: "inside-clipped-cell/v1",
@@ -220,7 +222,7 @@ export async function calculateScheduledMeetingWithBasis(
       },
       stationAreas: {
         count: stationAreas.length,
-        coverage: "official-munich-boundary-with-connected-artifact-boarding-stops/v1",
+        coverage: "official-munich-boundary-with-connected-artifact-station-areas/v1",
         selection: "all-eligible-scheduled-station-areas/v1",
       },
       accessProvider: access.descriptor,
@@ -246,6 +248,7 @@ export async function calculateScheduledMeetingWithBasis(
     },
     routingOptions: {
       routingHorizonSeconds: response.metadata.surface.routingHorizonSeconds,
+      changeTimeSeconds: response.metadata.surface.changeTimeSeconds,
       walkingVelocityMetersPerSecond: response.metadata.surface.walkingVelocityMetersPerSecond,
       walkingSecondsRoundingRule: response.metadata.surface.walkingSecondsRoundingRule,
       transferRadiusMeters: response.metadata.surface.transferRadiusMeters,
@@ -270,7 +273,6 @@ function participantResponse(
 function toScheduledAccessSeed(candidate: ScheduledAccessSeedCandidate): ScheduledAccessSeed {
   return {
     stationAreaId: candidate.stationAreaId,
-    ...(candidate.boardingStopId === undefined ? {} : { boardingStopId: candidate.boardingStopId }),
     accessSeconds: candidate.accessSeconds,
   };
 }
@@ -278,7 +280,6 @@ function toScheduledAccessSeed(candidate: ScheduledAccessSeedCandidate): Schedul
 function cloneScheduledAccessSeed(seed: ScheduledAccessSeed): ScheduledAccessSeed {
   return {
     stationAreaId: seed.stationAreaId,
-    ...(seed.boardingStopId === undefined ? {} : { boardingStopId: seed.boardingStopId }),
     accessSeconds: seed.accessSeconds,
   };
 }
@@ -288,7 +289,6 @@ function cloneAccessSeedCandidate(candidate: ScheduledAccessSeedCandidate): Sche
     seedId: candidate.seedId,
     mvgStationId: candidate.mvgStationId,
     stationAreaId: candidate.stationAreaId,
-    ...(candidate.boardingStopId === undefined ? {} : { boardingStopId: candidate.boardingStopId }),
     coordinate: { latitude: candidate.coordinate.latitude, longitude: candidate.coordinate.longitude },
     accessSeconds: candidate.accessSeconds,
     provenance: { ...candidate.provenance },
@@ -303,6 +303,7 @@ function cloneRequest(request: ScheduledMeetingRequest): ScheduledMeetingRequest
       { id: request.participants[1].id, mode: "transit", origin: { ...request.participants[1].origin } },
     ],
     tolerancePercent: request.tolerancePercent,
+    changeTimePreset: request.changeTimePreset,
     searchStartAt: request.searchStartAt,
   };
 }

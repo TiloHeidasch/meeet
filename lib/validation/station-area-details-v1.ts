@@ -1,10 +1,9 @@
 import { isWithinOfficialMunichBoundary } from "../domain/boundary.ts";
 import {
-  haversineDistanceMeters,
   isScheduledToleranceSatisfied,
   SCHEDULED_DETAIL_SELECTION_POLICY,
 } from "../domain/scheduled-routing/router.ts";
-import { WALKING_SECONDS_ROUNDING_RULE, SCHEDULED_ROUTING_CONTRACT_VERSION } from "../domain/scheduled-routing/models.ts";
+import { WALKING_SECONDS_ROUNDING_RULE, SCHEDULED_ROUTING_CONTRACT_VERSION, CHANGE_TIME_PRESETS } from "../domain/scheduled-routing/models.ts";
 import type { ScheduledMeetingRequest, ScheduledMeetingStationAreaDto, ScheduledValidationIssue } from "./meeting-v3.ts";
 import type {
   StationAreaDetailsResponseDto,
@@ -20,10 +19,6 @@ export interface StationAreaDetailsValidationContext {
     readonly scheduleContentHash: string;
     readonly compiledArtifactId: string;
   };
-  readonly selectedBoardingStops?: Partial<Record<"red" | "blue", {
-    readonly boardingStopId: string;
-    readonly coordinate: { readonly latitude: number; readonly longitude: number };
-  }>>;
 }
 
 export type StationAreaDetailsValidationResult =
@@ -31,11 +26,10 @@ export type StationAreaDetailsValidationResult =
   | { readonly success: false; readonly issues: readonly ScheduledValidationIssue[] };
 
 const DETAIL_KEYS = ["contractVersion", "status", "reason", "stationArea", "participants", "basis"] as const;
-const MARKER_KEYS = ["stationAreaId", "name", "coordinate", "redBoardingStopId", "blueBoardingStopId", "classification", "redArrivalSeconds", "blueArrivalSeconds", "fasterParticipant", "withinSelectedTolerance"] as const;
-const BASIS_KEYS = ["contractVersion", "searchStartAt", "selectedTolerancePercent", "routingHorizonSeconds", "walkingVelocityMetersPerSecond", "walkingSecondsRoundingRule", "transferRadiusMeters", "deterministicSelectionPolicy", "schedule", "accessProvider"] as const;
-const PARTICIPANT_KEYS = ["id", "color", "origin", "status", "unavailableReason", "terminal", "segments"] as const;
-const TERMINAL_KEYS = ["boardingStopId", "totalSeconds", "arrivalAt"] as const;
-const STOP_KEYS = ["boardingStopId", "stationAreaId", "name"] as const;
+const MARKER_KEYS = ["stationAreaId", "name", "coordinate", "classification", "redArrivalSeconds", "blueArrivalSeconds", "fasterParticipant", "withinSelectedTolerance"] as const;
+const BASIS_KEYS = ["contractVersion", "searchStartAt", "selectedTolerancePercent", "changeTimeSeconds", "routingHorizonSeconds", "walkingVelocityMetersPerSecond", "walkingSecondsRoundingRule", "transferRadiusMeters", "deterministicSelectionPolicy", "schedule", "accessProvider"] as const;
+const PARTICIPANT_KEYS = ["id", "color", "origin", "status", "unavailableReason", "terminal"] as const;
+const TERMINAL_KEYS = ["totalSeconds", "arrivalAt"] as const;
 
 export function validateStationAreaDetailsResponse(
   input: unknown,
@@ -86,8 +80,6 @@ function validateMarker(value: Record<string, unknown>, path: Array<string | num
   if (!isCoordinate(value.coordinate)) issues.push(issue([...path, "coordinate"], "invalid_coordinate", "station-area coordinate is invalid."));
   else if (!isWithinOfficialMunichBoundary(value.coordinate)) issues.push(issue([...path, "coordinate"], "outside_official_munich_boundary", "station-area coordinate must be inside Munich."));
   if (isRecord(value.coordinate)) addUnknownKeys(value.coordinate, ["latitude", "longitude"], [...path, "coordinate"], issues);
-  if (!isNullableNonEmptyString(value.redBoardingStopId)) issues.push(issue([...path, "redBoardingStopId"], "invalid_value", "redBoardingStopId must be a string or null."));
-  if (!isNullableNonEmptyString(value.blueBoardingStopId)) issues.push(issue([...path, "blueBoardingStopId"], "invalid_value", "blueBoardingStopId must be a string or null."));
   if (!isClassification(value.classification)) issues.push(issue([...path, "classification"], "invalid_enum", "station-area classification is invalid."));
   if (!isNullableWholeSecond(value.redArrivalSeconds)) issues.push(issue([...path, "redArrivalSeconds"], "invalid_value", "redArrivalSeconds must be a whole second or null."));
   if (!isNullableWholeSecond(value.blueArrivalSeconds)) issues.push(issue([...path, "blueArrivalSeconds"], "invalid_value", "blueArrivalSeconds must be a whole second or null."));
@@ -98,10 +90,7 @@ function validateMarker(value: Record<string, unknown>, path: Array<string | num
 function validateMarkerInvariant(value: Record<string, unknown>, issues: ScheduledValidationIssue[]): void {
   const red = value.redArrivalSeconds;
   const blue = value.blueArrivalSeconds;
-  const redStop = value.redBoardingStopId;
-  const blueStop = value.blueBoardingStopId;
-  if (isWholeSecond(red) !== isNonEmptyString(redStop) || isWholeSecond(blue) !== isNonEmptyString(blueStop)) issues.push(issue(["stationArea"], "inconsistent", "Reachable marker arrivals must have matching selected boarding stops."));
-  if (value.classification === "unclassified" && (red !== null || blue !== null || redStop !== null || blueStop !== null || value.fasterParticipant !== null || value.withinSelectedTolerance !== false)) issues.push(issue(["stationArea"], "inconsistent", "Unclassified markers must have null arrivals/stops and false tolerance."));
+  if (value.classification === "unclassified" && (red !== null || blue !== null || value.fasterParticipant !== null || value.withinSelectedTolerance !== false)) issues.push(issue(["stationArea"], "inconsistent", "Unclassified markers must have null arrivals and false tolerance."));
   if (value.classification !== "unclassified" && red === null && blue === null) issues.push(issue(["stationArea"], "inconsistent", "Classified markers must expose a reachable arrival."));
 }
 
@@ -115,6 +104,7 @@ function validateBasisBindings(
   if (basis.contractVersion !== "meeet-meeting/v3") issues.push(issue(["basis", "contractVersion"], "invalid_value", "Detail basis must identify meeet-meeting/v3."));
   if (context.request !== undefined && basis.searchStartAt !== context.request.searchStartAt) issues.push(issue(["basis", "searchStartAt"], "inconsistent", "Detail basis start must match the v3 request."));
   if (context.request !== undefined && basis.selectedTolerancePercent !== context.request.tolerancePercent) issues.push(issue(["basis", "selectedTolerancePercent"], "inconsistent", "Detail basis tolerance must match the v3 request."));
+  if (context.request !== undefined && basis.changeTimeSeconds !== CHANGE_TIME_PRESETS[context.request.changeTimePreset]) issues.push(issue(["basis", "changeTimeSeconds"], "inconsistent", "Detail basis change time must match the v3 request preset."));
   if (basis.deterministicSelectionPolicy !== SCHEDULED_DETAIL_SELECTION_POLICY) issues.push(issue(["basis", "deterministicSelectionPolicy"], "invalid_value", "Detail selection policy is not canonical."));
   if (context.artifactIdentity !== undefined) {
     for (const field of ["feedId", "timeZone", "scheduleContentHash", "compiledArtifactId"] as const) {
@@ -133,10 +123,6 @@ function validateBasisBindings(
   if (input.status === "no-result" && marker.classification !== "unclassified") issues.push(issue(["stationArea"], "inconsistent", "No-result detail markers must be unclassified."));
 }
 
-function getMarkerBoardingStopId(marker: Record<string, unknown>, color: "red" | "blue"): unknown {
-  return color === "red" ? marker.redBoardingStopId : marker.blueBoardingStopId;
-}
-
 function getMarkerArrivalSeconds(marker: Record<string, unknown>, color: "red" | "blue"): unknown {
   return color === "red" ? marker.redArrivalSeconds : marker.blueArrivalSeconds;
 }
@@ -152,19 +138,16 @@ function validateParticipantBindings(
   participants.forEach((value, index) => {
     if (!isRecord(value)) return;
     const color = index === 0 ? "red" : "blue";
-    const selectedStop = getMarkerBoardingStopId(marker, color);
     const selectedTotal = getMarkerArrivalSeconds(marker, color);
-    const available = isNonEmptyString(selectedStop) && isWholeSecond(selectedTotal);
+    const available = isWholeSecond(selectedTotal);
     const participantPath = ["participants", index];
     const terminal = isRecord(value.terminal) ? value.terminal : undefined;
-    const segments = Array.isArray(value.segments) ? value.segments : undefined;
     if (available) {
       if (value.status !== "available") issues.push(issue([...participantPath, "status"], "inconsistent", "A reachable marker requires an available detail participant."));
       if (value.unavailableReason !== null) issues.push(issue([...participantPath, "unavailableReason"], "inconsistent", "Available detail participants must have a null unavailable reason."));
       if (terminal === undefined) {
         issues.push(issue([...participantPath, "terminal"], "invalid_type", "Available detail participants require a terminal."));
       } else {
-        if (terminal.boardingStopId !== selectedStop) issues.push(issue([...participantPath, "terminal", "boardingStopId"], "inconsistent", "Terminal boarding stop must exactly match the cached marker."));
         if (terminal.totalSeconds !== selectedTotal) issues.push(issue([...participantPath, "terminal", "totalSeconds"], "inconsistent", "Terminal total must exactly match the cached marker."));
         const expectedArrivalAt = context.request === undefined ? null : expectedArrival(context.request.searchStartAt, selectedTotal);
         if (typeof terminal.arrivalAt !== "string" || parseWholeInstant(terminal.arrivalAt) === null) {
@@ -172,8 +155,6 @@ function validateParticipantBindings(
         } else if (expectedArrivalAt !== null && terminal.arrivalAt !== expectedArrivalAt) {
           issues.push(issue([...participantPath, "terminal", "arrivalAt"], "inconsistent", "Terminal arrivalAt must equal searchStartAt plus marker totalSeconds."));
         }
-        if (segments === undefined) issues.push(issue([...participantPath, "segments"], "invalid_type", "Available detail participants require route segments."));
-        else validateSegments(segments, terminal, context, [...participantPath, "segments"], issues, color);
       }
     } else {
       if (value.status !== "unavailable") issues.push(issue([...participantPath, "status"], "inconsistent", "An unreachable marker requires an unavailable detail participant."));
@@ -183,134 +164,13 @@ function validateParticipantBindings(
         : marker.classification === "unclassified" ? "station-area-unclassified" : "station-area-unavailable-for-participant";
       if (value.unavailableReason !== expectedUnavailableReason) issues.push(issue([...participantPath, "unavailableReason"], "inconsistent", "Unavailable reason must match the cached detail status and marker."));
       if (terminal === undefined) issues.push(issue([...participantPath, "terminal"], "invalid_type", "Unavailable detail participants require a null terminal."));
-      else if (terminal.boardingStopId !== null || terminal.totalSeconds !== null || terminal.arrivalAt !== null) issues.push(issue([...participantPath, "terminal"], "inconsistent", "Unavailable detail participants must have null terminal fields."));
-      if (segments === undefined) issues.push(issue([...participantPath, "segments"], "invalid_type", "Unavailable detail participants require an empty segments array."));
-      else if (segments.length !== 0) issues.push(issue([...participantPath, "segments"], "inconsistent", "Unavailable detail participants must not invent route segments."));
+      else if (terminal.totalSeconds !== null || terminal.arrivalAt !== null) issues.push(issue([...participantPath, "terminal"], "inconsistent", "Unavailable detail participants must have null terminal fields."));
     }
     if (context.request !== undefined) {
       const expected = context.request.participants[index];
       if (expected !== undefined && (value.id !== expected.id || !sameOrigin(value.origin, expected.origin))) issues.push(issue(["participants", index], "inconsistent", "Detail participant identity must match the v3 request."));
     }
   });
-}
-
-function validateSegments(
-  value: unknown,
-  terminal: Record<string, unknown>,
-  context: StationAreaDetailsValidationContext,
-  path: Array<string | number>,
-  issues: ScheduledValidationIssue[],
-  color: "red" | "blue",
-): void {
-  if (!Array.isArray(value) || value.length > 1_024) {
-    issues.push(issue(path, "invalid_length", "Available detail routes must contain at most 1024 ordered segments."));
-    return;
-  }
-  if (value.length === 0) {
-    issues.push(issue(path, "invalid_length", "Available detail routes must expose at least one evidence segment."));
-    return;
-  }
-  const basisStart = context.request?.searchStartAt;
-  let previousEnd: number | null = basisStart === undefined ? null : parseWholeInstant(basisStart);
-  let total = 0;
-  for (const [index, segment] of value.entries()) {
-    const segmentPath = [...path, index];
-    if (!isRecord(segment)) {
-      issues.push(issue(segmentPath, "invalid_type", "Route segment must be an object."));
-      continue;
-    }
-    const start = parseSegmentTime(segment.startAt, [...segmentPath, "startAt"], issues);
-    const end = parseSegmentTime(segment.endAt, [...segmentPath, "endAt"], issues);
-    if (start !== null && end !== null) {
-      if (end < start || end - start !== segment.durationSeconds) issues.push(issue(segmentPath, "inconsistent", "Segment timestamps must equal its duration."));
-      if (previousEnd !== null && start !== previousEnd) issues.push(issue(segmentPath, "inconsistent", "Route segment timestamps must be contiguous."));
-      previousEnd = end;
-    }
-    if (!isWholeSecond(segment.durationSeconds)) issues.push(issue([...segmentPath, "durationSeconds"], "invalid_value", "Segment duration must be a non-negative whole second."));
-    else total += segment.durationSeconds;
-    validateSegment(segment, segmentPath, issues);
-  }
-  if (terminal.totalSeconds !== total) issues.push(issue(path, "inconsistent", "Ordered segment durations must sum to terminal totalSeconds."));
-  if (typeof terminal.arrivalAt === "string" && previousEnd !== null && parseWholeInstant(terminal.arrivalAt) !== previousEnd) issues.push(issue([...path.slice(0, -1), "terminal", "arrivalAt"], "inconsistent", "Route end must equal terminal arrivalAt."));
-  const finalSegment = value[value.length - 1];
-  for (let index = 0; index < value.length; index += 1) {
-    const segment = value[index];
-    if (!isRecord(segment) || segment.kind !== "identity-resolution" || segment.target !== "station-area") continue;
-    const next = value[index + 1];
-    if (!isRecord(next) || next.kind !== "walk" || next.purpose !== "station-area-access" || !isCoordinate(next.from) || !isCoordinate(segment.toCoordinate) || !sameCoordinate(next.from, segment.toCoordinate)) {
-      issues.push(issue([...path, index], "inconsistent", "Station-area identity resolution must precede its canonical station-area access segment."));
-    }
-  }
-  if (isRecord(finalSegment) && finalSegment.kind !== "transit" && finalSegment.kind !== "walk" && finalSegment.kind !== "identity-resolution") {
-    issues.push(issue([...path, value.length - 1, "kind"], "inconsistent", "A detail route must end with transit evidence or a geometric endpoint."));
-  }
-  if (isRecord(finalSegment) && (finalSegment.kind === "transit" || finalSegment.kind === "identity-resolution") && finalSegment.target !== "station-area" && isRecord(finalSegment.to) && typeof terminal.boardingStopId === "string" && finalSegment.to.boardingStopId !== terminal.boardingStopId) {
-    issues.push(issue([...path, value.length - 1, "to", "boardingStopId"], "inconsistent", "The final transit alight stop must equal the terminal boarding stop."));
-  }
-  const selectedBoardingStop = context.selectedBoardingStops?.[color];
-  if (isRecord(finalSegment) && selectedBoardingStop !== undefined) {
-    if ((finalSegment.kind === "transit" || finalSegment.kind === "identity-resolution") && finalSegment.target !== "station-area" && isRecord(finalSegment.to) && finalSegment.to.boardingStopId !== selectedBoardingStop.boardingStopId) {
-      issues.push(issue([...path, value.length - 1, "to", "boardingStopId"], "inconsistent", "The final transit alight stop must equal the selected terminal boarding stop."));
-    }
-    if (finalSegment.kind === "walk" && !sameCoordinate(finalSegment.to, selectedBoardingStop.coordinate)) {
-      issues.push(issue([...path, value.length - 1, "to"], "inconsistent", "The final geometric segment must end at the selected boarding stop coordinate."));
-    }
-  }
-}
-
-function validateSegment(value: Record<string, unknown>, path: Array<string | number>, issues: ScheduledValidationIssue[]): void {
-  if (value.kind === "walk") {
-    addUnknownKeys(value, ["kind", "purpose", "durationSeconds", "distanceMeters", "from", "to", "estimate", "startAt", "endAt"], path, issues);
-    if (value.purpose !== "origin-access" && value.purpose !== "station-area-access" && value.purpose !== "transfer") issues.push(issue([...path, "purpose"], "invalid_enum", "Walk purpose is invalid."));
-    if (typeof value.distanceMeters !== "number" || !Number.isFinite(value.distanceMeters) || value.distanceMeters < 0) issues.push(issue([...path, "distanceMeters"], "invalid_value", "Geometric walk distance must be finite and non-negative."));
-    if (!isCoordinate(value.from) || !isCoordinate(value.to)) issues.push(issue(path, "invalid_coordinate", "Geometric walks must expose both endpoints."));
-    if (isRecord(value.from)) addUnknownKeys(value.from, ["latitude", "longitude"], [...path, "from"], issues);
-    if (isRecord(value.to)) addUnknownKeys(value.to, ["latitude", "longitude"], [...path, "to"], issues);
-    if (isCoordinate(value.from) && isCoordinate(value.to) && typeof value.distanceMeters === "number" && Math.abs(value.distanceMeters - haversineDistanceMeters(value.from, value.to)) > 0.01) issues.push(issue([...path, "distanceMeters"], "inconsistent", "Geometric walk distance must match its endpoints."));
-    if (value.estimate !== "geometric-estimate-not-directions/v1") issues.push(issue([...path, "estimate"], "invalid_value", "Walks must be labelled geometric estimates, not directions."));
-  } else if (value.kind === "wait") {
-    addUnknownKeys(value, ["kind", "durationSeconds", "at", "startAt", "endAt"], path, issues);
-    validateStop(value.at, [...path, "at"], issues);
-  } else if (value.kind === "identity-resolution") {
-    addUnknownKeys(value, ["kind", "purpose", "durationSeconds", "startAt", "endAt", "source", "target", "from", "to", "toCoordinate"], path, issues);
-    if (value.purpose !== "station-access") issues.push(issue([...path, "purpose"], "invalid_value", "Identity resolution purpose is invalid."));
-    if (value.durationSeconds !== 0) issues.push(issue([...path, "durationSeconds"], "invalid_value", "Identity resolution must be zero-duration."));
-    if (value.source !== "mvg-nearby-to-mvv-gtfs-identity/v1") issues.push(issue([...path, "source"], "invalid_value", "Identity resolution source is invalid."));
-    if (value.target !== "station-area" && value.target !== "boarding-stop") issues.push(issue([...path, "target"], "invalid_value", "Identity resolution target is invalid."));
-    if (!isCoordinate(value.from)) issues.push(issue([...path, "from"], "invalid_coordinate", "Identity resolution must retain the resolved MVG coordinate."));
-    else addUnknownKeys(value.from, ["latitude", "longitude"], [...path, "from"], issues);
-    if (!isCoordinate(value.toCoordinate)) issues.push(issue([...path, "toCoordinate"], "invalid_coordinate", "Identity resolution must expose the artifact coordinate without claiming a walk."));
-    else addUnknownKeys(value.toCoordinate, ["latitude", "longitude"], [...path, "toCoordinate"], issues);
-    if (value.target === "station-area") validateStationAreaIdentity(value.to, [...path, "to"], issues);
-    else validateStop(value.to, [...path, "to"], issues);
-  } else if (value.kind === "transit") {
-    addUnknownKeys(value, ["kind", "durationSeconds", "startAt", "endAt", "source", "serviceDate", "serviceId", "tripId", "line", "headsign", "from", "to"], path, issues);
-    if (value.source !== "mvv-gtfs") issues.push(issue([...path, "source"], "invalid_value", "Transit evidence must identify MVV GTFS."));
-    if (!isNonEmptyString(value.serviceDate) || !isNonEmptyString(value.serviceId) || !isNonEmptyString(value.tripId) || !isNonEmptyString(value.headsign)) issues.push(issue(path, "invalid_value", "Transit evidence must expose service, trip, and headsign identities."));
-    if (!isNonEmptyString(value.line)) issues.push(issue([...path, "line"], "invalid_value", "Transit evidence must expose the scheduled line."));
-    validateStop(value.from, [...path, "from"], issues);
-    validateStop(value.to, [...path, "to"], issues);
-  } else {
-    issues.push(issue([...path, "kind"], "invalid_enum", "Route segment kind is invalid."));
-  }
-}
-
-function validateStop(value: unknown, path: Array<string | number>, issues: ScheduledValidationIssue[]): void {
-  if (!isRecord(value)) {
-    issues.push(issue(path, "invalid_type", "Route stop must be an object."));
-    return;
-  }
-  addUnknownKeys(value, STOP_KEYS, path, issues);
-  if (!isNonEmptyString(value.boardingStopId) || !isNonEmptyString(value.stationAreaId) || !isNonEmptyString(value.name)) issues.push(issue(path, "invalid_value", "Route stop identity is invalid."));
-}
-
-function validateStationAreaIdentity(value: unknown, path: Array<string | number>, issues: ScheduledValidationIssue[]): void {
-  if (!isRecord(value)) {
-    issues.push(issue(path, "invalid_type", "Station-area identity must be an object."));
-    return;
-  }
-  addUnknownKeys(value, ["stationAreaId", "name"], path, issues);
-  if (!isNonEmptyString(value.stationAreaId) || !isNonEmptyString(value.name)) issues.push(issue(path, "invalid_value", "Station-area identity is invalid."));
 }
 
 function validateParticipant(value: unknown, index: number, issues: ScheduledValidationIssue[]): void {
@@ -329,9 +189,8 @@ function validateParticipant(value: unknown, index: number, issues: ScheduledVal
   if (!isRecord(value.terminal)) issues.push(issue([...path, "terminal"], "invalid_type", "Detail terminal must be an object."));
   else {
     addUnknownKeys(value.terminal, TERMINAL_KEYS, [...path, "terminal"], issues);
-    if (!isNullableNonEmptyString(value.terminal.boardingStopId) || !isNullableWholeSecond(value.terminal.totalSeconds) || !isNullableString(value.terminal.arrivalAt)) issues.push(issue([...path, "terminal"], "invalid_value", "Detail terminal fields are invalid."));
+    if (!isNullableWholeSecond(value.terminal.totalSeconds) || !isNullableString(value.terminal.arrivalAt)) issues.push(issue([...path, "terminal"], "invalid_value", "Detail terminal fields are invalid."));
   }
-  if (!Array.isArray(value.segments)) issues.push(issue([...path, "segments"], "invalid_type", "Detail segments must be an array."));
 }
 
 function validateBasis(value: Record<string, unknown>, issues: ScheduledValidationIssue[], context: StationAreaDetailsValidationContext): void {
@@ -339,6 +198,7 @@ function validateBasis(value: Record<string, unknown>, issues: ScheduledValidati
   if (value.contractVersion !== "meeet-meeting/v3") issues.push(issue(["basis", "contractVersion"], "invalid_value", "Basis contractVersion must be meeet-meeting/v3."));
   if (typeof value.searchStartAt !== "string" || parseWholeInstant(value.searchStartAt) === null) issues.push(issue(["basis", "searchStartAt"], "invalid_datetime", "Basis searchStartAt must be a canonical whole-second instant."));
   if (!isSelectedTolerance(value.selectedTolerancePercent)) issues.push(issue(["basis", "selectedTolerancePercent"], "invalid_enum", "Basis selected tolerance is invalid."));
+  if (value.changeTimeSeconds !== 180 && value.changeTimeSeconds !== 300 && value.changeTimeSeconds !== 600) issues.push(issue(["basis", "changeTimeSeconds"], "invalid_enum", "Basis change time must be a supported preset."));
   if (value.routingHorizonSeconds !== 86_400 || typeof value.walkingVelocityMetersPerSecond !== "number" || !Number.isFinite(value.walkingVelocityMetersPerSecond) || value.walkingVelocityMetersPerSecond <= 0 || value.walkingSecondsRoundingRule !== WALKING_SECONDS_ROUNDING_RULE || typeof value.transferRadiusMeters !== "number" || !Number.isFinite(value.transferRadiusMeters) || value.transferRadiusMeters <= 0) issues.push(issue(["basis"], "invalid_value", "Basis routing options are invalid."));
   if (value.deterministicSelectionPolicy !== SCHEDULED_DETAIL_SELECTION_POLICY) issues.push(issue(["basis", "deterministicSelectionPolicy"], "invalid_value", "Basis selection policy is invalid."));
   if (!isRecord(value.schedule)) issues.push(issue(["basis", "schedule"], "invalid_type", "Basis schedule provenance is required."));
@@ -391,7 +251,7 @@ function deriveMarker(red: unknown, blue: unknown, tolerance: 5 | 10 | 15): { cl
 }
 
 function sameMarker(value: Record<string, unknown>, marker: ScheduledMeetingStationAreaDto): boolean {
-  return value.stationAreaId === marker.stationAreaId && value.name === marker.name && sameCoordinate(value.coordinate, marker.coordinate) && value.redBoardingStopId === marker.redBoardingStopId && value.blueBoardingStopId === marker.blueBoardingStopId && value.classification === marker.classification && value.redArrivalSeconds === marker.redArrivalSeconds && value.blueArrivalSeconds === marker.blueArrivalSeconds && value.fasterParticipant === marker.fasterParticipant && value.withinSelectedTolerance === marker.withinSelectedTolerance;
+  return value.stationAreaId === marker.stationAreaId && value.name === marker.name && sameCoordinate(value.coordinate, marker.coordinate) && value.classification === marker.classification && value.redArrivalSeconds === marker.redArrivalSeconds && value.blueArrivalSeconds === marker.blueArrivalSeconds && value.fasterParticipant === marker.fasterParticipant && value.withinSelectedTolerance === marker.withinSelectedTolerance;
 }
 
 function sameCoordinate(value: unknown, expected: { readonly latitude: number; readonly longitude: number }): boolean {
@@ -400,16 +260,6 @@ function sameCoordinate(value: unknown, expected: { readonly latitude: number; r
 
 function sameOrigin(value: unknown, expected: { readonly label: string; readonly latitude: number; readonly longitude: number }): boolean {
   return isRecord(value) && value.label === expected.label && value.latitude === expected.latitude && value.longitude === expected.longitude;
-}
-
-function parseSegmentTime(value: unknown, path: Array<string | number>, issues: ScheduledValidationIssue[]): number | null {
-  if (typeof value !== "string") {
-    issues.push(issue(path, "invalid_datetime", "Segment timestamp must be an ISO instant."));
-    return null;
-  }
-  const parsed = parseWholeInstant(value);
-  if (parsed === null) issues.push(issue(path, "invalid_datetime", "Segment timestamp must be canonical whole-second UTC."));
-  return parsed;
 }
 
 function parseWholeInstant(value: unknown): number | null {
@@ -438,7 +288,6 @@ function isWholeSecond(value: unknown): value is number { return typeof value ==
 function isNullableWholeSecond(value: unknown): boolean { return value === null || isWholeSecond(value); }
 function isNullableString(value: unknown): boolean { return value === null || typeof value === "string"; }
 function isNonEmptyString(value: unknown): value is string { return typeof value === "string" && value.trim() !== ""; }
-function isNullableNonEmptyString(value: unknown): boolean { return value === null || isNonEmptyString(value); }
 function isCoordinate(value: unknown): value is { readonly latitude: number; readonly longitude: number } { return isRecord(value) && typeof value.latitude === "number" && Number.isFinite(value.latitude) && value.latitude >= -90 && value.latitude <= 90 && typeof value.longitude === "number" && Number.isFinite(value.longitude) && value.longitude >= -180 && value.longitude <= 180; }
 function isRecord(value: unknown): value is Record<string, unknown> { return typeof value === "object" && value !== null && !Array.isArray(value); }
 function addUnknownKeys(value: Record<string, unknown>, allowed: readonly string[], path: Array<string | number>, issues: ScheduledValidationIssue[]): void { for (const key of Object.keys(value)) if (!allowed.includes(key)) issues.push(issue([...path, key], "unrecognized_key", "Unknown response field is not permitted.")); }

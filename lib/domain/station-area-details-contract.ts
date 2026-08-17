@@ -6,10 +6,6 @@ import type {
 } from "../validation/meeting-v3.ts";
 import type { GtfsAcquisitionRecord } from "./scheduled-routing/models.ts";
 import type { ProviderDescriptor } from "./types.ts";
-import type {
-  ScheduledSelectedRouteSegment,
-  ScheduledSelectedRouteStop,
-} from "./scheduled-routing/router.ts";
 
 export const STATION_AREA_DETAILS_CONTRACT_VERSION = "meeet-station-area-details/v1" as const;
 
@@ -23,6 +19,7 @@ export interface StationAreaDetailsBasisDto {
   readonly contractVersion: "meeet-meeting/v3";
   readonly searchStartAt: string;
   readonly selectedTolerancePercent: 5 | 10 | 15;
+  readonly changeTimeSeconds: number;
   readonly routingHorizonSeconds: 86_400;
   readonly walkingVelocityMetersPerSecond: number;
   readonly walkingSecondsRoundingRule: string;
@@ -47,11 +44,9 @@ export interface StationAreaDetailParticipantDto {
   readonly status: "available" | "unavailable";
   readonly unavailableReason: StationAreaDetailUnavailableReason | null;
   readonly terminal: {
-    readonly boardingStopId: string | null;
     readonly totalSeconds: number | null;
     readonly arrivalAt: string | null;
   };
-  readonly segments: readonly ScheduledSelectedRouteSegment[];
 }
 
 export interface StationAreaDetailsResponseDto {
@@ -62,5 +57,3 @@ export interface StationAreaDetailsResponseDto {
   readonly participants: readonly [StationAreaDetailParticipantDto, StationAreaDetailParticipantDto];
   readonly basis: StationAreaDetailsBasisDto;
 }
-
-export type StationAreaDetailsRouteStop = ScheduledSelectedRouteStop;

@@ -1,0 +1,139 @@
+name: Publish artifact compiler image
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_sha:
+        description: Full 40-character source commit SHA to compile and publish
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    name: Validate on Node 24
+    runs-on: ubuntu-latest
+    steps:
+      - name: Reject invalid source revision
+        run: |
+          if ! [[ "${{ inputs.source_sha }}" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::source_sha must be a full 40-character commit SHA; got '${{ inputs.source_sha }}'"
+            exit 1
+          fi
+
+      - name: Check out exact source revision
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ inputs.source_sha }}
+
+      - name: Verify checked-out revision
+        run: |
+          actual="$(git rev-parse HEAD)"
+          if [ "$actual" != "${{ inputs.source_sha }}" ]; then
+            echo "::error::checked out $actual, expected ${{ inputs.source_sha }}"
+            exit 1
+          fi
+
+      - name: Set up Node 24
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+        with:
+          node-version: 24.x
+          cache: npm
+      - name: Install dependencies
+        run: npm ci
+      - name: Run tests
+        run: npm test
+      - name: Typecheck
+        run: npx tsc --noEmit
+      - name: Lint
+        run: npm run lint
+
+  publish:
+    name: Publish compiler image
+    needs: validate
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+      attestations: write
+    steps:
+      - name: Check out exact source revision
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ inputs.source_sha }}
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@96fe6ef7f33517b61c61be40b68a1882f3264fb8
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c
+
+      - name: Normalize GHCR owner
+        id: image
+        env:
+          OWNER: ${{ github.repository_owner }}
+        run: |
+          owner="$(printf '%s' "$OWNER" | tr '[:upper:]' '[:lower:]')"
+          printf 'owner=%s\n' "$owner" >> "$GITHUB_OUTPUT"
+
+      - name: Log in to GHCR
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract compiler image metadata
+        id: meta_compiler
+        uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302
+        with:
+          images: ghcr.io/${{ steps.image.outputs.owner }}/meeet-artifact-compiler
+          tags: |
+            type=raw,value=sha-${{ inputs.source_sha }}
+          labels: |
+            org.opencontainers.image.revision=${{ inputs.source_sha }}
+
+      - name: Build and publish compiler
+        id: build_compiler
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a
+        with:
+          context: .
+          file: ./Dockerfile
+          target: artifact-compiler
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta_compiler.outputs.tags }}
+          labels: ${{ steps.meta_compiler.outputs.labels }}
+          build-args: |
+            NODE_IMAGE=node:24-bookworm-slim@sha256:3638d9a6fe4030bd716be989438248074489337ba3275657f93595428be4fc03
+          cache-from: type=gha,scope=meeet-compiler
+          cache-to: type=gha,mode=max,scope=meeet-compiler
+          # BuildKit publishes the SLSA provenance attestation and SBOM
+          # together with the immutable image.
+          provenance: mode=max
+          sbom: true
+
+      - name: Attest build provenance
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8
+        with:
+          subject-name: ghcr.io/${{ steps.image.outputs.owner }}/meeet-artifact-compiler
+          subject-digest: ${{ steps.build_compiler.outputs.digest }}
+          push-to-registry: true
+
+      - name: Emit compiler digest
+        env:
+          GHCR_OWNER: ${{ steps.image.outputs.owner }}
+          COMPILER_DIGEST: ${{ steps.build_compiler.outputs.digest }}
+        run: |
+          {
+            echo "### Manually published compiler image"
+            echo
+            echo 'Pair this digest with the runner revision in the operator-owned runtime .env:'
+            echo
+            echo '```dotenv'
+            echo "MEEET_COMPILER_IMAGE=ghcr.io/${GHCR_OWNER}/meeet-artifact-compiler@${COMPILER_DIGEST}"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
