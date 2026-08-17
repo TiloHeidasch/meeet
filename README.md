@@ -23,22 +23,47 @@ this repository, at:
 /boot/config/plugins/compose.manager/projects/meeet
 ```
 
-It has exactly `meeet` and `cloudflared` services. The external runtime `.env`
-contains `TUNNEL_TOKEN`, `MEEET_IMAGE`, and `MEEET_SCHEDULE_HOST_DIR`; the
-schedule directory is `/mnt/user/appdata/meeet/schedule`. There are no host
-ports or local `config.yml`. Cloudflared is
-`cloudflare/cloudflared:latest`, runs `tunnel run`, receives `TUNNEL_TOKEN`, and
-uses the Cloudflare dashboard service `http://meeet:3000`.
+It has three services: a one-shot `compiler`, `meeet`, and `cloudflared`. The
+external runtime `.env` contains `TUNNEL_TOKEN`, `MEEET_IMAGE`,
+`MEEET_COMPILER_IMAGE`, and `MEEET_SCHEDULE_HOST_DIR`; the schedule directory
+is `/mnt/user/appdata/meeet/schedule`. There are no host ports or local
+`config.yml`. Cloudflared is `cloudflare/cloudflared:latest`, runs
+`tunnel run`, receives `TUNNEL_TOKEN`, and uses the Cloudflare dashboard
+service `http://meeet:3000`.
 
-The operator selects the runner image tag or digest in the external `.env`. The
-runner and compiler GHCR packages must be public for unauthenticated host
-pulls, or the host may use a machine account with `read:packages`.
+The operator selects the runner image tag or digest and the compiler digest in
+the external `.env`. The runner and compiler GHCR packages must be public for
+unauthenticated host pulls, or the host may use a machine account with
+`read:packages`.
 
-The live Compose project does not run a compiler service. Rotate the MVV
-artifact manually with the published compiler image; download the official
-archive and write the manifest plus matching hash-named `.v8.bin` to
-`/mnt/user/appdata/meeet/schedule`, then restart `meeet`. The complete procedure
-is in [docs/application-deployment.md](docs/application-deployment.md).
+MVV artifact rotation is automatic at `meeet` startup: the one-shot `compiler`
+service fetches the latest MVV feed and compiles (or keeps) the artifact before
+`meeet` starts. The complete procedure is in
+[docs/application-deployment.md](docs/application-deployment.md).
+
+## Compiler image publication
+
+Routine pushes to `main` build and publish only the backend runner image
+(`publish-runner.yml`). The artifact compiler image is published only through a
+deliberate, authenticated GitHub Actions dispatch (`publish-compiler.yml`) —
+never by a branch push.
+
+Trigger a compiler rebuild only after a successful push that changes the
+compiler image target, compiler/import scripts, the GTFS/artifact model, or
+their locked dependencies. App-only changes do not trigger it.
+
+Dispatch after such a push:
+
+```bash
+gh workflow run publish-compiler.yml --ref <pushed-branch> -f source_sha=<full-commit-sha>
+```
+
+The dispatch validates the given revision, runs the validation suite, and
+publishes an immutable `sha-<full-sha>` compiler image with SBOM and
+provenance. It cannot deploy an application, rotate a schedule artifact, alter
+the operator-owned deployment, or retag a production image. Pair the emitted
+compiler digest with the runner revision in the operator-owned runtime `.env`
+to rotate the artifact.
 
 [`compose.production.yml`](compose.production.yml) remains a separate,
 checked-in hardened repository template. Its strict preflight, token-file
