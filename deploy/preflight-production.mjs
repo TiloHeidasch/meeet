@@ -33,6 +33,11 @@ for (const key of deploymentControlled) {
   if (!values.get(key)) error(`${key} is required in ${envFile}`);
 }
 
+const tunnelToken = values.get("TUNNEL_TOKEN");
+if (tunnelToken !== undefined && (tunnelToken === "" || /[\r\n\0]/.test(tunnelToken))) {
+  error("TUNNEL_TOKEN must be a nonempty value with no newline or NUL characters");
+}
+
 const ghcrOwner = "[a-z0-9](?:[a-z0-9-]*[a-z0-9])?";
 const digest = "[0-9a-f]{64}";
 const runnerImagePattern = new RegExp(`^ghcr\\.io/(${ghcrOwner})/meeet@sha256:${digest}$`);
@@ -47,21 +52,15 @@ if (runnerMatch && compilerMatch && runnerMatch[1] !== compilerMatch[1]) {
   error("MEEET_IMAGE and MEEET_COMPILER_IMAGE must use the same lowercase GHCR owner");
 }
 
-const cloudflaredImagePattern = /^cloudflare\/cloudflared:[A-Za-z0-9_][A-Za-z0-9_.-]*@sha256:[0-9a-f]{64}$/;
-if (values.get("CLOUDFLARED_IMAGE") && !cloudflaredImagePattern.test(values.get("CLOUDFLARED_IMAGE"))) {
-  error("CLOUDFLARED_IMAGE must be cloudflare/cloudflared:<tag>@sha256:<64 lowercase hex digits>");
-}
-
-for (const key of ["MEEET_SCHEDULE_HOST_DIR", "CLOUDFLARED_TOKEN_FILE"]) {
-  const value = values.get(key);
-  if (value && (!isAbsolute(value) || value.includes("\0"))) {
-    error(`${key} must be an absolute host path`);
-  }
+const scheduleHostDir = values.get("MEEET_SCHEDULE_HOST_DIR");
+if (scheduleHostDir && (!isAbsolute(scheduleHostDir) || scheduleHostDir.includes("\0"))) {
+  error("MEEET_SCHEDULE_HOST_DIR must be an absolute host path");
 }
 
 for (const key of values.keys()) {
+  if (key === "TUNNEL_TOKEN") continue;
   if (/(?:^|_)(?:TOKEN|SECRET|PASSWORD|CREDENTIALS?)$/.test(key)) {
-    error(`${key} is not allowed in the ordinary deployment environment; mount the tunnel token as a Compose secret`);
+    error(`${key} is not allowed in the ordinary deployment environment; only TUNNEL_TOKEN may carry a token`);
   }
 }
 

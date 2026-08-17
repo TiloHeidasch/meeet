@@ -9,9 +9,8 @@ import test from "node:test";
 const deploymentControlled = [
   "MEEET_IMAGE",
   "MEEET_COMPILER_IMAGE",
-  "CLOUDFLARED_IMAGE",
   "MEEET_SCHEDULE_HOST_DIR",
-  "CLOUDFLARED_TOKEN_FILE",
+  "TUNNEL_TOKEN",
 ];
 
 test("production preflight rejects exported Compose overrides without printing values", () => {
@@ -30,9 +29,8 @@ test("production preflight rejects exported Compose overrides without printing v
     [
       `MEEET_IMAGE=ghcr.io/example-owner/meeet@sha256:${"a".repeat(64)}`,
       `MEEET_COMPILER_IMAGE=ghcr.io/example-owner/meeet-artifact-compiler@sha256:${"c".repeat(64)}`,
-      `CLOUDFLARED_IMAGE=cloudflare/cloudflared:2026.1.1@sha256:${"b".repeat(64)}`,
       "MEEET_SCHEDULE_HOST_DIR=/srv/meeet/artifacts",
-      "CLOUDFLARED_TOKEN_FILE=/etc/meeet/secrets/cloudflare-tunnel-token",
+      "TUNNEL_TOKEN=0-abcdefghijklmnopqrstuvwxyz1234567890",
     ].join("\n"),
   );
 
@@ -61,9 +59,8 @@ test("production preflight rejects non-lowercase or non-GHCR app image refs", ()
     [
       "MEEET_IMAGE=ghcr.io/Example-Owner/meeet@sha256:" + "a".repeat(64),
       "MEEET_COMPILER_IMAGE=docker.io/example/meeet-artifact-compiler@sha256:" + "b".repeat(64),
-      "CLOUDFLARED_IMAGE=cloudflare/cloudflared:2026.1.1@sha256:" + "c".repeat(64),
       "MEEET_SCHEDULE_HOST_DIR=/srv/meeet/artifacts",
-      "CLOUDFLARED_TOKEN_FILE=/etc/meeet/secrets/cloudflare-tunnel-token",
+      "TUNNEL_TOKEN=0-abcdefghijklmnopqrstuvwxyz1234567890",
       "UNEXPECTED_SETTING=must-be-rejected",
     ].join("\n"),
   );
@@ -89,9 +86,8 @@ test("production preflight rejects swapped runner and compiler image identities"
     [
       "MEEET_IMAGE=ghcr.io/example-owner/meeet-artifact-compiler@sha256:" + "a".repeat(64),
       "MEEET_COMPILER_IMAGE=ghcr.io/example-owner/meeet@sha256:" + "b".repeat(64),
-      "CLOUDFLARED_IMAGE=cloudflare/cloudflared:2026.1.1@sha256:" + "c".repeat(64),
       "MEEET_SCHEDULE_HOST_DIR=/srv/meeet/artifacts",
-      "CLOUDFLARED_TOKEN_FILE=/etc/meeet/secrets/cloudflare-tunnel-token",
+      "TUNNEL_TOKEN=0-abcdefghijklmnopqrstuvwxyz1234567890",
     ].join("\n"),
   );
   try {
@@ -115,9 +111,8 @@ test("production preflight accepts exact GHCR refs without requiring BuildKit", 
     [
       "MEEET_IMAGE=ghcr.io/example-owner/meeet@sha256:" + "a".repeat(64),
       "MEEET_COMPILER_IMAGE=ghcr.io/example-owner/meeet-artifact-compiler@sha256:" + "b".repeat(64),
-      "CLOUDFLARED_IMAGE=cloudflare/cloudflared:2026.1.1@sha256:" + "c".repeat(64),
       "MEEET_SCHEDULE_HOST_DIR=/srv/meeet/artifacts",
-      "CLOUDFLARED_TOKEN_FILE=/etc/meeet/secrets/cloudflare-tunnel-token",
+      "TUNNEL_TOKEN=0-abcdefghijklmnopqrstuvwxyz1234567890",
     ].join("\n"),
   );
   writeFileSync(
@@ -145,6 +140,96 @@ test("production preflight accepts exact GHCR refs without requiring BuildKit", 
   }
 });
 
+test("production preflight accepts TUNNEL_TOKEN without treating it as an unsupported secret", () => {
+  const directory = mkdtempSync(join(tmpdir(), "meeet-preflight-"));
+  const envFile = join(directory, "production.env");
+  const docker = join(directory, "docker");
+  const script = fileURLToPath(new URL("../deploy/preflight-production.mjs", import.meta.url));
+  writeFileSync(
+    envFile,
+    [
+      "MEEET_IMAGE=ghcr.io/example-owner/meeet@sha256:" + "a".repeat(64),
+      "MEEET_COMPILER_IMAGE=ghcr.io/example-owner/meeet-artifact-compiler@sha256:" + "b".repeat(64),
+      "MEEET_SCHEDULE_HOST_DIR=/srv/meeet/artifacts",
+      "TUNNEL_TOKEN=0-abcdefghijklmnopqrstuvwxyz1234567890",
+    ].join("\n"),
+  );
+  writeFileSync(
+    docker,
+    "#!/bin/sh\nif [ \"$1\" = \"compose\" ]; then printf '2.33.0\\n'; elif [ \"$3\" = \"{{.Server.APIVersion}}\" ]; then printf '1.48\\n'; else printf '28.0.0\\n'; fi\n",
+  );
+  chmodSync(docker, 0o755);
+
+  try {
+    const environment: NodeJS.ProcessEnv = {
+      ...process.env,
+      PATH: `${directory}:${process.env.PATH ?? ""}`,
+      DOCKER_BUILDKIT: "0",
+      COMPOSE_DOCKER_CLI_BUILD: "0",
+    };
+    for (const key of deploymentControlled) delete environment[key];
+    const result = spawnSync(process.execPath, [script, envFile], {
+      encoding: "utf8",
+      env: environment,
+    });
+    assert.equal(result.status, 0, `${result.stdout ?? ""}\n${result.stderr ?? ""}`);
+    assert.match(result.stdout ?? "", /preflight passed/);
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("production preflight rejects foreign TOKEN keys and retired cloudflared keys", () => {
+  const directory = mkdtempSync(join(tmpdir(), "meeet-preflight-"));
+  const envFile = join(directory, "production.env");
+  const script = fileURLToPath(new URL("../deploy/preflight-production.mjs", import.meta.url));
+  writeFileSync(
+    envFile,
+    [
+      "MEEET_IMAGE=ghcr.io/example-owner/meeet@sha256:" + "a".repeat(64),
+      "MEEET_COMPILER_IMAGE=ghcr.io/example-owner/meeet-artifact-compiler@sha256:" + "b".repeat(64),
+      "MEEET_SCHEDULE_HOST_DIR=/srv/meeet/artifacts",
+      "TUNNEL_TOKEN=0-abcdefghijklmnopqrstuvwxyz1234567890",
+      "SOME_OTHER_TOKEN=secret",
+      "CLOUDFLARED_IMAGE=cloudflare/cloudflared:2026.1.1@sha256:" + "c".repeat(64),
+      "CLOUDFLARED_TOKEN_FILE=/etc/meeet/secrets/cloudflare-tunnel-token",
+    ].join("\n"),
+  );
+  try {
+    const result = spawnSync(process.execPath, [script, envFile], { encoding: "utf8" });
+    const output = `${result.stdout ?? ""}\n${result.stderr ?? ""}`;
+    assert.equal(result.status, 1);
+    assert.match(output, /SOME_OTHER_TOKEN is not allowed in the ordinary deployment environment/);
+    assert.match(output, /only TUNNEL_TOKEN may carry a token/);
+    assert.match(output, /unsupported deployment environment keys: SOME_OTHER_TOKEN, CLOUDFLARED_IMAGE, CLOUDFLARED_TOKEN_FILE/);
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("production preflight rejects a TUNNEL_TOKEN value with embedded newline or NUL characters", () => {
+  const directory = mkdtempSync(join(tmpdir(), "meeet-preflight-"));
+  const envFile = join(directory, "production.env");
+  const script = fileURLToPath(new URL("../deploy/preflight-production.mjs", import.meta.url));
+  writeFileSync(
+    envFile,
+    [
+      "MEEET_IMAGE=ghcr.io/example-owner/meeet@sha256:" + "a".repeat(64),
+      "MEEET_COMPILER_IMAGE=ghcr.io/example-owner/meeet-artifact-compiler@sha256:" + "b".repeat(64),
+      "MEEET_SCHEDULE_HOST_DIR=/srv/meeet/artifacts",
+      `TUNNEL_TOKEN=0-abc${"\0"}def`,
+    ].join("\n"),
+  );
+  try {
+    const result = spawnSync(process.execPath, [script, envFile], { encoding: "utf8" });
+    const output = `${result.stdout ?? ""}\n${result.stderr ?? ""}`;
+    assert.equal(result.status, 1);
+    assert.match(output, /TUNNEL_TOKEN must be a nonempty value with no newline or NUL characters/);
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
 test("compiler image helper reads the validated dotenv value without shell evaluation", () => {
   const directory = mkdtempSync(join(tmpdir(), "meeet-compiler-image-"));
   const envFile = join(directory, "production.env");
@@ -155,9 +240,8 @@ test("compiler image helper reads the validated dotenv value without shell evalu
     [
       `MEEET_IMAGE=ghcr.io/example-owner/meeet@sha256:${"a".repeat(64)}`,
       `MEEET_COMPILER_IMAGE=${compilerImage}`,
-      `CLOUDFLARED_IMAGE=cloudflare/cloudflared:2026.1.1@sha256:${"c".repeat(64)}`,
       "MEEET_SCHEDULE_HOST_DIR=/srv/meeet/artifacts",
-      "CLOUDFLARED_TOKEN_FILE=/etc/meeet/secrets/cloudflare-tunnel-token",
+      "TUNNEL_TOKEN=0-abcdefghijklmnopqrstuvwxyz1234567890",
     ].join("\n"),
   );
   try {
@@ -185,9 +269,8 @@ test("production preflight rejects old Engine and API versions", () => {
       [
         "MEEET_IMAGE=ghcr.io/example-owner/meeet@sha256:" + "a".repeat(64),
         "MEEET_COMPILER_IMAGE=ghcr.io/example-owner/meeet-artifact-compiler@sha256:" + "b".repeat(64),
-        "CLOUDFLARED_IMAGE=cloudflare/cloudflared:2026.1.1@sha256:" + "c".repeat(64),
         "MEEET_SCHEDULE_HOST_DIR=/srv/meeet/artifacts",
-        "CLOUDFLARED_TOKEN_FILE=/etc/meeet/secrets/cloudflare-tunnel-token",
+        "TUNNEL_TOKEN=0-abcdefghijklmnopqrstuvwxyz1234567890",
       ].join("\n"),
     );
     writeFileSync(
@@ -222,9 +305,8 @@ test("production image verification rejects tampered, swapped, and mixed revisio
     [
       "MEEET_IMAGE=ghcr.io/example-owner/meeet@sha256:" + "a".repeat(64),
       "MEEET_COMPILER_IMAGE=ghcr.io/example-owner/meeet-artifact-compiler@sha256:" + "b".repeat(64),
-      "CLOUDFLARED_IMAGE=cloudflare/cloudflared:2026.1.1@sha256:" + "c".repeat(64),
       "MEEET_SCHEDULE_HOST_DIR=/srv/meeet/artifacts",
-      "CLOUDFLARED_TOKEN_FILE=/etc/meeet/secrets/cloudflare-tunnel-token",
+      "TUNNEL_TOKEN=0-abcdefghijklmnopqrstuvwxyz1234567890",
     ].join("\n"),
   );
   writeFileSync(

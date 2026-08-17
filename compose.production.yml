@@ -1,54 +1,38 @@
 name: meeet-production
 
 services:
-  meeet:
-    image: ${MEEET_IMAGE:?MEEET_IMAGE must be a lowercase GHCR image reference pinned with @sha256}
-    restart: unless-stopped
-    init: true
-    read_only: true
-    security_opt:
-      - no-new-privileges:true
-    cap_drop:
-      - ALL
-    cpus: "2.0"
-    mem_limit: 4g
-    memswap_limit: 4g
-    pids_limit: 128
-    deploy:
-      replicas: 1
-      resources:
-        limits:
-          cpus: "2.0"
-          memory: 4G
-    tmpfs:
-      - /tmp:rw,noexec,nosuid,nodev,size=64m
-    environment:
-      NODE_ENV: production
-      HOSTNAME: 0.0.0.0
-      PORT: "3000"
-      NEXT_TELEMETRY_DISABLED: "1"
-      MEEET_PROVIDER_MODE: configured
-      MEEET_PROVIDER_DEPLOYMENT: managed
-      MEEET_PROVIDER_TIMEOUT_MS: "4000"
-      MEEET_PROVIDER_MAX_RESPONSE_BYTES: "524288"
-      MEEET_ALLOW_HTTP_PROVIDER_ENDPOINTS: "false"
-      MEEET_SCHEDULE_ARTIFACT_PATH: /opt/meeet/schedule/mvv-scheduled-artifact.json
-      MEEET_SCHEDULED_CONCURRENCY: "1"
-      MEEET_SCHEDULED_DEADLINE_MS: "90000"
-      MEEET_SCHEDULED_MIN_MEMORY_GIB: "4"
+  # One-shot schedule rotation: fetches the latest MVV feed and compiles the
+  # scheduled artifact when the mounted artifact is missing, stale, or built by
+  # a different compiler version; otherwise keeps the current artifact. It
+  # always exits 0, and meeet starts only after it completes successfully.
+  compiler:
+    image: ${MEEET_COMPILER_IMAGE}
+    restart: "no"
     volumes:
       - type: bind
-        source: ${MEEET_SCHEDULE_HOST_DIR:?MEEET_SCHEDULE_HOST_DIR must point to the host MVV artifact directory}
+        source: ${MEEET_SCHEDULE_HOST_DIR}
+        target: /output
+        bind:
+          create_host_path: false
+
+  meeet:
+    image: ${MEEET_IMAGE}
+    restart: unless-stopped
+    depends_on:
+      compiler:
+        condition: service_completed_successfully
+    volumes:
+      - type: bind
+        source: ${MEEET_SCHEDULE_HOST_DIR}
         target: /opt/meeet/schedule
         read_only: true
         bind:
           create_host_path: false
-    networks:
-      origin:
-        aliases:
-          - meeet
-      meeet-egress:
-        gw_priority: 1
+    environment:
+      NODE_ENV: production
+      MEEET_PROVIDER_MODE: configured
+      MEEET_PROVIDER_DEPLOYMENT: managed
+      MEEET_SCHEDULE_ARTIFACT_PATH: /opt/meeet/schedule/mvv-scheduled-artifact.json
     healthcheck:
       test:
         - CMD
@@ -60,49 +44,15 @@ services:
           .catch(() => process.exit(1))
       interval: 30s
       timeout: 10s
-      start_period: 180s
+      start_period: 60s
       retries: 5
 
   cloudflared:
-    image: ${CLOUDFLARED_IMAGE:?CLOUDFLARED_IMAGE must be a pinned digest-qualified cloudflared image}
-    user: "65532:65532"
+    image: cloudflare/cloudflared:latest
     restart: unless-stopped
-    init: true
-    read_only: true
-    security_opt:
-      - no-new-privileges:true
-    cap_drop:
-      - ALL
-    pids_limit: 64
-    tmpfs:
-      - /tmp:rw,noexec,nosuid,nodev,size=16m
-    command:
-      - tunnel
-      - --no-autoupdate
-      - run
-      - --token-file
-      - /run/secrets/cloudflare_tunnel_token
+    command: tunnel run
+    environment:
+      - TUNNEL_TOKEN=${TUNNEL_TOKEN}
     depends_on:
       meeet:
         condition: service_healthy
-    secrets:
-      - source: cloudflare_tunnel_token
-        target: cloudflare_tunnel_token
-    networks:
-      origin:
-        aliases:
-          - cloudflared
-      cloudflared-egress:
-        gw_priority: 1
-
-secrets:
-  cloudflare_tunnel_token:
-    file: ${CLOUDFLARED_TOKEN_FILE:?CLOUDFLARED_TOKEN_FILE must point to a host-side tunnel token file}
-
-networks:
-  # No internet route is available on this network. It is only the private
-  # origin link used by cloudflared to reach the app.
-  origin:
-    internal: true
-  meeet-egress: {}
-  cloudflared-egress: {}

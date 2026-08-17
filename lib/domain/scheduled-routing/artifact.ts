@@ -33,6 +33,7 @@ const OFFICIAL_MVV_ATTRIBUTION = "Münchner Verkehrs- und Tarifverbund GmbH (MVV
 const DEFAULT_CC_BY_4_LICENSE_URL = "https://creativecommons.org/licenses/by/4.0/";
 const MVV_ATTRIBUTION_POLICY_ID = "mvv-cc-by-4.0-fallback/v1" as const;
 const SCHEDULED_BUNDLE_CONTRACT_VERSION = "meeet-scheduled-routing-bundle/v1" as const;
+export const SCHEDULED_COMPILER_VERSION = "meeet-scheduled-compiler/v1" as const;
 const SCHEDULED_BUNDLE_ENCODING = "node-v8-structured-clone/1" as const;
 const MAX_BUNDLE_MANIFEST_BYTES = 1 * 1024 * 1024;
 const MAX_BUNDLE_PAYLOAD_BYTES = 1 * 1024 * 1024 * 1024;
@@ -57,7 +58,7 @@ interface ScheduledBundleSummary {
   readonly counts: ScheduledBundleCounts;
 }
 
-interface ScheduledBundleManifest {
+export interface ScheduledBundleManifest {
   readonly contractVersion: typeof SCHEDULED_BUNDLE_CONTRACT_VERSION;
   readonly encoding: typeof SCHEDULED_BUNDLE_ENCODING;
   readonly writerNodeMajor: number;
@@ -67,6 +68,8 @@ interface ScheduledBundleManifest {
   readonly compiledArtifactId: string;
   readonly summary: ScheduledBundleSummary;
   readonly provenance: ScheduledRoutingArtifact["provenance"];
+  /** Compiler identity that produced the bundle; absent in legacy artifacts. */
+  readonly compilerVersion?: string;
 }
 
 export interface CompileScheduledArtifactInput {
@@ -130,15 +133,19 @@ function defaultAcquisitionRetrievedAt(): string {
   return new Date(Math.trunc(Date.now() / 1_000) * 1_000).toISOString();
 }
 
-export async function fetchAndCompileScheduledArtifact(
-  input: Omit<CompileScheduledArtifactInput, "inputPath" | "rawArchiveBytes" | "feedFiles"> = {},
-  fetchImplementation: typeof fetch = fetch,
-): Promise<ScheduledRoutingArtifact> {
-  const sourceUrl = input.sourceUrl ?? SCHEDULED_MVV_FEED_URL;
-  if (sourceUrl !== SCHEDULED_MVV_FEED_URL) throw new ScheduleArtifactUnavailableError("The MVV compiler accepts only the canonical Gesamt-GTFS URL.");
-  const response = await fetchImplementation(sourceUrl, { redirect: "error" });
+type FetchCompileScheduledArtifactInput = Omit<CompileScheduledArtifactInput, "inputPath" | "rawArchiveBytes" | "feedFiles">;
+
+async function downloadScheduledMvvFeed(fetchImplementation: typeof fetch = fetch): Promise<Uint8Array> {
+  const response = await fetchImplementation(SCHEDULED_MVV_FEED_URL, { redirect: "error" });
   if (!response.ok) throw new ScheduleArtifactUnavailableError(`The MVV GTFS download returned HTTP ${response.status}.`);
-  const bytes = new Uint8Array(await response.arrayBuffer());
+  return new Uint8Array(await response.arrayBuffer());
+}
+
+function compileScheduledArtifactFromBytes(
+  input: Omit<FetchCompileScheduledArtifactInput, "sourceUrl">,
+  sourceUrl: string,
+  bytes: Uint8Array,
+): ScheduledRoutingArtifact {
   const temporaryDirectory = mkdtempSync(join(tmpdir(), "meeet-mvv-"));
   const archivePath = join(temporaryDirectory, "gesamt_gtfs.zip");
   writeFileSync(archivePath, bytes);
@@ -147,6 +154,16 @@ export async function fetchAndCompileScheduledArtifact(
   } finally {
     rmSync(temporaryDirectory, { recursive: true, force: true });
   }
+}
+
+export async function fetchAndCompileScheduledArtifact(
+  input: FetchCompileScheduledArtifactInput = {},
+  fetchImplementation: typeof fetch = fetch,
+): Promise<ScheduledRoutingArtifact> {
+  const sourceUrl = input.sourceUrl ?? SCHEDULED_MVV_FEED_URL;
+  if (sourceUrl !== SCHEDULED_MVV_FEED_URL) throw new ScheduleArtifactUnavailableError("The MVV compiler accepts only the canonical Gesamt-GTFS URL.");
+  const bytes = await downloadScheduledMvvFeed(fetchImplementation);
+  return compileScheduledArtifactFromBytes(input, sourceUrl, bytes);
 }
 
 export function writeScheduledArtifact(path: string, artifact: ScheduledRoutingArtifact): void {
@@ -171,6 +188,7 @@ export function writeScheduledArtifact(path: string, artifact: ScheduledRoutingA
     compiledArtifactId,
     summary: bundleSummary(core),
     provenance: artifact.provenance,
+    compilerVersion: SCHEDULED_COMPILER_VERSION,
   };
   const directory = dirname(absolutePath);
   const nonce = `${process.pid}-${Date.now()}-${Math.random().toString(16).slice(2)}`;
@@ -186,6 +204,115 @@ export function writeScheduledArtifact(path: string, artifact: ScheduledRoutingA
   } finally {
     rmSync(payloadTemporaryPath, { force: true });
     rmSync(manifestTemporaryPath, { force: true });
+  }
+}
+
+export function tryReadScheduledBundleManifest(path: string): ScheduledBundleManifest | null {
+  try {
+    return readBundleManifest(path);
+  } catch {
+    return null;
+  }
+}
+
+export type ScheduledRotationReason =
+  | "missing"
+  | "missing-payload"
+  | "compiler-version"
+  | "feed-out-of-date"
+  | "feed-changed"
+  | "fresh"
+  | "check-unavailable";
+
+export interface RotateScheduledArtifactInput {
+  readonly outputPath: string;
+  readonly sourceUrl?: string;
+  readonly now?: string;
+  readonly fetchImplementation?: typeof fetch;
+}
+
+export interface RotateScheduledArtifactResult {
+  readonly action: "compiled" | "kept";
+  readonly reason: ScheduledRotationReason;
+  readonly outputPath: string;
+}
+
+export async function rotateScheduledArtifact(input: RotateScheduledArtifactInput): Promise<RotateScheduledArtifactResult> {
+  if (!isAbsolute(input.outputPath)) throw new ScheduleArtifactUnavailableError("Scheduled artifact output path must be absolute.");
+  const outputPath = resolve(input.outputPath);
+  const sourceUrl = input.sourceUrl ?? SCHEDULED_MVV_FEED_URL;
+  if (sourceUrl !== SCHEDULED_MVV_FEED_URL) throw new ScheduleArtifactUnavailableError("The MVV compiler accepts only the canonical Gesamt-GTFS URL.");
+  const nowValue = input.now ?? defaultLoaderNow();
+  const fetchImplementation = input.fetchImplementation ?? fetch;
+
+  const manifest = tryReadScheduledBundleManifest(outputPath);
+  if (manifest === null) {
+    await downloadAndCompileScheduledArtifact(outputPath, sourceUrl, fetchImplementation);
+    return { action: "compiled", reason: "missing", outputPath };
+  }
+  const payloadPath = join(dirname(outputPath), manifest.payloadFile);
+  if (!isExistingPayloadFile(payloadPath)) {
+    await downloadAndCompileScheduledArtifact(outputPath, sourceUrl, fetchImplementation);
+    return { action: "compiled", reason: "missing-payload", outputPath };
+  }
+  if (manifest.compilerVersion !== SCHEDULED_COMPILER_VERSION) {
+    // A version mismatch means the current artifact cannot be trusted (a future
+    // artifact structure may be unreadable), so a failed recompile must fail the
+    // startup step instead of serving stale-version data.
+    await downloadAndCompileScheduledArtifact(outputPath, sourceUrl, fetchImplementation);
+    return { action: "compiled", reason: "compiler-version", outputPath };
+  }
+  if (isScheduledFeedValidityOutOfDate(manifest.provenance.acquisition, nowValue)) {
+    try {
+      await downloadAndCompileScheduledArtifact(outputPath, sourceUrl, fetchImplementation);
+    } catch {
+      return { action: "kept", reason: "check-unavailable", outputPath };
+    }
+    return { action: "compiled", reason: "feed-out-of-date", outputPath };
+  }
+  let bytes: Uint8Array;
+  try {
+    bytes = await downloadScheduledMvvFeed(fetchImplementation);
+  } catch {
+    return { action: "kept", reason: "check-unavailable", outputPath };
+  }
+  if (sha256Bytes(bytes) === manifest.provenance.acquisition.rawArchiveSha256) {
+    return { action: "kept", reason: "fresh", outputPath };
+  }
+  try {
+    compileAndWriteScheduledArtifact(outputPath, sourceUrl, bytes);
+  } catch {
+    return { action: "kept", reason: "check-unavailable", outputPath };
+  }
+  return { action: "compiled", reason: "feed-changed", outputPath };
+}
+
+async function downloadAndCompileScheduledArtifact(
+  outputPath: string,
+  sourceUrl: string,
+  fetchImplementation: typeof fetch,
+): Promise<void> {
+  const bytes = await downloadScheduledMvvFeed(fetchImplementation);
+  compileAndWriteScheduledArtifact(outputPath, sourceUrl, bytes);
+}
+
+function compileAndWriteScheduledArtifact(outputPath: string, sourceUrl: string, bytes: Uint8Array): void {
+  const temporaryDirectory = mkdtempSync(join(tmpdir(), "meeet-mvv-"));
+  const archivePath = join(temporaryDirectory, "gesamt_gtfs.zip");
+  writeFileSync(archivePath, bytes);
+  try {
+    const artifact = compileScheduledArtifact({ sourceUrl, inputPath: archivePath });
+    writeScheduledArtifact(outputPath, artifact);
+  } finally {
+    rmSync(temporaryDirectory, { recursive: true, force: true });
+  }
+}
+
+function isExistingPayloadFile(path: string): boolean {
+  try {
+    return statSync(path).isFile();
+  } catch {
+    return false;
   }
 }
 
@@ -258,7 +385,10 @@ function readBundleManifest(path: string): ScheduledBundleManifest {
 }
 
 function isBundleManifest(value: unknown): value is ScheduledBundleManifest {
-  if (!isRecord(value) || !hasExactKeys(value, ["contractVersion", "encoding", "writerNodeMajor", "payloadFile", "payloadByteLength", "payloadSha256", "compiledArtifactId", "summary", "provenance"])) return false;
+  if (!isRecord(value) ||
+    (!hasExactKeys(value, ["contractVersion", "encoding", "writerNodeMajor", "payloadFile", "payloadByteLength", "payloadSha256", "compiledArtifactId", "summary", "provenance", "compilerVersion"]) &&
+      !hasExactKeys(value, ["contractVersion", "encoding", "writerNodeMajor", "payloadFile", "payloadByteLength", "payloadSha256", "compiledArtifactId", "summary", "provenance"])) ||
+    (value.compilerVersion !== undefined && !isCompilerVersion(value.compilerVersion))) return false;
   const summary = value.summary;
   if (!isRecord(summary) || !hasExactKeys(summary, ["feedId", "timeZone", "serviceDateRange", "maximumServiceDayTimeSeconds", "searchStartBounds", "counts"])) return false;
   const counts = summary.counts;
@@ -276,6 +406,14 @@ function isBundleManifest(value: unknown): value is ScheduledBundleManifest {
 
 function isSafeBundlePayloadFile(value: unknown): value is string {
   return typeof value === "string" && value.length > 0 && value === basename(value) && value === value.trim() && !value.includes("\u0000") && !value.includes("/") && !value.includes("\\") && value.endsWith(".v8.bin");
+}
+
+function isCompilerVersion(value: unknown): value is string {
+  return typeof value === "string" && value.length > 0 && value.length <= 128 && value === value.trim() &&
+    [...value].every((character) => {
+      const code = character.codePointAt(0);
+      return code !== undefined && code >= 0x20 && code <= 0x7e;
+    });
 }
 
 function isStrictProvenance(value: unknown): value is ScheduledRoutingArtifact["provenance"] {
@@ -557,21 +695,37 @@ function parseCsv(value: string): string[][] {
   return rows;
 }
 
+function isScheduledFeedValidityOutOfDate(acquisition: GtfsAcquisitionRecord, nowValue: string): boolean {
+  let nowEpochSeconds: number;
+  try {
+    nowEpochSeconds = parseOffsetInstant(nowValue, "Europe/Berlin").epochSeconds;
+  } catch {
+    return true;
+  }
+  const localDate = berlinLocalDate(nowEpochSeconds);
+  return localDate < acquisition.feedValidFrom || localDate > acquisition.feedValidUntil;
+}
+
+function berlinLocalDate(nowEpochSeconds: number): string {
+  return new Intl.DateTimeFormat("en-CA", {
+    timeZone: "Europe/Berlin",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).format(new Date(nowEpochSeconds * 1_000));
+}
+
 function validateFreshness(acquisition: GtfsAcquisitionRecord, nowValue: string): void {
+  if (!isScheduledFeedValidityOutOfDate(acquisition, nowValue)) return;
   let nowEpochSeconds: number;
   try {
     nowEpochSeconds = parseOffsetInstant(nowValue, "Europe/Berlin").epochSeconds;
   } catch {
     throw new ScheduleArtifactUnavailableError("The configured scheduled artifact freshness check has an invalid clock instant.");
   }
-  const localDate = new Intl.DateTimeFormat("en-CA", {
-    timeZone: "Europe/Berlin",
-    year: "numeric",
-    month: "2-digit",
-    day: "2-digit",
-  }).format(new Date(nowEpochSeconds * 1_000));
+  const localDate = berlinLocalDate(nowEpochSeconds);
   if (localDate < acquisition.feedValidFrom) throw new ScheduleArtifactUnavailableError("The configured scheduled artifact feed validity has not started.");
-  if (localDate > acquisition.feedValidUntil) throw new ScheduleArtifactUnavailableError("The configured scheduled artifact feed validity has expired.");
+  throw new ScheduleArtifactUnavailableError("The configured scheduled artifact feed validity has expired.");
 }
 
 function isScheduledRoutingArtifact(value: unknown): value is ScheduledRoutingArtifact {

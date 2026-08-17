@@ -3,9 +3,8 @@ import { existsSync, readFileSync, statSync } from "node:fs";
 export const DEPLOYMENT_ENV_KEYS = Object.freeze([
   "MEEET_IMAGE",
   "MEEET_COMPILER_IMAGE",
-  "CLOUDFLARED_IMAGE",
   "MEEET_SCHEDULE_HOST_DIR",
-  "CLOUDFLARED_TOKEN_FILE",
+  "TUNNEL_TOKEN",
 ]);
 
 /**

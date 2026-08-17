@@ -66,9 +66,9 @@ npm run schedule:compile:mvv -- \
   --output /absolute/path/mvv-scheduled-artifact.json
 ```
 
-Production Unraid rotation is a manual one-off compiler run, not a runtime
-Compose service; use the [deployment procedure](docs/application-deployment.md)
-and restart the app after replacing the artifact pair.
+In the production Compose project, rotation is automatic: a one-shot compiler
+service fetches the latest MVV feed and compiles (or keeps) the artifact before
+`meeet` starts. See the [deployment procedure](docs/application-deployment.md).
 
 ## Validation
 

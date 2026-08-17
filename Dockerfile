@@ -20,8 +20,10 @@ COPY . .
 RUN npm run build
 
 # This target is intentionally based on deps (and therefore the same required
-# Node 24 image). Mount an MVV archive and an output directory when running it;
+# Node 24 image). By default the compiler fetches the latest MVV feed and
+# compiles or keeps the scheduled artifact at the mounted output directory;
 # the compiler writes the manifest last after atomically publishing its payload.
+# Offline rotation remains available by passing --input with a local MVV archive.
 FROM deps AS artifact-compiler
 WORKDIR /app
 RUN apt-get update \
@@ -32,7 +34,7 @@ COPY lib ./lib
 COPY tsconfig.json ./tsconfig.json
 ENV NODE_OPTIONS=--conditions=react-server
 ENTRYPOINT ["npm", "run", "schedule:compile:mvv", "--"]
-CMD ["--input", "/input/mvv-feed.zip", "--output", "/output/mvv-scheduled-artifact.json"]
+CMD ["--output", "/output/mvv-scheduled-artifact.json"]
 
 FROM base AS runner
 WORKDIR /app

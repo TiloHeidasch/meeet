@@ -4,23 +4,26 @@ import { dirname, isAbsolute, resolve } from "node:path";
 import {
   SCHEDULED_MVV_FEED_URL,
   compileScheduledArtifact,
-  fetchAndCompileScheduledArtifact,
+  rotateScheduledArtifact,
   writeScheduledArtifact,
 } from "../lib/domain/scheduled-routing/artifact.ts";
 
 async function main(): Promise<void> {
   const argumentsMap = parseArguments(process.argv.slice(2));
   if (argumentsMap.help) {
-    process.stdout.write("Usage: npm run schedule:compile:mvv -- [--input ABSOLUTE_ZIP] [--output ABSOLUTE_JSON] [--source-url CANONICAL_MVV_URL]\n");
+    process.stdout.write("Usage: npm run schedule:compile:mvv -- [--input ABSOLUTE_ZIP] [--output ABSOLUTE_JSON] [--source-url CANONICAL_MVV_URL]\nOffline compile with --input, or startup rotation without --input.\n");
     return;
   }
   const outputPath = resolve(argumentsMap.output ?? "data/scheduled/mvv-scheduled-artifact.json");
   if (!isAbsolute(outputPath)) throw new Error("The schedule compiler output path must be absolute.");
-  const artifact = argumentsMap.input === undefined
-    ? await fetchAndCompileScheduledArtifact({ sourceUrl: argumentsMap.sourceUrl })
-    : compileScheduledArtifact({ sourceUrl: argumentsMap.sourceUrl, inputPath: argumentsMap.input });
   mkdirSync(dirname(outputPath), { recursive: true });
-  writeScheduledArtifact(outputPath, artifact);
+  if (argumentsMap.input === undefined) {
+    const result = await rotateScheduledArtifact({ outputPath, sourceUrl: argumentsMap.sourceUrl });
+    process.stdout.write(`${result.action}:${result.reason}\n`);
+  } else {
+    const artifact = compileScheduledArtifact({ sourceUrl: argumentsMap.sourceUrl, inputPath: argumentsMap.input });
+    writeScheduledArtifact(outputPath, artifact);
+  }
   process.stdout.write(`${outputPath}\n`);
 }
 
@@ -43,7 +46,7 @@ function parseArguments(argumentsList: readonly string[]): { input?: string; out
       index += 1;
       continue;
     }
-    throw new Error("Usage: npm run schedule:compile:mvv -- [--input ABSOLUTE_ZIP] [--output ABSOLUTE_JSON] [--source-url CANONICAL_MVV_URL]");
+    throw new Error("Usage: npm run schedule:compile:mvv -- [--input ABSOLUTE_ZIP] [--output ABSOLUTE_JSON] [--source-url CANONICAL_MVV_URL]\nOffline compile with --input, or startup rotation without --input.");
   }
   return { input, output, sourceUrl, help };
 }
