@@ -284,6 +284,7 @@ test.describe("v3 Munich meeting surface", () => {
 
     // Clicking station marker hit target on canvas selects the station area and updates details
     const canvas = page.locator(".maplibregl-canvas");
+    await canvas.scrollIntoViewIfNeeded();
     const rect = await canvas.boundingBox();
     if (!rect) throw new Error("Map canvas was not painted");
     const point = await page.evaluate(() => {
