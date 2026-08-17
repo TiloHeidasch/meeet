@@ -22,6 +22,7 @@ const REQUEST = {
     { id: "blue", origin: { label: "Blue", latitude: 48.1400, longitude: 11.5700 }, mode: "transit" },
   ],
   tolerancePercent: 10,
+  changeTimePreset: "medium",
   searchStartAt: "2026-08-11T08:05:00+02:00",
 };
 

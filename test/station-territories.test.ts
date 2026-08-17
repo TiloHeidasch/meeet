@@ -32,8 +32,6 @@ const area = (
   stationAreaId,
   name: stationAreaId,
   coordinate: { longitude, latitude },
-  redBoardingStopId: null,
-  blueBoardingStopId: null,
   classification,
   redArrivalSeconds: null,
   blueArrivalSeconds: null,

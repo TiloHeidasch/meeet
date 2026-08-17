@@ -30,6 +30,7 @@ import { handleMeetingPost } from "../lib/domain/meeting-api.ts";
 import { fixtureProviders } from "../lib/fixtures/providers.ts";
 import type { MeetingProviders } from "../lib/domain/providers.ts";
 import { compareScheduledIds, importGtfsSchedule, type GtfsFeedFiles } from "../lib/domain/scheduled-routing/gtfs.ts";
+import type { ScheduledRoutingArtifact } from "../lib/domain/scheduled-routing/models.ts";
 import { buildScheduledStationAreaCatalog } from "../lib/domain/scheduled-routing/surface.ts";
 import { createMeetingProviders } from "../lib/providers/factory.ts";
 import { MVG_NEARBY_URL } from "../lib/providers/mvg-constants.ts";
@@ -43,6 +44,7 @@ const V3_REQUEST = {
     { id: "blue", origin: { label: "Origin blue", latitude: 48.1400, longitude: 11.5700 }, mode: "transit" },
   ],
   tolerancePercent: 10,
+  changeTimePreset: "medium",
   searchStartAt: "2026-08-11T08:05:00+02:00",
 };
 
@@ -209,6 +211,25 @@ test("compiler and loader retain raw acquisition provenance and reject malformed
   malformed.compiledArtifactId = "0".repeat(64);
   await writeFile(malformedPath, JSON.stringify(malformed), "utf8");
   assert.throws(() => loadScheduledArtifact(malformedPath, { now: "2026-08-11T12:00:00Z" }), ScheduleArtifactUnavailableError);
+  await rm(directory, { recursive: true, force: true });
+});
+
+test("station-area collapse is strict: old boarding-stop shapes are rejected at write and load", async () => {
+  const artifact = compileScheduledArtifact({
+    sourceUrl: SCHEDULED_MVV_FEED_URL,
+    rawArchiveBytes: new TextEncoder().encode("strict-shape-tamper"),
+    feedFiles: compilerFeedFiles(),
+    retrievedAt: "2026-08-11T10:00:00Z",
+  });
+  const oldShape = {
+    ...artifact,
+    boardingStops: [{ id: "fixture-a-stop", name: "Fixture A stop", coordinate: { latitude: 48.1374, longitude: 11.5755 }, stationAreaId: "fixture-a" }],
+    stationAreas: artifact.stationAreas.map((area) => ({ ...area, boardingStopIds: ["fixture-a-stop"], parentStationId: null })),
+    connections: artifact.connections.map((connection) => ({ ...connection, fromStopId: "fixture-a-stop", toStopId: "fixture-b-stop" })),
+  } as unknown as ScheduledRoutingArtifact;
+  const directory = await mkdtemp(join(tmpdir(), "meeet-old-shape-"));
+  const manifestPath = join(directory, "scheduled-bundle.json");
+  assert.throws(() => writeScheduledArtifact(manifestPath, oldShape), ScheduleArtifactUnavailableError);
   await rm(directory, { recursive: true, force: true });
 });
 
@@ -443,16 +464,15 @@ test("MVG scheduled access maps only exact artifact identities and never calls r
     fetchImplementation: async (input) => {
       calls.push(String(input));
       return Response.json({ stations: [
-        { globalId: "fixture-a-stop", latitude: 48.1374, longitude: 11.5755 },
+        { globalId: "fixture-a", latitude: 48.1374, longitude: 11.5755 },
         { globalId: "unknown-mvg-id", latitude: 48.1380, longitude: 11.5750 },
       ] });
     },
   });
   const seeds = await provider.resolveAccessSeeds({ origin: V3_REQUEST.participants[0].origin, schedule: FIXTURE_SCHEDULED_ARTIFACT });
   assert.equal(seeds.length, 1);
-  assert.equal(seeds[0]?.mvgStationId, "fixture-a-stop");
+  assert.equal(seeds[0]?.mvgStationId, "fixture-a");
   assert.equal(seeds[0]?.stationAreaId, "fixture-a");
-  assert.equal(seeds[0]?.boardingStopId, "fixture-a-stop");
   assert.equal(calls.length, 1);
   assert.equal(calls.some((url) => url.includes("/routes")), false);
 });
@@ -527,6 +547,8 @@ test("v3 validation is strict and scheduled orchestration emits only the v3 stat
   assert.equal(response.metadata.surface.classificationBasis, "representative-point");
   assert.equal(response.metadata.surface.representativePointBasis, "inside-clipped-cell/v1");
   assert.equal(response.metadata.surface.finalWalkingMethod, "geometric-station-walking-estimate-not-navigation");
+  assert.equal(response.metadata.surface.changeTimeSeconds, 300);
+  assert.equal(response.metadata.stationAreas.coverage, "official-munich-boundary-with-connected-artifact-station-areas/v1");
   assert.equal(validateScheduledMeetingResponse(response, parsed.data).success, true);
   assert.equal("fairLocations" in response, false);
   assert.equal(parseScheduledMeetingRequest({ ...V3_REQUEST, arrivalAt: V3_REQUEST.searchStartAt }).success, false);
@@ -542,15 +564,14 @@ test("scheduled meeting emits every eligible Munich station area with derived cl
     access: stationAreaMeetingAccessProvider(),
   });
   const byId = new Map(response.stationAreas.map((candidate) => [candidate.stationAreaId, candidate]));
-  assert.deepEqual([...byId.keys()], ["blue-area", "fair-area", "red-area", "unserved-area"]);
+  assert.deepEqual([...byId.keys()], ["blue-area", "disconnected-area", "fair-area", "outside-stop-area", "red-area", "unserved-area"]);
   assert.equal(byId.get("red-area")?.classification, "red");
-  assert.equal(byId.get("red-area")?.redBoardingStopId, "z-fast");
   assert.equal(byId.get("red-area")?.redArrivalSeconds, 0);
   assert.equal(byId.get("fair-area")?.classification, "fair");
   assert.equal(byId.get("blue-area")?.classification, "blue");
   assert.equal(byId.get("unserved-area")?.classification, "unclassified");
-  assert.equal(byId.get("disconnected-area"), undefined);
-  assert.equal(byId.get("outside-stop-area"), undefined);
+  assert.equal(byId.get("disconnected-area")?.classification, "unclassified");
+  assert.equal(byId.get("outside-stop-area")?.classification, "unclassified");
   assert.equal(byId.get("outside-area"), undefined);
   assert.equal(response.metadata.stationAreas.count, response.stationAreas.length);
   assert.equal(validateScheduledMeetingResponse(response, parsed.data).success, true);
@@ -573,16 +594,12 @@ test("scheduled meeting emits every eligible Munich station area with derived cl
   relocated.stationAreas[0]!.coordinate = { latitude: 48.2, longitude: 11.6 };
   assert.equal(validateScheduledMeetingResponse(relocated, parsed.data, { stationAreaCatalog: catalog }).success, false);
 
-  const nonMemberStop = mutableResponse(response);
-  nonMemberStop.stationAreas.find((candidate) => candidate.stationAreaId === "red-area")!.redBoardingStopId = "not-a-catalog-stop";
-  assert.equal(validateScheduledMeetingResponse(nonMemberStop, parsed.data, { stationAreaCatalog: catalog }).success, false);
-
   const noResult = await calculateScheduledMeeting(parsed.data, {
     artifact,
     access: stationAreaMeetingAccessProvider(true),
   });
   assert.equal(noResult.status, "no-result");
-  assert.ok(noResult.stationAreas.every((candidate) => candidate.classification === "unclassified" && candidate.redBoardingStopId === null && candidate.blueBoardingStopId === null));
+  assert.ok(noResult.stationAreas.every((candidate) => candidate.classification === "unclassified"));
   assert.equal(validateScheduledMeetingResponse(noResult, parsed.data, { stationAreaCatalog: catalog }).success, true);
 
   const classificationTamper = mutableResponse(response);
@@ -596,10 +613,6 @@ test("scheduled meeting emits every eligible Munich station area with derived cl
   const countTamper = mutableResponse(response);
   countTamper.metadata.stationAreas.count = response.stationAreas.length + 1;
   assert.equal(validateScheduledMeetingResponse(countTamper, parsed.data).success, false);
-
-  const boardingIdentityTamper = mutableResponse(response);
-  boardingIdentityTamper.stationAreas.find((candidate) => candidate.stationAreaId === "red-area")!.redBoardingStopId = null;
-  assert.equal(validateScheduledMeetingResponse(boardingIdentityTamper, parsed.data).success, false);
 });
 
 test("v3 response validation derives exact station-area classification and rejects arrival tampering", async () => {
@@ -700,15 +713,58 @@ test("v3 response validation binds surface search start and tolerance to the par
   assert.equal(validateScheduledMeetingResponse(toleranceTamper, parsed.data).success, false);
 });
 
-test("v3 response preserves optional exact boarding-stop identity and rejects blank IDs", async () => {
+test("v3 request requires a supported changeTimePreset and binds surface change time to it", async () => {
+  assert.equal(parseScheduledMeetingRequest({ ...V3_REQUEST, changeTimePreset: "quick" }).success, true);
+  assert.equal(parseScheduledMeetingRequest({ ...V3_REQUEST, changeTimePreset: "long" }).success, true);
+  const invalid = parseScheduledMeetingRequest({ ...V3_REQUEST, changeTimePreset: "instant" });
+  assert.equal(invalid.success, false);
+  if (!invalid.success) assert.deepEqual(invalid.issues[0]?.path, ["changeTimePreset"]);
+  const missing = parseScheduledMeetingRequest({ ...V3_REQUEST, changeTimePreset: undefined });
+  assert.equal(missing.success, false);
+
+  const parsed = parseScheduledMeetingRequest({ ...V3_REQUEST, changeTimePreset: "quick" });
+  assert.equal(parsed.success, true);
+  if (!parsed.success) return;
+  const response = await calculateScheduledMeeting(parsed.data, {
+    artifact: FIXTURE_SCHEDULED_ARTIFACT,
+    access: FIXTURE_SCHEDULED_ACCESS_PROVIDER,
+  });
+  assert.equal(response.metadata.surface.changeTimeSeconds, 180);
+  assert.equal(validateScheduledMeetingResponse(response, parsed.data).success, true);
+
+  const changeTimeTamper = mutableResponse(response);
+  changeTimeTamper.metadata.surface.changeTimeSeconds = 600;
+  assert.equal(validateScheduledMeetingResponse(changeTimeTamper, parsed.data).success, false);
+
+  const unsupportedChangeTime = mutableResponse(response);
+  unsupportedChangeTime.metadata.surface.changeTimeSeconds = 240;
+  assert.equal(validateScheduledMeetingResponse(unsupportedChangeTime, parsed.data).success, false);
+});
+
+test("v3 response uses the station-area coverage contract and rejects the retired boarding-stop shape", async () => {
+  const parsed = parseScheduledMeetingRequest(V3_REQUEST);
+  assert.equal(parsed.success, true);
+  if (!parsed.success) return;
+  const response = await validScheduledResponse();
+  assert.equal(response.metadata.stationAreas.coverage, "official-munich-boundary-with-connected-artifact-station-areas/v1");
+  assert.equal(validateScheduledMeetingResponse(response, parsed.data).success, true);
+
+  const legacyCoverage = mutableResponse(response);
+  legacyCoverage.metadata.stationAreas.coverage = "official-munich-boundary-with-connected-artifact-boarding-stops/v1";
+  assert.equal(validateScheduledMeetingResponse(legacyCoverage, parsed.data).success, false);
+
+  const legacyMarker = mutableResponse(response);
+  legacyMarker.stationAreas[0]!.redBoardingStopId = "fixture-a-stop";
+  assert.equal(validateScheduledMeetingResponse(legacyMarker, parsed.data).success, false);
+});
+
+test("v3 response rejects retired boarding-stop identity on access seeds", async () => {
   const parsed = parseScheduledMeetingRequest(V3_REQUEST);
   assert.equal(parsed.success, true);
   if (!parsed.success) return;
   const response = await validScheduledResponse();
   const mutable = mutableResponse(response);
-  mutable.participants[0]!.accessSeeds[0]!.boardingStopId = "fixture-a-stop";
-  assert.equal(validateScheduledMeetingResponse(mutable, parsed.data).success, true);
-  mutable.participants[0]!.accessSeeds[0]!.boardingStopId = "";
+  (mutable.participants[0]!.accessSeeds[0] as Record<string, unknown>).boardingStopId = "fixture-a-stop";
   assert.equal(validateScheduledMeetingResponse(mutable, parsed.data).success, false);
 });
 

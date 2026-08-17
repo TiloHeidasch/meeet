@@ -102,8 +102,6 @@ export interface ScheduledAccessSeedCandidate {
   readonly seedId: string;
   readonly mvgStationId: string;
   readonly stationAreaId: string;
-  /** Exact GTFS boarding-stop identity when MVG nearby returned a boarding stop. */
-  readonly boardingStopId?: string;
   readonly coordinate: LocationCoordinate;
   readonly accessSeconds: number;
   readonly provenance: ScheduledAccessSeedProvenance;

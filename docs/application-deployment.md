@@ -146,7 +146,7 @@ The decision path is:
    current artifact.
 3. Exit 0 either way.
 
-The compiler embeds a version (`meeet-scheduled-compiler/v1`) that is written
+The compiler embeds a version (`meeet-scheduled-compiler/v2`) that is written
 into the artifact manifest. An artifact carrying a different or missing compiler
 version is recompiled even when the underlying data is unchanged, which keeps
 rotation robust across artifact-structure changes.
