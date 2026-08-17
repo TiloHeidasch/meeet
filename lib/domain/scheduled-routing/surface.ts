@@ -97,7 +97,7 @@ export function calculateScheduledSurface(input: ScheduledSurfaceInput): Schedul
 /** Alias that names the result by its later API-facing purpose. */
 export const calculateScheduledFairnessSurface = calculateScheduledSurface;
 
-function createParticipantSurface(
+export function createParticipantSurface(
   participantId: string,
   schedule: ScheduledRoutingArtifact,
   route: ReturnType<typeof routeScheduledEarliestArrivals> | null | undefined,
@@ -121,7 +121,7 @@ export function buildScheduledStationAreaCatalog(
   return deepFreeze({ entries });
 }
 
-function createStationAreaCandidates(
+export function createStationAreaCandidates(
   catalog: ScheduledStationAreaCatalog,
   redArrivals: readonly StationArrivalField[],
   blueArrivals: readonly StationArrivalField[],
@@ -169,6 +169,59 @@ function createStationAreaCandidates(
       blue?.elapsedSeconds ?? null,
       tolerancePercent,
     ));
+  }
+  return candidates;
+}
+
+export async function evaluateScheduledStationAreaCandidates(
+  catalog: ScheduledStationAreaCatalog,
+  redArrivals: readonly StationArrivalField[],
+  blueArrivals: readonly StationArrivalField[],
+  noResult: boolean,
+  tolerancePercent: 5 | 10 | 15,
+  deadlineCheck?: ScheduledDeadlineCheck,
+  onCandidate?: (candidate: ScheduledStationAreaCandidate) => void | Promise<void>,
+): Promise<ScheduledStationAreaCandidate[]> {
+  const redByArea = new Map<string, StationArrivalField>();
+  for (let index = 0; index < redArrivals.length; index += 1) {
+    if (index % STATION_AREA_CHECKPOINT === 0) deadlineCheck?.("surface-cells");
+    const arrival = redArrivals[index];
+    if (arrival !== undefined) redByArea.set(arrival.stationAreaId, arrival);
+  }
+  const blueByArea = new Map<string, StationArrivalField>();
+  for (let index = 0; index < blueArrivals.length; index += 1) {
+    if (index % STATION_AREA_CHECKPOINT === 0) deadlineCheck?.("surface-cells");
+    const arrival = blueArrivals[index];
+    if (arrival !== undefined) blueByArea.set(arrival.stationAreaId, arrival);
+  }
+  const candidates: ScheduledStationAreaCandidate[] = [];
+  for (let index = 0; index < catalog.entries.length; index += 1) {
+    if (index % STATION_AREA_CHECKPOINT === 0) deadlineCheck?.("surface-cells");
+    const area = catalog.entries[index];
+    if (area === undefined) continue;
+    const red = redByArea.get(area.stationAreaId);
+    const blue = blueByArea.get(area.stationAreaId);
+    const candidate: ScheduledStationAreaCandidate = noResult
+      ? {
+          stationAreaId: area.stationAreaId,
+          name: area.name,
+          coordinate: area.coordinate,
+          classification: "unclassified",
+          redArrivalSeconds: null,
+          blueArrivalSeconds: null,
+          fasterParticipant: null,
+          withinSelectedTolerance: false,
+        }
+      : classifyStationArea(
+          area.stationAreaId,
+          area.name,
+          area.coordinate,
+          red?.elapsedSeconds ?? null,
+          blue?.elapsedSeconds ?? null,
+          tolerancePercent,
+        );
+    candidates.push(candidate);
+    await onCandidate?.(candidate);
   }
   return candidates;
 }

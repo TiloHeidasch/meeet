@@ -1,5 +1,7 @@
 import { expect, test, type Page } from "@playwright/test";
 import { inflateSync } from "node:zlib";
+import http from "node:http";
+import type net from "node:net";
 
 const MAP_STYLE = "https://tiles.openfreemap.org/styles/liberty";
 const MAP_ORIGIN = "https://tiles.openfreemap.org";
@@ -37,10 +39,49 @@ function detailsFixture(request: { contractVersion: "meeet-meeting/v3"; particip
   return { contractVersion: "meeet-station-area-details/v1", status: "ok", reason: null, stationArea: area, participants, basis: { contractVersion: "meeet-meeting/v3", searchStartAt: request.searchStartAt, selectedTolerancePercent: request.tolerancePercent, routingHorizonSeconds: 86400, walkingVelocityMetersPerSecond: 1.4, walkingSecondsRoundingRule: "ceil(distanceMetres / velocityMetresPerSecond), with zero distance taking zero seconds", transferRadiusMeters: 100, changeTimeSeconds: PRESET_SECONDS[request.changeTimePreset], deterministicSelectionPolicy: "earliest-arrival/canonical-scan-first/v1", schedule, accessProvider: fixture.metadata.accessProvider } };
 }
 
-const PROGRESS_PHASES = ["access-seeds", "scheduled-routing", "station-area-evaluation", "validating-result"] as const;
 const ERROR_STREAM_FRAME = 'event: error\ndata: {"code":"PROVIDER_UNAVAILABLE","message":"scheduled service is temporarily unavailable."}\n\n';
-function progressStreamFrames(): string { return PROGRESS_PHASES.map((phase) => `event: progress\ndata: ${JSON.stringify({ contractVersion: "meeet-calculation-progress/v1", phase })}\n\n`).join(""); }
-function okStreamBody(request: Parameters<typeof v3Fixture>[0], outcome: "ok" | "no-access-seeds" = "ok"): string { return `${progressStreamFrames()}event: ref\ndata: {"calculationRef":"fixture-calculation-ref"}\n\nevent: result\ndata: ${JSON.stringify(v3Fixture(request, outcome))}\n\n`; }
+
+async function createStreamingTestServer(
+  handler: (req: http.IncomingMessage, res: http.ServerResponse) => void,
+): Promise<{ url: string; close: () => Promise<void> }> {
+  const server = http.createServer(handler);
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", () => resolve()));
+  const port = (server.address() as net.AddressInfo).port;
+  return {
+    url: `http://127.0.0.1:${port}/stream`,
+    close: () => new Promise<void>((resolve) => server.close(() => resolve())),
+  };
+}
+
+function sseFrame(event: string, data: unknown): string {
+  return `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`;
+}
+
+function progressFrame(phase: string): string {
+  return sseFrame("progress", { contractVersion: "meeet-calculation-progress/v1", phase });
+}
+
+function verdictFrame(area: { stationAreaId: string; name: string; coordinate: { latitude: number; longitude: number }; classification: string }): string {
+  return sseFrame("station-verdict", {
+    contractVersion: "meeet-calculation-progress/v1",
+    stationAreaId: area.stationAreaId,
+    name: area.name,
+    coordinate: area.coordinate,
+    verdict: area.classification,
+  });
+}
+
+function progressStreamFrames(request?: Parameters<typeof v3Fixture>[0], outcome: "ok" | "no-access-seeds" = "ok"): string {
+  const p1 = progressFrame("access-seeds");
+  const p2 = progressFrame("scheduled-routing");
+  const p3 = progressFrame("station-area-evaluation");
+  const verdicts = request
+    ? v3Fixture(request, outcome).stationAreas.map(verdictFrame).join("")
+    : "";
+  const p4 = progressFrame("validating-result");
+  return `${p1}${p2}${p3}${verdicts}${p4}`;
+}
+function okStreamBody(request: Parameters<typeof v3Fixture>[0], outcome: "ok" | "no-access-seeds" = "ok"): string { return `${progressStreamFrames(request, outcome)}event: ref\ndata: {"calculationRef":"fixture-calculation-ref"}\n\nevent: result\ndata: ${JSON.stringify(v3Fixture(request, outcome))}\n\n`; }
 
 async function setup(page: Page, outcome: "ok" | "no-access-seeds" | "error" = "ok", failMapStyle = false, mockStyle = true, streamDelayMs = 0) {
   if (mockStyle) await page.route(MAP_STYLE, (route) => failMapStyle ? route.fulfill({ status: 503, body: "fixture style unavailable" }) : route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ version: 8, sources: { fixtureCartography: { type: "geojson", data: { type: "FeatureCollection", features: [{ type: "Feature", geometry: { type: "LineString", coordinates: [[11.54, 48.12], [11.63, 48.145]] }, properties: {} }] } } }, layers: [{ id: "background", type: "background" }, { id: "fixture-road", type: "line", source: "fixtureCartography", paint: { "line-color": "#526057", "line-width": 2 } }] }) }));
@@ -146,7 +187,7 @@ test.describe("v3 Munich meeting surface", () => {
     const awayAfter = await project(11.63, 48.145); await page.mouse.move(rectAfter.x + awayAfter.x, rectAfter.y + awayAfter.y); await expect(tooltip).toHaveCount(0);
   });
   test("shows truthful progress phases while calculating", async ({ page }) => {
-    await setup(page, "ok", false, true, 500);
+    await setup(page, "ok", false, true, 800);
     await openPlanner(page); await selectOrigin(page, 0, "Marienplatz"); await selectOrigin(page, 1, "Ostbahnhof");
     await page.getByRole("button", { name: "Show meeting surface" }).click();
     const progress = page.locator('[data-testid="calculation-progress"]');
@@ -196,7 +237,7 @@ test.describe("v3 Munich meeting surface", () => {
   });
   test("reduced motion keeps the progress panel truthful", async ({ page }) => {
     await page.emulateMedia({ reducedMotion: "reduce" });
-    await setup(page, "ok", false, true, 300);
+    await setup(page, "ok", false, true, 800);
     await openPlanner(page); await selectOrigin(page, 0, "Marienplatz"); await selectOrigin(page, 1, "Ostbahnhof");
     await page.getByRole("button", { name: "Show meeting surface" }).click();
     await expect(page.locator('[data-testid="calculation-progress"]')).toBeVisible();
@@ -298,5 +339,136 @@ test.describe("v3 Munich meeting surface", () => {
     const fairArea = page.locator('[data-station-area-id="area-fair"]');
     await expect(fairArea).toHaveAttribute("aria-pressed", "true");
     await expect(page.locator(".station-detail-panel")).toContainText("Fair area");
+  });
+
+  test("discards progressive verdicts and shows error on terminal stream error", async ({ page }) => {
+    await setup(page);
+    await openPlanner(page);
+    await selectOrigin(page, 0, "Marienplatz");
+    await selectOrigin(page, 1, "Ostbahnhof");
+    await page.unroute("**/api/meeting/calculate/stream");
+    await page.route("**/api/meeting/calculate/stream", async (route) => {
+      const requestData = route.request().postDataJSON();
+      const body = `${progressStreamFrames(requestData)}${ERROR_STREAM_FRAME}`;
+      await route.fulfill({ status: 200, contentType: "text/event-stream", body });
+    });
+    await page.getByRole("button", { name: "Show meeting surface" }).click();
+    await expect(page.locator(".form-message[role='alert']")).toContainText("scheduled service is temporarily unavailable");
+    await expect(page.locator(".map-frame")).toHaveAttribute("data-station-area-count", "0");
+    await expect(page.getByText("Surface ready", { exact: true })).toHaveCount(0);
+  });
+
+  test("discards progressive verdicts on cancel after markers are received", async ({ page }) => {
+    let serverClosed = false;
+    const server = await createStreamingTestServer((req, res) => {
+      res.writeHead(200, {
+        "Content-Type": "text/event-stream",
+        "Cache-Control": "no-cache",
+        "Connection": "keep-alive",
+      });
+      res.write(progressFrame("access-seeds"));
+      res.write(progressFrame("scheduled-routing"));
+      res.write(progressFrame("station-area-evaluation"));
+      res.write(verdictFrame({ stationAreaId: "area-red", name: "Red area", coordinate: { latitude: 48.132, longitude: 11.555 }, classification: "red" }));
+      res.write(verdictFrame({ stationAreaId: "area-fair", name: "Fair area", coordinate: { latitude: 48.132, longitude: 11.585 }, classification: "fair" }));
+      req.on("close", () => {
+        serverClosed = true;
+      });
+    });
+
+    try {
+      await setup(page);
+      await openPlanner(page);
+      await selectOrigin(page, 0, "Marienplatz");
+      await selectOrigin(page, 1, "Ostbahnhof");
+      await page.unroute("**/api/meeting/calculate/stream");
+      await page.route("**/api/meeting/calculate/stream", async (route) => {
+        await route.continue({ url: server.url });
+      });
+      await page.getByRole("button", { name: "Show meeting surface" }).click();
+      await expect(page.locator(".map-frame")).toHaveAttribute("data-station-area-count", "2");
+      await expect(page.locator(".map-frame")).toHaveAttribute("data-territory-feature-count", "0");
+      await expect(page.getByText("Surface ready", { exact: true })).toHaveCount(0);
+      await expect(page.getByTestId("cancel-calculation")).toBeVisible();
+      await page.getByTestId("cancel-calculation").click();
+      await expect(page.locator(".map-frame")).toHaveAttribute("data-station-area-count", "0");
+      await expect(page.locator('[data-testid="calculation-progress"]')).toHaveCount(0);
+      await expect(page.getByText("Surface ready", { exact: true })).toHaveCount(0);
+      await expect.poll(() => serverClosed).toBe(true);
+    } finally {
+      await server.close();
+    }
+  });
+
+  test("progressively renders markers and reconciles conflicting verdicts with terminal result", async ({ page }) => {
+    let deliverTerminalResult: () => void;
+    const terminalGate = new Promise<void>((resolve) => { deliverTerminalResult = resolve; });
+    const server = await createStreamingTestServer((req, res) => {
+      res.writeHead(200, {
+        "Content-Type": "text/event-stream",
+        "Cache-Control": "no-cache",
+        "Connection": "keep-alive",
+      });
+      res.write(progressFrame("access-seeds"));
+      res.write(progressFrame("scheduled-routing"));
+      res.write(progressFrame("station-area-evaluation"));
+      // Stream area-red initially as unclassified (a placeholder/conflicting verdict)
+      res.write(verdictFrame({ stationAreaId: "area-red", name: "Red area", coordinate: { latitude: 48.132, longitude: 11.555 }, classification: "unclassified" }));
+      res.write(verdictFrame({ stationAreaId: "area-fair", name: "Fair area", coordinate: { latitude: 48.132, longitude: 11.585 }, classification: "fair" }));
+      let reqBody = "";
+      req.on("data", (chunk) => { reqBody += chunk; });
+      req.on("end", () => {
+        void terminalGate.then(() => {
+          let requestData: Parameters<typeof v3Fixture>[0];
+          try {
+            requestData = JSON.parse(reqBody);
+          } catch {
+            requestData = {
+              contractVersion: "meeet-meeting/v3",
+              participants: [
+                { id: "participant-1", mode: "transit", origin: LOCATIONS.Marienplatz },
+                { id: "participant-2", mode: "transit", origin: LOCATIONS.Ostbahnhof },
+              ],
+              tolerancePercent: 10,
+              changeTimePreset: "medium",
+              searchStartAt: new Date().toISOString(),
+            };
+          }
+          // The authoritative fixture result overrides area-red to "red"
+          const fixture = v3Fixture(requestData);
+          res.write(verdictFrame({ stationAreaId: "area-blue", name: "Blue area", coordinate: { latitude: 48.132, longitude: 11.615 }, classification: "blue" }));
+          res.write(verdictFrame({ stationAreaId: "area-unclassified", name: "Unclassified area", coordinate: { latitude: 48.14, longitude: 11.59 }, classification: "unclassified" }));
+          res.write(progressFrame("validating-result"));
+          res.write(sseFrame("ref", { calculationRef: "fixture-calculation-ref" }));
+          res.write(sseFrame("result", fixture));
+          res.end();
+        });
+      });
+    });
+
+    try {
+      await setup(page);
+      await openPlanner(page);
+      await selectOrigin(page, 0, "Marienplatz");
+      await selectOrigin(page, 1, "Ostbahnhof");
+      await page.unroute("**/api/meeting/calculate/stream");
+      await page.route("**/api/meeting/calculate/stream", async (route) => {
+        await route.continue({ url: server.url });
+      });
+      await page.getByRole("button", { name: "Show meeting surface" }).click();
+      await expect(page.locator(".map-frame")).toHaveAttribute("data-station-area-count", "2");
+      await expect(page.locator(".map-frame")).toHaveAttribute("data-territory-feature-count", "0");
+      await expect(page.getByText("Surface ready", { exact: true })).toHaveCount(0);
+      deliverTerminalResult!();
+      await expect(page.getByText("Surface ready", { exact: true })).toBeVisible();
+      await expect(page.locator(".map-frame")).toHaveAttribute("data-station-area-count", "4");
+      await expect(page.locator(".map-frame")).toHaveAttribute("data-territory-feature-count", "3");
+      // The station area index in the DOM reconciles with authoritative "red" classification
+      const redAreaButton = page.locator('[data-station-area-id="area-red"]');
+      await expect(redAreaButton).toHaveAttribute("data-station-area-classification", "red");
+      await expect(redAreaButton).toContainText("Red territory");
+    } finally {
+      await server.close();
+    }
   });
 });

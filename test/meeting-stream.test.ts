@@ -71,7 +71,7 @@ function parseSseFrames(body: string): SseFrame[] {
   return frames;
 }
 
-test("phases are emitted in order with the progress contract version", async () => {
+test("phases and station verdicts are emitted in order with the progress contract version", async () => {
   const response = await handleMeetingStreamPost(streamRequest(), PROVIDERS, { admission: new ScheduledCalculationAdmission() });
   assert.equal(response.status, 200);
   assert.equal(response.headers.get("content-type"), "text/event-stream");
@@ -87,8 +87,62 @@ test("phases are emitted in order with the progress contract version", async () 
   for (const frame of progress) {
     assert.equal(JSON.parse(frame.data ?? "{}").contractVersion, "meeet-calculation-progress/v1");
   }
+  const verdicts = frames.filter((frame) => frame.event === "station-verdict");
+  assert.equal(verdicts.length, 3);
+  for (const frame of verdicts) {
+    const data = JSON.parse(frame.data ?? "{}");
+    assert.equal(data.contractVersion, "meeet-calculation-progress/v1");
+    assert.ok(typeof data.stationAreaId === "string" && data.stationAreaId.length > 0);
+    assert.ok(typeof data.name === "string" && data.name.length > 0);
+    assert.ok(typeof data.coordinate?.latitude === "number");
+    assert.ok(typeof data.coordinate?.longitude === "number");
+    assert.ok(["red", "blue", "fair", "unclassified"].includes(data.verdict));
+  }
+  const stationAreaIds = verdicts.map((v) => JSON.parse(v.data ?? "{}").stationAreaId);
+  assert.equal(new Set(stationAreaIds).size, stationAreaIds.length);
+
   const events = frames.filter((frame) => frame.event !== undefined).map((frame) => frame.event);
-  assert.deepEqual(events, ["progress", "progress", "progress", "progress", "ref", "result"]);
+  assert.deepEqual(events, [
+    "progress",
+    "progress",
+    "progress",
+    "station-verdict",
+    "station-verdict",
+    "station-verdict",
+    "progress",
+    "ref",
+    "result",
+  ]);
+
+  const resultFrame = frames.find((frame) => frame.event === "result");
+  const result = JSON.parse(resultFrame?.data ?? "{}");
+  assert.equal(result.stationAreas.length, verdicts.length);
+  for (let index = 0; index < result.stationAreas.length; index++) {
+    const verdictData = JSON.parse(verdicts[index]!.data ?? "{}");
+    const resultArea = result.stationAreas[index]!;
+    assert.equal(verdictData.stationAreaId, resultArea.stationAreaId);
+    assert.equal(verdictData.name, resultArea.name);
+    assert.deepEqual(verdictData.coordinate, resultArea.coordinate);
+    assert.equal(verdictData.verdict, resultArea.classification);
+  }
+});
+
+test("finality: verdicts are emitted strictly after station-area-evaluation phase and before validating-result", async () => {
+  const response = await handleMeetingStreamPost(streamRequest(), PROVIDERS, { admission: new ScheduledCalculationAdmission() });
+  const body = await response.text();
+  const frames = parseSseFrames(body);
+  const events = frames.map((f) => f.event ?? (f.comment ? ":comment" : "unknown"));
+  const stationAreaEvalIndex = events.findIndex((e, idx) => e === "progress" && JSON.parse(frames[idx]!.data ?? "{}").phase === "station-area-evaluation");
+  const validatingResultIndex = events.findIndex((e, idx) => e === "progress" && JSON.parse(frames[idx]!.data ?? "{}").phase === "validating-result");
+  assert.ok(stationAreaEvalIndex !== -1);
+  assert.ok(validatingResultIndex !== -1);
+  assert.ok(stationAreaEvalIndex < validatingResultIndex);
+  const verdictIndices = events.map((e, idx) => e === "station-verdict" ? idx : -1).filter((idx) => idx !== -1);
+  assert.ok(verdictIndices.length > 0);
+  for (const idx of verdictIndices) {
+    assert.ok(idx > stationAreaEvalIndex, "verdict must be emitted after station-area-evaluation phase");
+    assert.ok(idx < validatingResultIndex, "verdict must be emitted before validating-result phase");
+  }
 });
 
 test("terminal result event deep-equals the JSON endpoint response for the same request", async () => {
@@ -117,7 +171,7 @@ test("terminal result event deep-equals the JSON endpoint response for the same 
   assert.deepEqual(streamResult, jsonBody);
 });
 
-test("no-result request streams a terminal result event with status no-result", async () => {
+test("no-result request streams a terminal result event with status no-result and unclassified verdicts", async () => {
   const noSeeds: MeetingProviders = {
     ...PROVIDERS,
     scheduledAccess: { ...FIXTURE_SCHEDULED_ACCESS_PROVIDER, resolveAccessSeeds: async () => [] },
@@ -125,6 +179,13 @@ test("no-result request streams a terminal result event with status no-result", 
   const response = await handleMeetingStreamPost(streamRequest(), noSeeds, { admission: new ScheduledCalculationAdmission() });
   const body = await response.text();
   const frames = parseSseFrames(body);
+  const verdicts = frames.filter((frame) => frame.event === "station-verdict");
+  assert.equal(verdicts.length, 3);
+  for (const frame of verdicts) {
+    const data = JSON.parse(frame.data ?? "{}");
+    assert.equal(data.contractVersion, "meeet-calculation-progress/v1");
+    assert.equal(data.verdict, "unclassified");
+  }
   const resultFrame = frames.find((frame) => frame.event === "result");
   assert.ok(resultFrame?.data);
   const result = JSON.parse(resultFrame.data);

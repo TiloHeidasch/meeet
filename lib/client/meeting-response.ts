@@ -40,7 +40,7 @@ const instant = (value: unknown): value is string => typeof value === "string" &
 const coordinate = (value: unknown): value is { latitude: number; longitude: number } => object(value) && typeof value.latitude === "number" && Number.isFinite(value.latitude) && value.latitude >= -90 && value.latitude <= 90 && typeof value.longitude === "number" && Number.isFinite(value.longitude) && value.longitude >= -180 && value.longitude <= 180;
 type BoundaryGeometry = { readonly type: "MultiPolygon"; readonly coordinates: readonly (readonly (readonly (readonly [number, number])[])[])[] };
 const officialBoundary = boundaryAsset as unknown as { readonly features: readonly { readonly geometry: BoundaryGeometry }[] };
-const insideOfficialMunichBoundary = (value: unknown): boolean => coordinate(value) && officialBoundary.features.some(({ geometry }) => geometry.coordinates.some((polygon) => polygon.length > 0 && ringRelation(value, polygon[0] as unknown[]) !== -1 && polygon.slice(1).every((hole) => ringRelation(value, hole as unknown[]) === -1)));
+export const insideOfficialMunichBoundary = (value: unknown): boolean => coordinate(value) && officialBoundary.features.some(({ geometry }) => geometry.coordinates.some((polygon) => polygon.length > 0 && ringRelation(value, polygon[0] as unknown[]) !== -1 && polygon.slice(1).every((hole) => ringRelation(value, hole as unknown[]) === -1)));
 
 function ringRelation(point: { latitude: number; longitude: number }, ring: unknown[]): -1 | 0 | 1 {
   let inside = false;
