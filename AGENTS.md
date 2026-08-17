@@ -42,18 +42,3 @@
 - The documented Unraid production profile is operator-owned and distinct from
   the tracked Compose template; do not overwrite it or infer host-specific
   resource limits.
-
-## Compiler publication
-
-- The artifact compiler image is published only by a deliberate, authenticated
-  GitHub Actions dispatch, never by a branch push. Routine pushes build and
-  publish only the backend runner.
-- Trigger a compiler rebuild only after a successful push that changes the
-  compiler image target, compiler/import scripts, the GTFS/artifact model, or
-  their locked dependencies. App-only changes do not trigger it.
-- Dispatch after such a push:
-  `gh workflow run publish-compiler.yml --ref <pushed-branch> -f source_sha=<full-commit-sha>`
-- The dispatch validates the given revision, runs the validation suite, and
-  publishes an immutable `sha-<full-sha>` compiler image with SBOM and
-  provenance. It cannot deploy an application, rotate a schedule artifact,
-  alter the operator-owned deployment, or retag a production image.

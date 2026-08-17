@@ -1,4 +1,4 @@
-name: Publish runner image
+name: Publish GHCR images
 
 on:
   push:
@@ -33,7 +33,7 @@ jobs:
         run: npm run lint
 
   publish:
-    name: Publish runner image
+    name: Publish runner and compiler images
     needs: validate
     runs-on: ubuntu-latest
     permissions:
@@ -92,17 +92,46 @@ jobs:
           # BuildKit publishes the SLSA provenance attestation with the image.
           provenance: mode=max
 
-      - name: Write digest-pinned deployment reference
+      - name: Extract compiler image metadata
+        id: meta_compiler
+        uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302
+        with:
+          images: ghcr.io/${{ steps.image.outputs.owner }}/meeet-artifact-compiler
+          tags: |
+            type=sha,format=long,prefix=sha-
+            type=ref,event=branch
+            type=ref,event=tag
+
+      - name: Build and publish compiler
+        id: build_compiler
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a
+        with:
+          context: .
+          file: ./Dockerfile
+          target: artifact-compiler
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta_compiler.outputs.tags }}
+          labels: ${{ steps.meta_compiler.outputs.labels }}
+          build-args: |
+            NODE_IMAGE=node:24-bookworm-slim@sha256:3638d9a6fe4030bd716be989438248074489337ba3275657f93595428be4fc03
+          cache-from: type=gha,scope=meeet-compiler
+          cache-to: type=gha,mode=max,scope=meeet-compiler
+          provenance: mode=max
+
+      - name: Write digest-pinned deployment references
         env:
           GHCR_OWNER: ${{ steps.image.outputs.owner }}
           RUNNER_DIGEST: ${{ steps.build_runner.outputs.digest }}
+          COMPILER_DIGEST: ${{ steps.build_compiler.outputs.digest }}
         run: |
           {
-            echo "### Digest-pinned deployment reference"
+            echo "### Digest-pinned deployment references"
             echo
-            echo 'Use this immutable reference in the operator-owned Unraid .env; branch and release tags are publication conveniences only.'
+            echo 'Use these immutable references in the operator-owned runtime .env; branch and release tags are publication conveniences only.'
             echo
             echo '```dotenv'
             echo "MEEET_IMAGE=ghcr.io/${GHCR_OWNER}/meeet@${RUNNER_DIGEST}"
+            echo "MEEET_COMPILER_IMAGE=ghcr.io/${GHCR_OWNER}/meeet-artifact-compiler@${COMPILER_DIGEST}"
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
