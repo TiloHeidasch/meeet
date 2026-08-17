@@ -2,10 +2,14 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  CALCULATION_PROGRESS_CONTRACT_VERSION,
   CalculationStreamError,
   readCalculationStream,
 } from "../lib/client/calculation-stream.ts";
-import type { CalculationStreamEvent } from "../lib/client/calculation-stream.ts";
+import type {
+  CalculationStreamEvent,
+  StationVerdict,
+} from "../lib/client/calculation-stream.ts";
 
 const encoder = new TextEncoder();
 
@@ -37,13 +41,17 @@ const collect = async (response: Response, signal?: AbortSignal): Promise<Calcul
   return events;
 };
 
-const progress = (phase: string) => `event: progress\ndata: ${JSON.stringify({ contractVersion: "meeet-calculation-progress/v1", phase })}\n\n`;
+const progress = (phase: string) => `event: progress\ndata: ${JSON.stringify({ contractVersion: CALCULATION_PROGRESS_CONTRACT_VERSION, phase })}\n\n`;
+const verdict = (stationAreaId: string, name: string, coordinate: { latitude: number; longitude: number }, verdictValue: StationVerdict["verdict"]) =>
+  `event: station-verdict\ndata: ${JSON.stringify({ contractVersion: CALCULATION_PROGRESS_CONTRACT_VERSION, stationAreaId, name, coordinate, verdict: verdictValue })}\n\n`;
 
-test("reads a full progress → ref → result sequence in order", async () => {
+test("reads a full progress → station-verdict → ref → result sequence in order", async () => {
   const body = [
     progress("access-seeds"),
     progress("scheduled-routing"),
     progress("station-area-evaluation"),
+    verdict("area-1", "Area 1", { latitude: 48.13, longitude: 11.58 }, "fair"),
+    verdict("area-2", "Area 2", { latitude: 48.14, longitude: 11.56 }, "red"),
     progress("validating-result"),
     'event: ref\ndata: {"calculationRef":"calc-1"}\n\n',
     'event: result\ndata: {"status":"ok"}\n\n',
@@ -53,6 +61,8 @@ test("reads a full progress → ref → result sequence in order", async () => {
     { kind: "progress", phase: "access-seeds" },
     { kind: "progress", phase: "scheduled-routing" },
     { kind: "progress", phase: "station-area-evaluation" },
+    { kind: "station-verdict", verdict: { stationAreaId: "area-1", name: "Area 1", coordinate: { latitude: 48.13, longitude: 11.58 }, verdict: "fair" } },
+    { kind: "station-verdict", verdict: { stationAreaId: "area-2", name: "Area 2", coordinate: { latitude: 48.14, longitude: 11.56 }, verdict: "red" } },
     { kind: "progress", phase: "validating-result" },
     { kind: "ref", calculationRef: "calc-1" },
     { kind: "result", result: { status: "ok" } },
@@ -103,6 +113,36 @@ test("ignores unknown progress phases", async () => {
   const body = progress("future-phase") + progress("access-seeds");
   const events = await collect(streamResponse([body]));
   assert.deepEqual(events, [{ kind: "progress", phase: "access-seeds" }]);
+});
+
+test("throws on a station-verdict event with a wrong contract version", async () => {
+  const body = 'event: station-verdict\ndata: {"contractVersion":"meeet-calculation-progress/v2","stationAreaId":"area-1","name":"Area 1","coordinate":{"latitude":48.13,"longitude":11.58},"verdict":"fair"}\n\n';
+  await assert.rejects(collect(streamResponse([body])), (err) => err instanceof CalculationStreamError && err.message === "Unsupported calculation progress contract version.");
+});
+
+test("throws on a station-verdict event with coordinates outside the official Munich boundary", async () => {
+  const outsideCoordinates = [
+    // Latitude 49 is north of Munich
+    verdict("area-outside-1", "Outside 1", { latitude: 49.0, longitude: 11.58 }, "fair"),
+    // Longitude 11.7 is east of Munich
+    verdict("area-outside-2", "Outside 2", { latitude: 48.2, longitude: 11.7 }, "red"),
+  ];
+  for (const frame of outsideCoordinates) {
+    await assert.rejects(collect(streamResponse([frame])), (err) => err instanceof CalculationStreamError && err.message === "Invalid station-verdict event in calculation stream.");
+  }
+});
+
+test("throws on a station-verdict event with invalid or missing fields", async () => {
+  const invalidFields = [
+    'event: station-verdict\ndata: {"contractVersion":"meeet-calculation-progress/v1","stationAreaId":"","name":"Area 1","coordinate":{"latitude":48.13,"longitude":11.58},"verdict":"fair"}\n\n',
+    'event: station-verdict\ndata: {"contractVersion":"meeet-calculation-progress/v1","stationAreaId":"area-1","name":"","coordinate":{"latitude":48.13,"longitude":11.58},"verdict":"fair"}\n\n',
+    'event: station-verdict\ndata: {"contractVersion":"meeet-calculation-progress/v1","stationAreaId":"area-1","name":"Area 1","coordinate":{"latitude":"invalid","longitude":11.58},"verdict":"fair"}\n\n',
+    'event: station-verdict\ndata: {"contractVersion":"meeet-calculation-progress/v1","stationAreaId":"area-1","name":"Area 1","coordinate":{"latitude":48.13,"longitude":11.58},"verdict":"invalid-verdict"}\n\n',
+    'event: station-verdict\ndata: {"contractVersion":"meeet-calculation-progress/v1","stationAreaId":"area-1","name":"Area 1"}\n\n',
+  ];
+  for (const body of invalidFields) {
+    await assert.rejects(collect(streamResponse([body])), CalculationStreamError);
+  }
 });
 
 test("throws on a progress event with a wrong contract version", async () => {

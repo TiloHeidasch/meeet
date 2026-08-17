@@ -1,3 +1,4 @@
+import { CALCULATION_PROGRESS_CONTRACT_VERSION } from "./calculation-progress-contract.ts";
 import { ProviderNotConfiguredError, ProviderUnavailableError, type MeetingProviders } from "./providers.ts";
 import type { ScheduledValidationIssue } from "../validation/meeting-v3.ts";
 import {
@@ -305,7 +306,16 @@ export async function handleMeetingStreamPost(
       }
       const hooks: ScheduledMeetingCalculationHooks = {
         async onPhase(phase) {
-          await write(`event: progress\ndata: ${JSON.stringify({ contractVersion: "meeet-calculation-progress/v1", phase })}\n\n`);
+          await write(`event: progress\ndata: ${JSON.stringify({ contractVersion: CALCULATION_PROGRESS_CONTRACT_VERSION, phase })}\n\n`);
+        },
+        async onStationVerdict(verdict) {
+          await write(`event: station-verdict\ndata: ${JSON.stringify({
+            contractVersion: CALCULATION_PROGRESS_CONTRACT_VERSION,
+            stationAreaId: verdict.stationAreaId,
+            name: verdict.name,
+            coordinate: verdict.coordinate,
+            verdict: verdict.verdict,
+          })}\n\n`);
         },
       };
       void (async () => {

@@ -2,11 +2,24 @@
 // module runs in the browser and must stay free of server-only imports and
 // node built-ins; the Node test runner exercises it directly.
 
-export const CALCULATION_PROGRESS_CONTRACT_VERSION = "meeet-calculation-progress/v1";
-export const CALCULATION_PROGRESS_PHASES = ["access-seeds", "scheduled-routing", "station-area-evaluation", "validating-result"] as const;
-export type CalculationProgressPhase = (typeof CALCULATION_PROGRESS_PHASES)[number];
+import { insideOfficialMunichBoundary } from "./meeting-response.ts";
+import {
+  CALCULATION_PROGRESS_CONTRACT_VERSION,
+  CALCULATION_PROGRESS_PHASES,
+  type CalculationProgressPhase,
+  type StationVerdict,
+} from "../domain/calculation-progress-contract.ts";
+
+export {
+  CALCULATION_PROGRESS_CONTRACT_VERSION,
+  CALCULATION_PROGRESS_PHASES,
+  type CalculationProgressPhase,
+  type StationVerdict,
+};
+
 export type CalculationStreamEvent =
   | { kind: "progress"; phase: CalculationProgressPhase }
+  | { kind: "station-verdict"; verdict: StationVerdict }
   | { kind: "ref"; calculationRef: string }
   | { kind: "result"; result: unknown }
   | { kind: "error"; code: string; message: string };
@@ -67,6 +80,35 @@ function dispatch(eventName: string, data: string, onEvent: (event: CalculationS
       if (parsed.contractVersion !== CALCULATION_PROGRESS_CONTRACT_VERSION) throw new CalculationStreamError("Unsupported calculation progress contract version.");
       if (typeof parsed.phase !== "string") throw new CalculationStreamError("Invalid progress event in calculation stream.");
       if ((CALCULATION_PROGRESS_PHASES as readonly string[]).includes(parsed.phase)) onEvent({ kind: "progress", phase: parsed.phase as CalculationProgressPhase });
+      return;
+    }
+    case "station-verdict": {
+      if (!isObject(parsed)) throw new CalculationStreamError("Invalid station-verdict event in calculation stream.");
+      if (parsed.contractVersion !== CALCULATION_PROGRESS_CONTRACT_VERSION) throw new CalculationStreamError("Unsupported calculation progress contract version.");
+      const coord = parsed.coordinate;
+      if (
+        typeof parsed.stationAreaId !== "string" ||
+        parsed.stationAreaId.trim() === "" ||
+        typeof parsed.name !== "string" ||
+        parsed.name.trim() === "" ||
+        !insideOfficialMunichBoundary(coord) ||
+        typeof parsed.verdict !== "string" ||
+        !["red", "blue", "fair", "unclassified"].includes(parsed.verdict)
+      ) {
+        throw new CalculationStreamError("Invalid station-verdict event in calculation stream.");
+      }
+      onEvent({
+        kind: "station-verdict",
+        verdict: {
+          stationAreaId: parsed.stationAreaId,
+          name: parsed.name,
+          coordinate: {
+            latitude: (coord as { latitude: number; longitude: number }).latitude,
+            longitude: (coord as { latitude: number; longitude: number }).longitude,
+          },
+          verdict: parsed.verdict as "red" | "blue" | "fair" | "unclassified",
+        },
+      });
       return;
     }
     case "ref": {

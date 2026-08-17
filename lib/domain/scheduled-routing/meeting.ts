@@ -1,15 +1,22 @@
 import "server-only";
 
 import { ProviderNotConfiguredError, ProviderUnavailableError, type ScheduledAccessSeedProvider, type ScheduledAccessSeedCandidate } from "../providers.ts";
-import { calculateScheduledSurface } from "./surface.ts";
+import {
+  buildScheduledStationAreaCatalog,
+  createParticipantSurface,
+  evaluateScheduledStationAreaCandidates,
+} from "./surface.ts";
 import {
   DEFAULT_TRANSFER_RADIUS_METERS,
   DEFAULT_WALKING_VELOCITY_METERS_PER_SECOND,
+  createScheduledRoutingWindow,
+  routeScheduledEarliestArrivals,
 } from "./router.ts";
 import type {
   ScheduledAccessSeed,
   ScheduledRoutingArtifact,
   ScheduledDeadlineCheck,
+  ScheduledParticipantSurface,
 } from "./models.ts";
 import type { ScheduledMeetingRequest, ScheduledMeetingParticipantInput } from "../../validation/meeting-v3.ts";
 import type {
@@ -17,17 +24,16 @@ import type {
   ScheduledMeetingParticipantDto,
   ScheduledMeetingResponseDto,
 } from "../../validation/meeting-v3.ts";
+import type {
+  CalculationProgressPhase as MeetingCalculationPhase,
+  StationVerdict,
+} from "../calculation-progress-contract.ts";
 
-const MEETING_RESULT_CHECKPOINT = 32;
-
-export type MeetingCalculationPhase =
-  | "access-seeds"
-  | "scheduled-routing"
-  | "station-area-evaluation"
-  | "validating-result";
+export type { MeetingCalculationPhase, StationVerdict };
 
 export interface ScheduledMeetingCalculationHooks {
   readonly onPhase?: (phase: MeetingCalculationPhase) => void | Promise<void>;
+  readonly onStationVerdict?: (verdict: StationVerdict) => void | Promise<void>;
 }
 
 export interface ScheduledMeetingProviderBundle {
@@ -117,38 +123,64 @@ export async function calculateScheduledMeetingWithBasis(
   ];
   providers.deadlineCheck?.("meeting-surface");
   await hooks?.onPhase?.("scheduled-routing");
-  const surface = calculateScheduledSurface({
-    schedule: artifact,
-    accessSeedSets: scheduledSeedSets,
-    searchStartAt: request.searchStartAt,
-    selectedTolerancePercent: request.tolerancePercent,
+  const stationAreaCatalog = buildScheduledStationAreaCatalog(artifact, providers.deadlineCheck);
+  const window = createScheduledRoutingWindow(artifact, request.searchStartAt, {
     walkingVelocityMetersPerSecond,
     transferRadiusMeters,
-    participantIds: [request.participants[0].id, request.participants[1].id],
     deadlineCheck: providers.deadlineCheck,
   });
-  providers.deadlineCheck?.("meeting-surface");
-  await hooks?.onPhase?.("station-area-evaluation");
-  const stationAreas = surface.stationAreas.map((candidate, index) => {
-    if (index % MEETING_RESULT_CHECKPOINT === 0) providers.deadlineCheck?.("meeting-result");
-    return {
-      stationAreaId: candidate.stationAreaId,
-      name: candidate.name,
-      coordinate: candidate.coordinate,
-      redBoardingStopId: candidate.redBoardingStopId,
-      blueBoardingStopId: candidate.blueBoardingStopId,
-      classification: candidate.classification,
-      redArrivalSeconds: candidate.redArrivalSeconds,
-      blueArrivalSeconds: candidate.blueArrivalSeconds,
-      fasterParticipant: candidate.fasterParticipant,
-      withinSelectedTolerance: candidate.withinSelectedTolerance,
-    };
+  const routes = scheduledSeedSets.map((seeds) => {
+    if (seeds.length === 0) return null;
+    return routeScheduledEarliestArrivals(artifact, seeds, request.searchStartAt, { deadlineCheck: providers.deadlineCheck }, window);
   });
+  const firstRoute = routes[0];
+  const secondRoute = routes[1];
+  const participantSurfaces: [ScheduledParticipantSurface, ScheduledParticipantSurface] = [
+    createParticipantSurface(request.participants[0].id, artifact, firstRoute, walkingVelocityMetersPerSecond, window.searchStartEpochSeconds, providers.deadlineCheck),
+    createParticipantSurface(request.participants[1].id, artifact, secondRoute, walkingVelocityMetersPerSecond, window.searchStartEpochSeconds, providers.deadlineCheck),
+  ];
+  const firstReachable = firstRoute?.reachableStationAreaCount ?? 0;
+  const secondReachable = secondRoute?.reachableStationAreaCount ?? 0;
+  const noAccessSeeds = scheduledSeedSets[0].length === 0 || scheduledSeedSets[1].length === 0;
+  const noResult = noAccessSeeds || firstReachable === 0 || secondReachable === 0;
+  providers.deadlineCheck?.("meeting-surface");
+
+  await hooks?.onPhase?.("station-area-evaluation");
+  const stationAreas: ScheduledMeetingStationAreaDto[] = [];
+  await evaluateScheduledStationAreaCandidates(
+    stationAreaCatalog,
+    participantSurfaces[0].boardingStopArrivals,
+    participantSurfaces[1].boardingStopArrivals,
+    noResult,
+    request.tolerancePercent,
+    providers.deadlineCheck,
+    async (candidate) => {
+      const area: ScheduledMeetingStationAreaDto = {
+        stationAreaId: candidate.stationAreaId,
+        name: candidate.name,
+        coordinate: candidate.coordinate,
+        redBoardingStopId: candidate.redBoardingStopId,
+        blueBoardingStopId: candidate.blueBoardingStopId,
+        classification: candidate.classification,
+        redArrivalSeconds: candidate.redArrivalSeconds,
+        blueArrivalSeconds: candidate.blueArrivalSeconds,
+        fasterParticipant: candidate.fasterParticipant,
+        withinSelectedTolerance: candidate.withinSelectedTolerance,
+      };
+      stationAreas.push(area);
+      await hooks?.onStationVerdict?.({
+        stationAreaId: candidate.stationAreaId,
+        name: candidate.name,
+        coordinate: candidate.coordinate,
+        verdict: candidate.classification,
+      });
+    },
+  );
   providers.deadlineCheck?.("meeting-result");
   const response: ScheduledMeetingResponse = deepFreeze({
     contractVersion: "meeet-meeting/v3",
-    status: surface.status,
-    reason: surface.status === "no-result" ? surface.reason : null,
+    status: noResult ? "no-result" : "ok",
+    reason: noAccessSeeds ? "no-access-seeds" : firstReachable === 0 || secondReachable === 0 ? "no-reachable-stations" : null,
     participants: [
       participantResponse(request.participants[0], "red", seedSets[0]),
       participantResponse(request.participants[1], "blue", seedSets[1]),
@@ -165,10 +197,25 @@ export async function calculateScheduledMeetingWithBasis(
         acquisition: artifact.provenance.acquisition,
       },
       surface: {
-        ...surface.metadata,
+        contractVersion: "meeet-scheduled-routing/v1",
+        scheduleContentHash: artifact.provenance.contentHash,
+        compiledArtifactId: artifact.provenance.compiledArtifactId,
+        feedId: artifact.feedId,
+        timeZone: artifact.timeZone,
+        searchStartAt: window.searchStartAt,
+        routingHorizonSeconds: 86400,
+        selectedTolerancePercent: request.tolerancePercent,
+        walkingVelocityMetersPerSecond,
+        walkingSecondsRoundingRule: "ceil(distanceMetres / velocityMetresPerSecond), with zero distance taking zero seconds",
+        transferRadiusMeters,
+        accessSeedCounts: [scheduledSeedSets[0].length, scheduledSeedSets[1].length],
+        stationAreaCount: artifact.stationAreas.length,
+        boardingStopCount: artifact.boardingStops.length,
+        connectionCount: artifact.connections.length,
+        coverage: "scheduled-service-day-local-radius/v1",
+        representativePointBasis: "inside-clipped-cell/v1",
         classificationMethod: "representative-point-with-geometric-final-station-walking/v1",
         classificationBasis: "representative-point",
-        representativePointBasis: "inside-clipped-cell/v1",
         finalWalkingMethod: "geometric-station-walking-estimate-not-navigation",
       },
       stationAreas: {
@@ -198,10 +245,10 @@ export async function calculateScheduledMeetingWithBasis(
       compiledArtifactId: artifact.provenance.compiledArtifactId,
     },
     routingOptions: {
-      routingHorizonSeconds: surface.metadata.routingHorizonSeconds,
-      walkingVelocityMetersPerSecond: surface.metadata.walkingVelocityMetersPerSecond,
-      walkingSecondsRoundingRule: surface.metadata.walkingSecondsRoundingRule,
-      transferRadiusMeters: surface.metadata.transferRadiusMeters,
+      routingHorizonSeconds: response.metadata.surface.routingHorizonSeconds,
+      walkingVelocityMetersPerSecond: response.metadata.surface.walkingVelocityMetersPerSecond,
+      walkingSecondsRoundingRule: response.metadata.surface.walkingSecondsRoundingRule,
+      transferRadiusMeters: response.metadata.surface.transferRadiusMeters,
     },
     scheduleProvenance: response.metadata.schedule,
     accessProvenance: response.metadata.accessProvider,

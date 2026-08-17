@@ -96,7 +96,7 @@ export function calculateScheduledSurface(input: ScheduledSurfaceInput): Schedul
 /** Alias that names the result by its later API-facing purpose. */
 export const calculateScheduledFairnessSurface = calculateScheduledSurface;
 
-function createParticipantSurface(
+export function createParticipantSurface(
   participantId: string,
   schedule: ScheduledRoutingArtifact,
   route: ReturnType<typeof routeScheduledEarliestArrivals> | null | undefined,
@@ -158,7 +158,7 @@ export function buildScheduledStationAreaCatalog(
   return deepFreeze({ entries });
 }
 
-function createStationAreaCandidates(
+export function createStationAreaCandidates(
   catalog: ScheduledStationAreaCatalog,
   redArrivals: readonly BoardingStopArrivalField[],
   blueArrivals: readonly BoardingStopArrivalField[],
@@ -185,31 +185,87 @@ function createStationAreaCandidates(
     if (area === undefined) continue;
     const red = fastestEligibleBoardingStop(area.eligibleBoardingStopIds, redByStop, deadlineCheck);
     const blue = fastestEligibleBoardingStop(area.eligibleBoardingStopIds, blueByStop, deadlineCheck);
-    if (noResult) {
-      candidates.push({
-        stationAreaId: area.stationAreaId,
-        name: area.name,
-        coordinate: area.coordinate,
-        redBoardingStopId: null,
-        blueBoardingStopId: null,
-        classification: "unclassified",
-        redArrivalSeconds: null,
-        blueArrivalSeconds: null,
-        fasterParticipant: null,
-        withinSelectedTolerance: false,
-      });
-      continue;
-    }
-    candidates.push(classifyStationArea(
-      area.stationAreaId,
-      area.name,
-      area.coordinate,
-      red?.boardingStopId ?? null,
-      blue?.boardingStopId ?? null,
-      red?.elapsedSeconds ?? null,
-      blue?.elapsedSeconds ?? null,
-      tolerancePercent,
-    ));
+    const candidate: ScheduledStationAreaCandidate = noResult
+      ? {
+          stationAreaId: area.stationAreaId,
+          name: area.name,
+          coordinate: area.coordinate,
+          redBoardingStopId: null,
+          blueBoardingStopId: null,
+          classification: "unclassified",
+          redArrivalSeconds: null,
+          blueArrivalSeconds: null,
+          fasterParticipant: null,
+          withinSelectedTolerance: false,
+        }
+      : classifyStationArea(
+          area.stationAreaId,
+          area.name,
+          area.coordinate,
+          red?.boardingStopId ?? null,
+          blue?.boardingStopId ?? null,
+          red?.elapsedSeconds ?? null,
+          blue?.elapsedSeconds ?? null,
+          tolerancePercent,
+        );
+    candidates.push(candidate);
+  }
+  return candidates;
+}
+
+export async function evaluateScheduledStationAreaCandidates(
+  catalog: ScheduledStationAreaCatalog,
+  redArrivals: readonly BoardingStopArrivalField[],
+  blueArrivals: readonly BoardingStopArrivalField[],
+  noResult: boolean,
+  tolerancePercent: 5 | 10 | 15,
+  deadlineCheck?: ScheduledDeadlineCheck,
+  onCandidate?: (candidate: ScheduledStationAreaCandidate) => void | Promise<void>,
+): Promise<ScheduledStationAreaCandidate[]> {
+  const redByStop = new Map<string, BoardingStopArrivalField>();
+  for (let index = 0; index < redArrivals.length; index += 1) {
+    if (index % STATION_AREA_CHECKPOINT === 0) deadlineCheck?.("surface-cells");
+    const arrival = redArrivals[index];
+    if (arrival !== undefined) redByStop.set(arrival.boardingStopId, arrival);
+  }
+  const blueByStop = new Map<string, BoardingStopArrivalField>();
+  for (let index = 0; index < blueArrivals.length; index += 1) {
+    if (index % STATION_AREA_CHECKPOINT === 0) deadlineCheck?.("surface-cells");
+    const arrival = blueArrivals[index];
+    if (arrival !== undefined) blueByStop.set(arrival.boardingStopId, arrival);
+  }
+  const candidates: ScheduledStationAreaCandidate[] = [];
+  for (let index = 0; index < catalog.entries.length; index += 1) {
+    if (index % STATION_AREA_CHECKPOINT === 0) deadlineCheck?.("surface-cells");
+    const area = catalog.entries[index];
+    if (area === undefined) continue;
+    const red = fastestEligibleBoardingStop(area.eligibleBoardingStopIds, redByStop, deadlineCheck);
+    const blue = fastestEligibleBoardingStop(area.eligibleBoardingStopIds, blueByStop, deadlineCheck);
+    const candidate: ScheduledStationAreaCandidate = noResult
+      ? {
+          stationAreaId: area.stationAreaId,
+          name: area.name,
+          coordinate: area.coordinate,
+          redBoardingStopId: null,
+          blueBoardingStopId: null,
+          classification: "unclassified",
+          redArrivalSeconds: null,
+          blueArrivalSeconds: null,
+          fasterParticipant: null,
+          withinSelectedTolerance: false,
+        }
+      : classifyStationArea(
+          area.stationAreaId,
+          area.name,
+          area.coordinate,
+          red?.boardingStopId ?? null,
+          blue?.boardingStopId ?? null,
+          red?.elapsedSeconds ?? null,
+          blue?.elapsedSeconds ?? null,
+          tolerancePercent,
+        );
+    candidates.push(candidate);
+    await onCandidate?.(candidate);
   }
   return candidates;
 }
