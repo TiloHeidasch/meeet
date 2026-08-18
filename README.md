@@ -45,11 +45,13 @@ service fetches the latest MVV feed and compiles (or keeps) the artifact before
 
 Changes flow through a single promotion path: `feature/<slug> → dev → main`.
 `main` remains the default production branch. Pull requests into `dev` and
-`main` require review plus Node 24 test/typecheck/lint validation of the merge
-result (see [CI](#validation)); PRs into `dev` additionally require the e2e
-gate (build, spin up, one functional calculation); branches must be up-to-date
-with their target, and force pushes and branch deletion are blocked on `dev`
-and `main`.
+`main` require Node 24 test/typecheck/lint validation of the merge result (see
+[CI](#validation)); PRs into `dev` additionally require the e2e gate (build,
+spin up, one functional calculation). Reviews are performed by the oracle
+(code-review skill); when its verdict has no remaining remarks the change may
+be merged into `dev` without a human review, while `main` promotion still
+requires a human review. Branches must be up-to-date with their target, and
+force pushes and branch deletion are blocked on `dev` and `main`.
 
 ## Image publication
 

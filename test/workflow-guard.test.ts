@@ -196,7 +196,10 @@ test("PR CI includes an e2e gate that builds, starts meeet, and runs a functiona
   assert.match(e2eScript, /\/api\/meeting\/calculate/);
   assert.match(e2eScript, /meeet-meeting\/v3/);
   assert.match(e2eScript, /"ok"/);
-  assert.match(e2eScript, /participants/);
+  assert.match(e2eScript, /participants\.length/);
+  assert.match(e2eScript, /"red"/);
+  assert.match(e2eScript, /"blue"/);
+  assert.match(e2eScript, /stationAreas/);
 });
 
 test("docs describe the feature/dev/main promotion path", () => {
