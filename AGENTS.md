@@ -23,6 +23,22 @@
 - UI, client-safe response consumption, styling, and browser tests belong to
   the visual/client migration lane; do not edit them from a server lane.
 
+## Branch and PR workflow
+
+- The supported merge path is `feature/<slug> → dev → main`; `main` is the
+  default production branch.
+- PRs into `dev` and `main` must pass Node 24 tests, typecheck, and lint on the
+  merge result (required check `Validate Node 24 (merge result) / validate`)
+  and be up-to-date with their target.
+- PRs into `dev` must additionally pass the e2e gate (required check
+  `E2E build, spin up, calculate`): a full application build, a server
+  spin-up, and one functional calculation.
+- Reviews are always performed by the oracle (code-review skill, both axes);
+  when the oracle verdict has no remaining remarks, the change may be merged
+  into `dev` without a human review. `main` promotion still requires a human
+  review.
+- `dev` and `main` are protected against force pushes and deletion.
+
 ## Engineering guardrails
 
 - Keep server-only provider credentials and schedule artifacts out of client
@@ -42,3 +58,7 @@
 - The documented Unraid production profile is operator-owned and distinct from
   the tracked Compose template; do not overwrite it or infer host-specific
   resource limits.
+- dev and feature branch publication builds the runner image only; the compiler
+  image is published only by `publish-image.yml` on pushes to `main` and
+  release tags. Production is an operator-selected digest-pinned deployment of
+  a `main`-built runner image, and no dev/feature image auto-deploys.
