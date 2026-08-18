@@ -23,10 +23,14 @@ The live profile is an operator-owned configuration outside this repository:
 
   ```dotenv
   TUNNEL_TOKEN=<Cloudflare tunnel token>
-  MEEET_IMAGE=ghcr.io/tiloheidasch/meeet:sha-<runner-commit>
+  MEEET_IMAGE=ghcr.io/tiloheidasch/meeet@sha256:<runner-digest>
   MEEET_COMPILER_IMAGE=ghcr.io/tiloheidasch/meeet-artifact-compiler@sha256:<publish-workflow-digest>
   MEEET_SCHEDULE_HOST_DIR=/mnt/user/appdata/meeet/schedule
   ```
+
+  sha tags are immutable per-commit publication conveniences; the production
+  `.env` uses digest-pinned references from the workflow summary so a tag never
+  moves underneath the deployment.
 
   The operator chooses the runner tag or digest and the compiler image in the
   external Unraid `.env`; they are not stored in this repository. The compiler
@@ -84,12 +88,18 @@ external Unraid configuration change.
 
 ## Image publication and pairing
 
-Pushes to `main` and release tags run the unified `publish-image.yml` workflow,
-which validates on Node 24 and builds and publishes both the runner
-(`ghcr.io/tiloheidasch/meeet`) and compiler
-(`ghcr.io/tiloheidasch/meeet-artifact-compiler`) multi-platform images
-(`linux/amd64`, `linux/arm64`) with immutable `sha-<full-sha>` tags, OCI
-revision labels, and provenance.
+Changes flow through the promotion path `feature/<slug> → dev → main`; `main`
+is the default production branch. Pushes to `main`, `dev`, and `feature/**`
+branches and release tags run the unified `publish-image.yml` workflow, which
+validates on Node 24 and builds and publishes the runner
+(`ghcr.io/tiloheidasch/meeet`) multi-platform image (`linux/amd64`,
+`linux/arm64`) on every trigger. `main` and release tags additionally publish
+the compiler (`ghcr.io/tiloheidasch/meeet-artifact-compiler`); dev and feature
+branch pushes publish the runner only. Every published image carries an
+immutable `sha-<full-sha>` tag, OCI revision labels, and provenance. Mutable
+convenience tags exist only for `main` and `dev`; feature builds get a
+branch-reference tag normalized to a valid Docker tag by
+docker/metadata-action. Dev and feature images never auto-deploy.
 
 The workflow summary emits digest-pinned deployment references for both images
 to pair in the operator-owned runtime `.env`:
@@ -111,6 +121,18 @@ back, point `MEEET_COMPILER_IMAGE` (and `MEEET_IMAGE` if the runner revision
 should move with it) back at a previously archived digest pair and restart;
 keep the archived manifest and `.v8.bin` rollback pair from the previous
 rotation as described below.
+
+## GHCR image retention
+
+There is no automated deletion of GHCR images yet; automated cleanup is tracked
+in follow-up issue #40 and will be designed there before any deletion runs.
+Until then, retention is manual:
+
+- Keep at least the previously archived digest pair together with its archived
+  manifest and `.v8.bin` rollback pair.
+- sha-tagged images accumulate per commit and may be manually pruned by the
+  operator (GHCR UI or API).
+- Never delete the digest-pinned image currently referenced by the live `.env`.
 
 ## MVV artifact rotation
 

@@ -41,12 +41,27 @@ service fetches the latest MVV feed and compiles (or keeps) the artifact before
 `meeet` starts. The complete procedure is in
 [docs/application-deployment.md](docs/application-deployment.md).
 
+## Branch model
+
+Changes flow through a single promotion path: `feature/<slug> → dev → main`.
+`main` remains the default production branch. Pull requests into `dev` and
+`main` require review plus Node 24 test/typecheck/lint validation of the merge
+result (see [CI](#validation)); branches must be up-to-date with their target,
+and force pushes and branch deletion are blocked on `dev` and `main`.
+
 ## Image publication
 
-Pushes to `main` and release tags automatically build and publish both `meeet`
-(runner) and `meeet-artifact-compiler` (compiler) multi-platform images
-(`linux/amd64`, `linux/arm64`) to GHCR with immutable `sha-<full-sha>` tags and
-build provenance.
+Pushes to `main`, `dev`, and `feature/**` branches and release tags trigger the
+unified `publish-image.yml` workflow. `main` and release tags publish both the
+`meeet` (runner) and `meeet-artifact-compiler` (compiler) multi-platform images
+(`linux/amd64`, `linux/arm64`); dev and feature branch pushes publish the runner
+image only. Every published image gets an immutable `sha-<full-sha>` tag
+(authoritative, matching the OCI revision labels) with build provenance.
+Mutable convenience tags exist only for `main` and `dev`; feature builds also
+get a branch-reference tag normalized to a valid Docker tag by
+docker/metadata-action. No mutable tag is eligible for production. Production
+pairing uses the digest-pinned references from the workflow summary (see
+[docs/application-deployment.md](docs/application-deployment.md)).
 
 [`compose.production.yml`](compose.production.yml) remains a separate,
 checked-in hardened repository template. Its strict preflight, token-file

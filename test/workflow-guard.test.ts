@@ -33,10 +33,11 @@ test("compiler-specific and runner-specific workflows are replaced by unified wo
   assert.equal(existsSync(resolvePath(publishWorkflowPath)), true);
 });
 
-test("unified publication triggers on push to main and tags as well as workflow_dispatch", () => {
+test("unified publication triggers on push to main, dev, and feature branches as well as tags and workflow_dispatch", () => {
   const triggers = triggerBlock(publishWorkflow);
   assert.match(triggers, /^\s*push:/m);
-  assert.match(triggers, /branches:\s*\n\s*-\s*main/m);
+  assert.match(triggers, /branches:\s*\n\s*-\s*main\s*\n\s*-\s*dev/m);
+  assert.match(triggers, /branches:\s*\n\s*-\s*main\s*\n\s*-\s*dev\s*\n\s*-\s*["']feature\/\*\*["']/m);
   assert.match(triggers, /tags:\s*\n\s*-\s*["']v\*["']/m);
   assert.match(triggers, /workflow_dispatch:/m);
 });
@@ -99,4 +100,79 @@ test("documentation does not contain manual compiler dispatch instructions", () 
     assert.doesNotMatch(doc, dispatchPattern);
     assert.doesNotMatch(doc, /publish-runner\.yml/);
   }
+});
+
+test("compiler is published only on main pushes and release tags", () => {
+  const job = publishJob(publishWorkflow);
+  const compilerGuard =
+    "if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/')";
+  const guardMatches = job.match(new RegExp(compilerGuard.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "g"));
+  assert.ok(
+    guardMatches && guardMatches.length >= 2,
+    "compiler metadata and compiler build steps must both carry the main/tag guard",
+  );
+
+  // The runner build step must not be gated.
+  const runnerSection = job.slice(
+    job.indexOf("Build and publish runner"),
+    job.indexOf("Extract compiler image metadata"),
+  );
+  assert.doesNotMatch(runnerSection, /^\s*if:/m);
+});
+
+test("tags are produced by docker/metadata-action without raw ref interpolation", () => {
+  const metadataMatches = publishWorkflow.match(/uses:\s*docker\/metadata-action/g);
+  assert.ok(
+    metadataMatches && metadataMatches.length === 2,
+    "both runner and compiler must use docker/metadata-action",
+  );
+  assert.match(publishWorkflow, /type=sha,format=long,prefix=sha-/);
+  assert.match(publishWorkflow, /type=ref,event=branch/);
+  assert.match(publishWorkflow, /type=ref,event=tag/);
+  assert.doesNotMatch(publishWorkflow, /\$\{\{\s*github\.ref(?:_name)?\s*\}\}/);
+});
+
+test("PR CI validates the merge result with least privilege", () => {
+  const ciWorkflow = read(".github/workflows/ci.yml");
+  const ciTriggers = triggerBlock(ciWorkflow);
+  assert.match(ciTriggers, /^\s*pull_request:/m);
+  assert.match(ciTriggers, /branches:\s*\n\s*-\s*main\s*\n\s*-\s*dev/m);
+  assert.doesNotMatch(ciWorkflow, /pull_request_target/);
+  assert.match(ciWorkflow, /^permissions:\n  contents:\s*read/m);
+  assert.doesNotMatch(ciWorkflow, /packages:\s*write/);
+  assert.doesNotMatch(ciWorkflow, /id-token:/);
+  assert.doesNotMatch(ciWorkflow, /attestations:/);
+  assert.doesNotMatch(ciWorkflow, /secrets\./);
+  assert.match(ciWorkflow, /node-version:\s*24\.x/);
+  assert.match(ciWorkflow, /npm ci/);
+  assert.match(ciWorkflow, /npm test/);
+  assert.match(ciWorkflow, /npx tsc --noEmit/);
+  assert.match(ciWorkflow, /npm run lint/);
+  assert.match(ciWorkflow, /uses:\s*actions\/checkout@/);
+});
+
+test("docs describe the feature/dev/main promotion path", () => {
+  const promotionPath = "feature/<slug> → dev → main";
+  for (const doc of [agentsGuide, readme, deploymentGuide]) {
+    assert.match(doc, new RegExp(promotionPath.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+  }
+});
+
+test("docs state dev and feature branch pushes publish the runner image only", () => {
+  assert.match(readme, /dev and feature/);
+});
+
+test("docs state the compiler is published only on main pushes and release tags", () => {
+  assert.match(readme, /compiler[\s\S]*main[\s\S]*release tags/);
+});
+
+test("deployment guide documents GHCR image retention with no automated deletion", () => {
+  const retentionSection = deploymentGuide.slice(deploymentGuide.indexOf("## GHCR image retention"));
+  assert.match(retentionSection, /GHCR image retention/i);
+  assert.match(retentionSection, /no automated deletion/i);
+  assert.match(retentionSection, /#40/);
+});
+
+test("deployment guide runtime .env sample uses digest-pinned runner image", () => {
+  assert.match(deploymentGuide, /MEEET_IMAGE=ghcr\.io\/tiloheidasch\/meeet@sha256:/);
 });
