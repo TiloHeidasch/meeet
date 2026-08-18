@@ -31,8 +31,8 @@ is `/mnt/user/appdata/meeet/schedule`. There are no host ports or local
 `tunnel run`, receives `TUNNEL_TOKEN`, and uses the Cloudflare dashboard
 service `http://meeet:3000`.
 
-The operator selects the runner image tag or digest and the compiler digest in
-the external `.env`. The runner and compiler GHCR packages must be public for
+The operator selects the digest-pinned runner and compiler images in the
+external `.env`. The runner and compiler GHCR packages must be public for
 unauthenticated host pulls, or the host may use a machine account with
 `read:packages`.
 
@@ -52,15 +52,19 @@ and force pushes and branch deletion are blocked on `dev` and `main`.
 ## Image publication
 
 Pushes to `main`, `dev`, and `feature/**` branches and release tags trigger the
-unified `publish-image.yml` workflow. `main` and release tags publish both the
+unified `publish-image.yml` workflow. main and release tags publish both the
 `meeet` (runner) and `meeet-artifact-compiler` (compiler) multi-platform images
-(`linux/amd64`, `linux/arm64`); dev and feature branch pushes publish the runner
-image only. Every published image gets an immutable `sha-<full-sha>` tag
-(authoritative, matching the OCI revision labels) with build provenance.
-Mutable convenience tags exist only for `main` and `dev`; feature builds also
-get a branch-reference tag normalized to a valid Docker tag by
-docker/metadata-action. No mutable tag is eligible for production. Production
-pairing uses the digest-pinned references from the workflow summary (see
+(`linux/amd64`, `linux/arm64`).
+dev and feature branch pushes publish the runner image only. Every published
+image gets an immutable `sha-<full-sha>` tag (authoritative, matching the OCI
+revision labels) with build provenance.
+Mutable convenience tags are published only for `main` and `dev`. Feature
+builds additionally get a branch-reference tag normalized to a valid Docker tag
+by docker/metadata-action (for example `feature/18-branch-based-development`
+becomes `feature-18-branch-based-development`); like every mutable tag it is
+never production-eligible, and the immutable `sha-<full-sha>` tag remains the
+authoritative reference. Production pairing uses the digest-pinned references
+from the workflow summary (see
 [docs/application-deployment.md](docs/application-deployment.md)).
 
 [`compose.production.yml`](compose.production.yml) remains a separate,

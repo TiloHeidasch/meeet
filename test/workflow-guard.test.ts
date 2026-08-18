@@ -43,26 +43,34 @@ test("unified publication triggers on push to main, dev, and feature branches as
 });
 
 test("validation job runs Node 24 checks before publication", () => {
+  const validateWorkflow = read(".github/workflows/validate.yml");
+  assert.match(validateWorkflow, /node-version:\s*24\.x/);
+  assert.match(validateWorkflow, /npm ci/);
+  assert.match(validateWorkflow, /npm test/);
+  assert.match(validateWorkflow, /npx tsc --noEmit/);
+  assert.match(validateWorkflow, /npm run lint/);
+
+  // Both callers reuse the shared workflow and preserve their job names.
   const beforePublish = publishWorkflow.slice(0, publishWorkflow.indexOf("  publish:"));
-  assert.match(beforePublish, /node-version:\s*24\.x/);
-  assert.match(beforePublish, /npm ci/);
-  assert.match(beforePublish, /npm test/);
-  assert.match(beforePublish, /npx tsc --noEmit/);
-  assert.match(beforePublish, /npm run lint/);
+  assert.match(beforePublish, /uses:\s*\.\/\.github\/workflows\/validate\.yml/);
+  assert.match(beforePublish, /name:\s*Validate on Node 24/);
+  const ciWorkflow = read(".github/workflows/ci.yml");
+  assert.match(ciWorkflow, /uses:\s*\.\/\.github\/workflows\/validate\.yml/);
+  assert.match(ciWorkflow, /name:\s*Validate Node 24 \(merge result\)/);
 });
 
 test("publish job builds and publishes both runner and compiler images with multi-platform and provenance", () => {
   const job = publishJob(publishWorkflow);
 
   // Runner image configuration
-  assert.match(job, /images:\s*ghcr\.io\/\${{\s*steps\.image\.outputs\.owner\s*}}\/meeet\b/);
+  assert.match(job, /images:\s*ghcr\.io\/\${{\s*steps\.owner\.outputs\.owner\s*}}\/meeet\b/);
   assert.match(job, /target:\s*runner/);
   assert.match(job, /platforms:\s*linux\/amd64,linux\/arm64/);
   assert.match(job, /cache-from:\s*type=gha,scope=meeet-runner/);
   assert.match(job, /cache-to:\s*type=gha,mode=max,scope=meeet-runner/);
 
   // Compiler image configuration
-  assert.match(job, /images:\s*ghcr\.io\/\${{\s*steps\.image\.outputs\.owner\s*}}\/meeet-artifact-compiler\b/);
+  assert.match(job, /images:\s*ghcr\.io\/\${{\s*steps\.owner\.outputs\.owner\s*}}\/meeet-artifact-compiler\b/);
   assert.match(job, /target:\s*artifact-compiler/);
   assert.match(job, /cache-from:\s*type=gha,scope=meeet-compiler/);
   assert.match(job, /cache-to:\s*type=gha,mode=max,scope=meeet-compiler/);
@@ -108,7 +116,7 @@ test("compiler is published only on main pushes and release tags", () => {
     "if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/')";
   const guardMatches = job.match(new RegExp(compilerGuard.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "g"));
   assert.ok(
-    guardMatches && guardMatches.length >= 2,
+    guardMatches && guardMatches.length === 2,
     "compiler metadata and compiler build steps must both carry the main/tag guard",
   );
 
@@ -132,6 +140,16 @@ test("tags are produced by docker/metadata-action without raw ref interpolation"
   assert.doesNotMatch(publishWorkflow, /\$\{\{\s*github\.ref(?:_name)?\s*\}\}/);
 });
 
+test("runner and compiler images carry SBOM attestation and OCI revision labels", () => {
+  const sbomMatches = publishWorkflow.match(/sbom:\s*true/g);
+  assert.ok(
+    sbomMatches && sbomMatches.length === 2,
+    "both runner and compiler builds must emit an SBOM attestation",
+  );
+  assert.match(publishWorkflow, /labels:\s*\$\{\{\s*steps\.meta_runner\.outputs\.labels\s*\}\}/);
+  assert.match(publishWorkflow, /labels:\s*\$\{\{\s*steps\.meta_compiler\.outputs\.labels\s*\}\}/);
+});
+
 test("PR CI validates the merge result with least privilege", () => {
   const ciWorkflow = read(".github/workflows/ci.yml");
   const ciTriggers = triggerBlock(ciWorkflow);
@@ -143,12 +161,8 @@ test("PR CI validates the merge result with least privilege", () => {
   assert.doesNotMatch(ciWorkflow, /id-token:/);
   assert.doesNotMatch(ciWorkflow, /attestations:/);
   assert.doesNotMatch(ciWorkflow, /secrets\./);
-  assert.match(ciWorkflow, /node-version:\s*24\.x/);
-  assert.match(ciWorkflow, /npm ci/);
-  assert.match(ciWorkflow, /npm test/);
-  assert.match(ciWorkflow, /npx tsc --noEmit/);
-  assert.match(ciWorkflow, /npm run lint/);
-  assert.match(ciWorkflow, /uses:\s*actions\/checkout@/);
+  assert.match(ciWorkflow, /uses:\s*\.\/\.github\/workflows\/validate\.yml/);
+  assert.match(ciWorkflow, /name:\s*Validate Node 24 \(merge result\)/);
 });
 
 test("docs describe the feature/dev/main promotion path", () => {
@@ -159,11 +173,13 @@ test("docs describe the feature/dev/main promotion path", () => {
 });
 
 test("docs state dev and feature branch pushes publish the runner image only", () => {
-  assert.match(readme, /dev and feature/);
+  assert.match(readme, /dev and feature branch pushes publish the runner image only/);
+  assert.match(readme, /main and release tags publish both/);
 });
 
 test("docs state the compiler is published only on main pushes and release tags", () => {
-  assert.match(readme, /compiler[\s\S]*main[\s\S]*release tags/);
+  assert.match(deploymentGuide, /dev and feature branch pushes publish the runner only/);
+  assert.match(readme, /main and release tags publish both/);
 });
 
 test("deployment guide documents GHCR image retention with no automated deletion", () => {

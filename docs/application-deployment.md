@@ -32,7 +32,7 @@ The live profile is an operator-owned configuration outside this repository:
   `.env` uses digest-pinned references from the workflow summary so a tag never
   moves underneath the deployment.
 
-  The operator chooses the runner tag or digest and the compiler image in the
+  The operator chooses the digest-pinned runner and compiler images in the
   external Unraid `.env`; they are not stored in this repository. The compiler
   image is selected by the operator, for example the digest-pinned value from
   the unified image publication workflow (see
@@ -82,8 +82,8 @@ so the host must be able to pull both packages. Public GHCR packages permit
 unauthenticated pulls. If the packages are private, authenticate Docker on the
 host with a machine account granted `read:packages` before pulling them.
 
-Use the runner image tag or digest and the compiler image selected by the
-operator. Changing them or the live `cloudflare/cloudflared:latest` image is an
+Use the digest-pinned runner and compiler images selected by the operator.
+Changing them or the live `cloudflare/cloudflared:latest` image is an
 external Unraid configuration change.
 
 ## Image publication and pairing
@@ -94,12 +94,15 @@ branches and release tags run the unified `publish-image.yml` workflow, which
 validates on Node 24 and builds and publishes the runner
 (`ghcr.io/tiloheidasch/meeet`) multi-platform image (`linux/amd64`,
 `linux/arm64`) on every trigger. `main` and release tags additionally publish
-the compiler (`ghcr.io/tiloheidasch/meeet-artifact-compiler`); dev and feature
-branch pushes publish the runner only. Every published image carries an
-immutable `sha-<full-sha>` tag, OCI revision labels, and provenance. Mutable
-convenience tags exist only for `main` and `dev`; feature builds get a
-branch-reference tag normalized to a valid Docker tag by
-docker/metadata-action. Dev and feature images never auto-deploy.
+the compiler (`ghcr.io/tiloheidasch/meeet-artifact-compiler`).
+dev and feature branch pushes publish the runner only. Every published image
+carries an immutable `sha-<full-sha>` tag, OCI revision labels, and provenance. Mutable
+convenience tags are published only for `main` and `dev`. Feature builds
+additionally get a branch-reference tag normalized to a valid Docker tag by
+docker/metadata-action (for example `feature/18-branch-based-development`
+becomes `feature-18-branch-based-development`); like every mutable tag it is
+never production-eligible, and the immutable `sha-<full-sha>` tag remains the
+authoritative reference. Dev and feature images never auto-deploy.
 
 The workflow summary emits digest-pinned deployment references for both images
 to pair in the operator-owned runtime `.env`:

@@ -16,23 +16,7 @@ permissions:
 jobs:
   validate:
     name: Validate on Node 24
-    runs-on: ubuntu-latest
-    steps:
-      - name: Check out source
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
-      - name: Set up Node 24
-        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
-        with:
-          node-version: 24.x
-          cache: npm
-      - name: Install dependencies
-        run: npm ci
-      - name: Run tests
-        run: npm test
-      - name: Typecheck
-        run: npx tsc --noEmit
-      - name: Lint
-        run: npm run lint
+    uses: ./.github/workflows/validate.yml
 
   publish:
     name: Publish images
@@ -52,7 +36,7 @@ jobs:
         uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c
 
       - name: Normalize GHCR owner
-        id: image
+        id: owner
         env:
           OWNER: ${{ github.repository_owner }}
         run: |
@@ -70,7 +54,7 @@ jobs:
         id: meta_runner
         uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302
         with:
-          images: ghcr.io/${{ steps.image.outputs.owner }}/meeet
+          images: ghcr.io/${{ steps.owner.outputs.owner }}/meeet
           tags: |
             type=sha,format=long,prefix=sha-
             type=ref,event=branch
@@ -93,6 +77,7 @@ jobs:
           cache-to: type=gha,mode=max,scope=meeet-runner
           # BuildKit publishes the SLSA provenance attestation with the image.
           provenance: mode=max
+          sbom: true
 
       # dev and feature branch pushes publish the runner only; main and
       # release tags additionally publish the compiler.
@@ -101,7 +86,7 @@ jobs:
         id: meta_compiler
         uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302
         with:
-          images: ghcr.io/${{ steps.image.outputs.owner }}/meeet-artifact-compiler
+          images: ghcr.io/${{ steps.owner.outputs.owner }}/meeet-artifact-compiler
           tags: |
             type=sha,format=long,prefix=sha-
             type=ref,event=branch
@@ -124,10 +109,11 @@ jobs:
           cache-from: type=gha,scope=meeet-compiler
           cache-to: type=gha,mode=max,scope=meeet-compiler
           provenance: mode=max
+          sbom: true
 
       - name: Write digest-pinned deployment references
         env:
-          GHCR_OWNER: ${{ steps.image.outputs.owner }}
+          GHCR_OWNER: ${{ steps.owner.outputs.owner }}
           RUNNER_DIGEST: ${{ steps.build_runner.outputs.digest }}
           COMPILER_DIGEST: ${{ steps.build_compiler.outputs.digest }}
         run: |
