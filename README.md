@@ -46,8 +46,10 @@ service fetches the latest MVV feed and compiles (or keeps) the artifact before
 Changes flow through a single promotion path: `feature/<slug> → dev → main`.
 `main` remains the default production branch. Pull requests into `dev` and
 `main` require review plus Node 24 test/typecheck/lint validation of the merge
-result (see [CI](#validation)); branches must be up-to-date with their target,
-and force pushes and branch deletion are blocked on `dev` and `main`.
+result (see [CI](#validation)); PRs into `dev` additionally require the e2e
+gate (build, spin up, one functional calculation); branches must be up-to-date
+with their target, and force pushes and branch deletion are blocked on `dev`
+and `main`.
 
 ## Image publication
 
@@ -106,6 +108,9 @@ npm run lint
 npm run build
 git diff --check
 ```
+
+The e2e gate (`scripts/e2e-calculation.mjs`) runs against a built and started
+server in fixture provider mode and performs one functional calculation.
 
 The application boundary is Munich. Map rendering and browser fixture work are
 owned by the visual/client migration; server code must preserve the v3

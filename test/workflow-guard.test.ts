@@ -183,6 +183,22 @@ test("branch protection check context is pinned by the guard tests", () => {
   assert.match(ciWorkflow, /name:\s*Validate Node 24 \(merge result\)/);
 });
 
+test("PR CI includes an e2e gate that builds, starts meeet, and runs a functional calculation", () => {
+  const ciWorkflow = read(".github/workflows/ci.yml");
+  assert.match(ciWorkflow, /name:\s*E2E build, spin up, calculate/);
+  assert.match(ciWorkflow, /npm run build/);
+  assert.match(ciWorkflow, /npm start/);
+  assert.match(ciWorkflow, /MEEET_PROVIDER_MODE:\s*fixture/);
+  assert.match(ciWorkflow, /node scripts\/e2e-calculation\.mjs/);
+  assert.match(ciWorkflow, /needs:\s*validate/);
+
+  const e2eScript = read("scripts/e2e-calculation.mjs");
+  assert.match(e2eScript, /\/api\/meeting\/calculate/);
+  assert.match(e2eScript, /meeet-meeting\/v3/);
+  assert.match(e2eScript, /"ok"/);
+  assert.match(e2eScript, /participants/);
+});
+
 test("docs describe the feature/dev/main promotion path", () => {
   const promotionPath = "feature/<slug> → dev → main";
   for (const doc of [agentsGuide, readme, deploymentGuide]) {
