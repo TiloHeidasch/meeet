@@ -28,7 +28,8 @@
 - The supported merge path is `feature/<slug> → dev → main`; `main` is the
   default production branch.
 - PRs into `dev` and `main` must pass Node 24 tests, typecheck, and lint on the
-  merge result and be up-to-date with their target.
+  merge result (required check `Validate Node 24 (merge result) / validate`)
+  and be up-to-date with their target.
 - `dev` and `main` are protected against force pushes and deletion.
 
 ## Engineering guardrails

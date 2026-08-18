@@ -163,6 +163,24 @@ test("PR CI validates the merge result with least privilege", () => {
   assert.doesNotMatch(ciWorkflow, /secrets\./);
   assert.match(ciWorkflow, /uses:\s*\.\/\.github\/workflows\/validate\.yml/);
   assert.match(ciWorkflow, /name:\s*Validate Node 24 \(merge result\)/);
+
+  // The shared validation workflow itself stays least privilege.
+  const validateWorkflow = read(".github/workflows/validate.yml");
+  assert.match(validateWorkflow, /^permissions:\n  contents:\s*read/m);
+  assert.doesNotMatch(validateWorkflow, /secrets\./);
+  assert.doesNotMatch(validateWorkflow, /packages:/);
+  assert.doesNotMatch(validateWorkflow, /id-token:/);
+  assert.doesNotMatch(validateWorkflow, /attestations:/);
+});
+
+test("branch protection check context is pinned by the guard tests", () => {
+  // The required check context on dev/main is "<caller job name> / <reusable
+  // job id>", i.e. "Validate Node 24 (merge result) / validate"; renaming
+  // either breaks the merge gate.
+  const validateWorkflow = read(".github/workflows/validate.yml");
+  assert.match(validateWorkflow, /^jobs:\n  validate:/m);
+  const ciWorkflow = read(".github/workflows/ci.yml");
+  assert.match(ciWorkflow, /name:\s*Validate Node 24 \(merge result\)/);
 });
 
 test("docs describe the feature/dev/main promotion path", () => {
@@ -174,12 +192,12 @@ test("docs describe the feature/dev/main promotion path", () => {
 
 test("docs state dev and feature branch pushes publish the runner image only", () => {
   assert.match(readme, /dev and feature branch pushes publish the runner image only/);
-  assert.match(readme, /main and release tags publish both/);
+  assert.match(readme, /`?main`? and release tags publish both/);
 });
 
 test("docs state the compiler is published only on main pushes and release tags", () => {
   assert.match(deploymentGuide, /dev and feature branch pushes publish the runner only/);
-  assert.match(readme, /main and release tags publish both/);
+  assert.match(readme, /`?main`? and release tags publish both/);
 });
 
 test("deployment guide documents GHCR image retention with no automated deletion", () => {

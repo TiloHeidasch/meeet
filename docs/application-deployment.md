@@ -96,7 +96,8 @@ validates on Node 24 and builds and publishes the runner
 `linux/arm64`) on every trigger. `main` and release tags additionally publish
 the compiler (`ghcr.io/tiloheidasch/meeet-artifact-compiler`).
 dev and feature branch pushes publish the runner only. Every published image
-carries an immutable `sha-<full-sha>` tag, OCI revision labels, and provenance. Mutable
+carries an immutable `sha-<full-sha>` tag, OCI revision labels, provenance,
+and SBOM attestation. Mutable
 convenience tags are published only for `main` and `dev`. Feature builds
 additionally get a branch-reference tag normalized to a valid Docker tag by
 docker/metadata-action (for example `feature/18-branch-based-development`

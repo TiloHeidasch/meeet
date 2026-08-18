@@ -10,9 +10,10 @@ jobs:
   validate:
     runs-on: ubuntu-latest
     steps:
-      - name: Check out merge result
+      - name: Check out source
         # On pull_request events the default checkout resolves the merge ref
-        # (head merged into target), so validation proves the merged state is green.
+        # (head merged into target), so validation proves the merged state is
+        # green; on push events it checks out the pushed commit.
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
       - name: Set up Node 24
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
