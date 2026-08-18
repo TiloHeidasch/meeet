@@ -187,6 +187,8 @@ test("PR CI includes an e2e gate that builds, starts meeet, and runs a functiona
   const ciWorkflow = read(".github/workflows/ci.yml");
   assert.match(ciWorkflow, /name:\s*E2E build, spin up, calculate/);
   assert.match(ciWorkflow, /npm run build/);
+  assert.match(ciWorkflow, /schedule:compile:fixture/);
+  assert.match(ciWorkflow, /MEEET_SCHEDULE_ARTIFACT_PATH:\s*\/tmp\/mvv-scheduled-artifact\.json/);
   assert.match(ciWorkflow, /npm start/);
   assert.match(ciWorkflow, /MEEET_PROVIDER_MODE:\s*fixture/);
   assert.match(ciWorkflow, /node scripts\/e2e-calculation\.mjs/);
@@ -200,6 +202,8 @@ test("PR CI includes an e2e gate that builds, starts meeet, and runs a functiona
   assert.match(e2eScript, /"red"/);
   assert.match(e2eScript, /"blue"/);
   assert.match(e2eScript, /stationAreas/);
+  assert.match(e2eScript, /Date\.now/);
+  assert.match(e2eScript, /5 \* 60 \* 1000/);
 });
 
 test("docs describe the feature/dev/main promotion path", () => {

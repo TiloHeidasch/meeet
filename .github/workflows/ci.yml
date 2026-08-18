@@ -30,9 +30,12 @@ jobs:
         run: npm ci
       - name: Build application
         run: npm run build
+      - name: Compile fixture schedule artifact
+        run: npm run schedule:compile:fixture -- --output /tmp/mvv-scheduled-artifact.json
       - name: Start meeet
         env:
           MEEET_PROVIDER_MODE: fixture
+          MEEET_SCHEDULE_ARTIFACT_PATH: /tmp/mvv-scheduled-artifact.json
         run: |
           npm start > /tmp/meeet-server.log 2>&1 &
           echo $! > /tmp/meeet-server.pid

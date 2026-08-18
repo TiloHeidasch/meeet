@@ -111,8 +111,11 @@ npm run build
 git diff --check
 ```
 
-The e2e gate (`scripts/e2e-calculation.mjs`) runs against a built and started
-server in fixture provider mode and performs one functional calculation.
+The e2e gate compiles the fixture GTFS into a fresh schedule artifact with a
+current validity window and time-shifted trips (`npm run schedule:compile:fixture`),
+starts the built server in fixture provider mode against that artifact, and
+performs one functional calculation at now + 5 minutes
+(`scripts/e2e-calculation.mjs`).
 
 The application boundary is Munich. Map rendering and browser fixture work are
 owned by the visual/client migration; server code must preserve the v3

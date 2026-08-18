@@ -13,6 +13,7 @@
     "deploy:preflight": "node deploy/preflight-production.mjs",
     "start": "next start",
     "schedule:compile:mvv": "NODE_OPTIONS=--conditions=react-server tsx scripts/compile-mvv-schedule.ts",
+    "schedule:compile:fixture": "NODE_OPTIONS=--conditions=react-server tsx scripts/compile-fixture-schedule.ts",
     "lint": "eslint",
     "test": "tsx --test --import ./test/server-only-register.mjs test/*.test.ts",
     "test:e2e": "playwright test",

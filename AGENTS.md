@@ -31,8 +31,8 @@
   merge result (required check `Validate Node 24 (merge result) / validate`)
   and be up-to-date with their target.
 - PRs into `dev` must additionally pass the e2e gate (required check
-  `E2E build, spin up, calculate`): a full application build, a server
-  spin-up, and one functional calculation.
+  `E2E build, spin up, calculate`): a full application build, a schedule-artifact
+  compilation, a server spin-up, and one functional calculation.
 - Reviews are always performed by the oracle (code-review skill, both axes);
   when the oracle verdict has no remaining remarks, the change may be merged
   into `dev` without a human review. `main` promotion still requires a human
