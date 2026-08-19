@@ -20,10 +20,10 @@ export function createMeetingProviders(
 ): MeetingProviders {
   const config = readProviderConfig(env);
   if (config.mode === "fixture") {
-    return withMapConfiguration({
-      scheduledArtifact: FIXTURE_SCHEDULED_ARTIFACT,
-      scheduledAccess: FIXTURE_SCHEDULED_ACCESS_PROVIDER,
-    }, config);
+    const providers = config.scheduledArtifactPath === null
+      ? { scheduledArtifact: FIXTURE_SCHEDULED_ARTIFACT, scheduledAccess: FIXTURE_SCHEDULED_ACCESS_PROVIDER }
+      : withScheduledArtifact({ scheduledAccess: FIXTURE_SCHEDULED_ACCESS_PROVIDER }, config.scheduledArtifactPath);
+    return withMapConfiguration(providers, config);
   }
   if (config.mode === "self-hosted-routing") {
     if (!config.selfHostedRouting) throw new Error("Self-hosted routing manifest configuration is missing.");

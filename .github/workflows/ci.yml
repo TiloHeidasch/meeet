@@ -1,0 +1,58 @@
+name: CI
+
+on:
+  pull_request:
+    branches:
+      - main
+      - dev
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    name: Validate Node 24 (merge result)
+    uses: ./.github/workflows/validate.yml
+
+  e2e:
+    name: E2E build, spin up, calculate
+    needs: validate
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out merge result
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - name: Set up Node 24
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+        with:
+          node-version: 24.x
+          cache: npm
+      - name: Install dependencies
+        run: npm ci
+      - name: Build application
+        run: npm run build
+      - name: Compile fixture schedule artifact
+        run: npm run schedule:compile:fixture -- --output /tmp/mvv-scheduled-artifact.json
+      - name: Start meeet
+        env:
+          MEEET_PROVIDER_MODE: fixture
+          MEEET_SCHEDULE_ARTIFACT_PATH: /tmp/mvv-scheduled-artifact.json
+        run: |
+          npm start > /tmp/meeet-server.log 2>&1 &
+          echo $! > /tmp/meeet-server.pid
+          for attempt in $(seq 1 90); do
+            if curl -fsS -o /dev/null http://127.0.0.1:3000/; then
+              echo "meeet is ready"
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "meeet did not become ready; server log:"
+          cat /tmp/meeet-server.log
+          exit 1
+      - name: Functional calculation test
+        run: node scripts/e2e-calculation.mjs
+      - name: Stop meeet
+        if: always()
+        run: |
+          kill "$(cat /tmp/meeet-server.pid)" 2>/dev/null || true
+          pkill -f "next start" 2>/dev/null || true

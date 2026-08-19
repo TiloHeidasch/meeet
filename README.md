@@ -31,8 +31,8 @@ is `/mnt/user/appdata/meeet/schedule`. There are no host ports or local
 `tunnel run`, receives `TUNNEL_TOKEN`, and uses the Cloudflare dashboard
 service `http://meeet:3000`.
 
-The operator selects the runner image tag or digest and the compiler digest in
-the external `.env`. The runner and compiler GHCR packages must be public for
+The operator selects the digest-pinned runner and compiler images in the
+external `.env`. The runner and compiler GHCR packages must be public for
 unauthenticated host pulls, or the host may use a machine account with
 `read:packages`.
 
@@ -41,12 +41,37 @@ service fetches the latest MVV feed and compiles (or keeps) the artifact before
 `meeet` starts. The complete procedure is in
 [docs/application-deployment.md](docs/application-deployment.md).
 
+## Branch model
+
+Changes flow through a single promotion path: `feature/<slug> → dev → main`.
+`main` remains the default production branch. Pull requests into `dev` and
+`main` require Node 24 test/typecheck/lint validation of the merge result (see
+[CI](#validation)); PRs into `dev` and `main` require the e2e gate (build,
+spin up, one functional calculation). Reviews are performed by the oracle
+(code-review skill) as an advisory quality gate; branch protection requires no
+reviews on `dev` or `main`. PRs into `dev` are created and merged by the
+agent; `dev → main` promotion merges are performed manually by the operator
+through the GitHub web UI, never by an agent or CLI. Branches must be
+up-to-date with their target, and
+force pushes and branch deletion are blocked on `dev` and `main`.
+
 ## Image publication
 
-Pushes to `main` and release tags automatically build and publish both `meeet`
-(runner) and `meeet-artifact-compiler` (compiler) multi-platform images
-(`linux/amd64`, `linux/arm64`) to GHCR with immutable `sha-<full-sha>` tags and
-build provenance.
+Pushes to `main`, `dev`, and `feature/**` branches and release tags trigger the
+unified `publish-image.yml` workflow. `main` and `dev` pushes and release tags
+publish both the `meeet` (runner) and `meeet-artifact-compiler` (compiler)
+multi-platform images (`linux/amd64`, `linux/arm64`); feature branch pushes
+publish the runner image only. Every published
+image gets an immutable `sha-<full-sha>` tag (authoritative, matching the OCI
+revision labels) with build provenance and SBOM attestation.
+Mutable convenience tags are published only for `main` and `dev`. Feature
+builds additionally get a branch-reference tag normalized to a valid Docker tag
+by docker/metadata-action (for example `feature/18-branch-based-development`
+becomes `feature-18-branch-based-development`); like every mutable tag it is
+never production-eligible, and the immutable `sha-<full-sha>` tag remains the
+authoritative reference. Production pairing uses the digest-pinned references
+from the workflow summary (see
+[docs/application-deployment.md](docs/application-deployment.md)).
 
 [`compose.production.yml`](compose.production.yml) remains a separate,
 checked-in hardened repository template. Its strict preflight, token-file
@@ -87,6 +112,12 @@ npm run lint
 npm run build
 git diff --check
 ```
+
+The e2e gate compiles the fixture GTFS into a fresh schedule artifact with a
+current validity window and time-shifted trips (`npm run schedule:compile:fixture`),
+starts the built server in fixture provider mode against that artifact, and
+performs one functional calculation at now + 5 minutes
+(`scripts/e2e-calculation.mjs`).
 
 The application boundary is Munich. Map rendering and browser fixture work are
 owned by the visual/client migration; server code must preserve the v3
