@@ -75,7 +75,7 @@ export function calculateScheduledSurface(input: ScheduledSurfaceInput): Schedul
     stationAreaCount: input.schedule.stationAreas.length,
     connectionCount: input.schedule.connections.length,
     coverage: "scheduled-service-day-local-radius/v1",
-    representativePointBasis: "inside-clipped-cell/v1",
+    representativePointBasis: "station-area-coordinate/v1",
   };
   const stationAreas = createStationAreaCandidates(
     stationAreaCatalog,
@@ -114,7 +114,7 @@ export function buildScheduledStationAreaCatalog(
   const entries: ScheduledStationAreaCatalogEntry[] = [];
   const areas = [...schedule.stationAreas].sort((left, right) => compareScheduledIds(left.id, right.id));
   for (let index = 0; index < areas.length; index += 1) {
-    if (index % STATION_AREA_CHECKPOINT === 0) deadlineCheck?.("surface-cells");
+    if (index % STATION_AREA_CHECKPOINT === 0) deadlineCheck?.("station-areas");
     const area = areas[index];
     if (area === undefined || !isWithinOfficialMunichBoundary(area.coordinate)) continue;
     entries.push({ stationAreaId: area.id, name: area.name, coordinate: area.coordinate, mode: area.mode });
@@ -132,19 +132,19 @@ export function createStationAreaCandidates(
 ): ScheduledStationAreaCandidate[] {
   const redByArea = new Map<string, StationArrivalField>();
   for (let index = 0; index < redArrivals.length; index += 1) {
-    if (index % STATION_AREA_CHECKPOINT === 0) deadlineCheck?.("surface-cells");
+    if (index % STATION_AREA_CHECKPOINT === 0) deadlineCheck?.("station-areas");
     const arrival = redArrivals[index];
     if (arrival !== undefined) redByArea.set(arrival.stationAreaId, arrival);
   }
   const blueByArea = new Map<string, StationArrivalField>();
   for (let index = 0; index < blueArrivals.length; index += 1) {
-    if (index % STATION_AREA_CHECKPOINT === 0) deadlineCheck?.("surface-cells");
+    if (index % STATION_AREA_CHECKPOINT === 0) deadlineCheck?.("station-areas");
     const arrival = blueArrivals[index];
     if (arrival !== undefined) blueByArea.set(arrival.stationAreaId, arrival);
   }
   const candidates: ScheduledStationAreaCandidate[] = [];
   for (let index = 0; index < catalog.entries.length; index += 1) {
-    if (index % STATION_AREA_CHECKPOINT === 0) deadlineCheck?.("surface-cells");
+    if (index % STATION_AREA_CHECKPOINT === 0) deadlineCheck?.("station-areas");
     const area = catalog.entries[index];
     if (area === undefined) continue;
     const red = redByArea.get(area.stationAreaId);
@@ -187,19 +187,19 @@ export async function evaluateScheduledStationAreaCandidates(
 ): Promise<ScheduledStationAreaCandidate[]> {
   const redByArea = new Map<string, StationArrivalField>();
   for (let index = 0; index < redArrivals.length; index += 1) {
-    if (index % STATION_AREA_CHECKPOINT === 0) deadlineCheck?.("surface-cells");
+    if (index % STATION_AREA_CHECKPOINT === 0) deadlineCheck?.("station-areas");
     const arrival = redArrivals[index];
     if (arrival !== undefined) redByArea.set(arrival.stationAreaId, arrival);
   }
   const blueByArea = new Map<string, StationArrivalField>();
   for (let index = 0; index < blueArrivals.length; index += 1) {
-    if (index % STATION_AREA_CHECKPOINT === 0) deadlineCheck?.("surface-cells");
+    if (index % STATION_AREA_CHECKPOINT === 0) deadlineCheck?.("station-areas");
     const arrival = blueArrivals[index];
     if (arrival !== undefined) blueByArea.set(arrival.stationAreaId, arrival);
   }
   const candidates: ScheduledStationAreaCandidate[] = [];
   for (let index = 0; index < catalog.entries.length; index += 1) {
-    if (index % STATION_AREA_CHECKPOINT === 0) deadlineCheck?.("surface-cells");
+    if (index % STATION_AREA_CHECKPOINT === 0) deadlineCheck?.("station-areas");
     const area = catalog.entries[index];
     if (area === undefined) continue;
     const red = redByArea.get(area.stationAreaId);

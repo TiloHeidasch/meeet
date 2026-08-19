@@ -24,7 +24,7 @@ export type ScheduledDeadlinePhase =
   | "meeting-result"
   | "routing-window"
   | "routing-scan"
-  | "surface-cells";
+  | "station-areas";
 
 /** Optional phase checkpoint; callers may inject the admission deadline check. */
 export type ScheduledDeadlineCheck = (phase: ScheduledDeadlinePhase) => void;
@@ -224,7 +224,7 @@ export interface ScheduledSurfaceMetadata {
   readonly stationAreaCount: number;
   readonly connectionCount: number;
   readonly coverage: "scheduled-service-day-local-radius/v1";
-  readonly representativePointBasis: "inside-clipped-cell/v1";
+  readonly representativePointBasis: "station-area-coordinate/v1";
 }
 
 export interface ScheduledSurfaceResult {
