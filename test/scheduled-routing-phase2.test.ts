@@ -24,8 +24,8 @@ import {
 import {
   FIXTURE_SCHEDULED_ACCESS_PROVIDER,
   FIXTURE_SCHEDULED_ARTIFACT,
-  FIXTURE_SCHEDULED_GTFS_FILES,
 } from "../lib/fixtures/scheduled-routing.ts";
+import { currentDateRange, fixtureFeedFiles } from "../scripts/fixture-schedule-transform.ts";
 import { MvgScheduledAccessSeedProvider } from "../lib/providers/mvg-scheduled-access.ts";
 import { handleMeetingPost } from "../lib/domain/meeting-api.ts";
 import { fixtureProviders } from "../lib/fixtures/providers.ts";
@@ -829,15 +829,7 @@ test("fixture mode honors MEEET_SCHEDULE_ARTIFACT_PATH and keeps the fixture acc
   const directory = await mkdtemp(join(tmpdir(), "meeet-fixture-artifact-"));
   try {
     const dateRange = currentDateRange();
-    const feedFiles = {
-      ...FIXTURE_SCHEDULED_GTFS_FILES,
-      "feed_info.txt": FIXTURE_SCHEDULED_GTFS_FILES["feed_info.txt"]
-        .replace("20260801", dateRange.firstDate.replaceAll("-", ""))
-        .replace("20260831", dateRange.lastDate.replaceAll("-", "")),
-      "calendar.txt": FIXTURE_SCHEDULED_GTFS_FILES["calendar.txt"]
-        .replace("20260801", dateRange.firstDate.replaceAll("-", ""))
-        .replace("20260831", dateRange.lastDate.replaceAll("-", "")),
-    };
+    const feedFiles = fixtureFeedFiles(Date.now());
     const artifact = compileScheduledArtifact({
       sourceUrl: SCHEDULED_MVV_FEED_URL,
       rawArchiveBytes: new TextEncoder().encode("fixture-factory-test"),
@@ -869,12 +861,34 @@ test("default fixture mode uses the pre-baked fixture artifact", () => {
   assert.equal(providers.scheduledAccess?.descriptor.name, "fixture-scheduled-access");
 });
 
-function currentDateRange(): { firstDate: string; lastDate: string } {
-  const today = new Date();
-  const firstDate = new Date(Date.UTC(today.getUTCFullYear(), today.getUTCMonth(), today.getUTCDate() - 1));
-  const lastDate = new Date(Date.UTC(today.getUTCFullYear(), today.getUTCMonth(), today.getUTCDate() + 1));
-  return {
-    firstDate: firstDate.toISOString().slice(0, 10),
-    lastDate: lastDate.toISOString().slice(0, 10),
-  };
-}
+test("fixture schedule transform shifts stop times deterministically around the Berlin wall clock", () => {
+  const firstDeparture = (files: GtfsFeedFiles): string => files["stop_times.txt"].split("\n")[1]?.split(",")[2] ?? "unknown";
+  const noonFeed = fixtureFeedFiles(new Date("2026-08-18T14:00:00+02:00").getTime());
+  assert.equal(firstDeparture(noonFeed), "14:10:00");
+  const wrapFeed = fixtureFeedFiles(new Date("2026-08-18T07:00:00+02:00").getTime());
+  assert.equal(firstDeparture(wrapFeed), "31:10:00");
+  const midnightFeed = fixtureFeedFiles(new Date("2026-08-18T23:50:00+02:00").getTime());
+  assert.equal(firstDeparture(midnightFeed), "24:00:00");
+});
+
+test("fixture schedule transform re-dates the feed around today and still compiles", async () => {
+  const dateRange = currentDateRange();
+  const feedFiles = fixtureFeedFiles(new Date("2026-08-18T14:00:00+02:00").getTime());
+  const firstDate = dateRange.firstDate.replaceAll("-", "");
+  const lastDate = dateRange.lastDate.replaceAll("-", "");
+  assert.ok(feedFiles["feed_info.txt"].endsWith(`de,fixture-scheduled-2026-08,${firstDate},${lastDate}`));
+  assert.ok(feedFiles["calendar.txt"].endsWith(`1,${firstDate},${lastDate}`));
+  assert.ok(!feedFiles["feed_info.txt"].includes("20260801"));
+  assert.ok(!feedFiles["calendar.txt"].includes("20260831"));
+
+  const artifact = compileScheduledArtifact({
+    sourceUrl: SCHEDULED_MVV_FEED_URL,
+    rawArchiveBytes: new TextEncoder().encode("fixture-transform-deterministic"),
+    feedFiles,
+    retrievedAt: "2026-08-11T10:00:00Z",
+    feedId: "fixture-scheduled-feed",
+  });
+  assert.equal(artifact.feedId, "fixture-scheduled-feed");
+  assert.equal(artifact.serviceDateRange.firstDate, dateRange.firstDate);
+  assert.equal(artifact.serviceDateRange.lastDate, dateRange.lastDate);
+});
