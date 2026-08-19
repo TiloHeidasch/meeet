@@ -296,6 +296,20 @@ test.describe("v3 Munich meeting surface", () => {
     const origin1Text = await origin1.textContent();
     expect(origin1Text?.trim()).toBe("");
 
+    // Pin design per issue #49: white outer area, participant-colored inner fill, white middle circle
+    const origin1Paths = await origin1Svg.evaluate((svg) => [...svg.querySelectorAll("path")].map((path) => path.getAttribute("fill")));
+    expect(origin1Paths).toEqual(["#FFFFFF", "currentColor", "#FFFFFF"]);
+    await expect(origin1).toHaveCSS("color", "rgb(232, 93, 74)");
+    await expect(originMarkers.nth(1)).toHaveCSS("color", "rgb(61, 112, 201)");
+    // Pin visual size is 200% of the 18px bus visual size; the button hit target is at least 44px wide
+    const pinBox = await origin1Svg.boundingBox();
+    if (!pinBox) throw new Error("Origin pin svg was not painted");
+    expect(pinBox.width).toBeGreaterThan(35);
+    expect(pinBox.width).toBeLessThan(37);
+    const markerBox = await origin1.boundingBox();
+    if (!markerBox) throw new Error("Origin marker was not painted");
+    expect(markerBox.width).toBeGreaterThanOrEqual(44);
+
     // Participant pins are DOM markers above the canvas: no icon occludes them
     // (scroll the map into view first so the markers are inside the viewport for element hit-testing)
     await page.locator(".map-frame").evaluate((frame) => frame.scrollIntoView({ block: "center" }));
@@ -345,7 +359,7 @@ test.describe("v3 Munich meeting surface", () => {
     expect(indexOf("meeet-stations-sbahn")).toBeGreaterThan(indexOf("meeet-stations-ubahn"));
     expect(indexOf("meeet-selected-station-area")).toBeGreaterThan(indexOf("meeet-stations-sbahn"));
 
-    // Size hierarchy matches the issue #39 spec ratios: sbahn 200%, ubahn 166%, tram 133%, bus 100% of the bus visual size
+    // Size hierarchy matches the issue #49 spec ratios: sbahn 150%, ubahn 133%, tram ~116%, bus 100% of the bus visual size
     // (visual size = image width / pixelRatio minus the padding on each side)
     const iconSizes = await page.evaluate((iconPadding: number) => {
       const map = (window as unknown as { __meeetMap?: { getImage: (id: string) => { data: { width: number }; pixelRatio: number } | undefined } }).__meeetMap;
