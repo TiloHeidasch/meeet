@@ -29,11 +29,8 @@ jobs:
       - name: Check out source
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
 
-      - name: Set up QEMU
-        uses: docker/setup-qemu-action@96fe6ef7f33517b61c61be40b68a1882f3264fb8
-
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c
+        uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e
 
       - name: Normalize GHCR owner
         id: owner
@@ -67,7 +64,7 @@ jobs:
           context: .
           file: ./Dockerfile
           target: runner
-          platforms: linux/amd64,linux/arm64
+          platforms: linux/amd64
           push: true
           tags: ${{ steps.meta_runner.outputs.tags }}
           labels: ${{ steps.meta_runner.outputs.labels }}
@@ -100,7 +97,7 @@ jobs:
           context: .
           file: ./Dockerfile
           target: artifact-compiler
-          platforms: linux/amd64,linux/arm64
+          platforms: linux/amd64
           push: true
           tags: ${{ steps.meta_compiler.outputs.tags }}
           labels: ${{ steps.meta_compiler.outputs.labels }}

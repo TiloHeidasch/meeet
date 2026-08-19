@@ -60,10 +60,9 @@ force pushes and branch deletion are blocked on `dev` and `main`.
 Pushes to `main`, `dev`, and `feature/**` branches and release tags trigger the
 unified `publish-image.yml` workflow. `main` and `dev` pushes and release tags
 publish both the `meeet` (runner) and `meeet-artifact-compiler` (compiler)
-multi-platform images (`linux/amd64`, `linux/arm64`); feature branch pushes
-publish the runner image only. Every published
-image gets an immutable `sha-<full-sha>` tag (authoritative, matching the OCI
-revision labels) with build provenance and SBOM attestation.
+images for `linux/amd64`; feature branch pushes publish the runner image only.
+Every published image gets an immutable `sha-<full-sha>` tag (authoritative,
+matching the OCI revision labels) with build provenance and SBOM attestation.
 Mutable convenience tags are published only for `main` and `dev`. Feature
 builds additionally get a branch-reference tag normalized to a valid Docker tag
 by docker/metadata-action (for example `feature/18-branch-based-development`

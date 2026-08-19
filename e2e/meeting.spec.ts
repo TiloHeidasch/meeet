@@ -2,6 +2,7 @@ import { expect, test, type Page } from "@playwright/test";
 import { inflateSync } from "node:zlib";
 import http from "node:http";
 import type net from "node:net";
+import { STATION_ICON_PADDING, STATION_ICON_SPEC_RATIOS } from "../lib/client/station-icon-sizes";
 
 const MAP_STYLE = "https://tiles.openfreemap.org/styles/liberty";
 const MAP_ORIGIN = "https://tiles.openfreemap.org";
@@ -295,11 +296,32 @@ test.describe("v3 Munich meeting surface", () => {
     const origin1Text = await origin1.textContent();
     expect(origin1Text?.trim()).toBe("");
 
-    // Station markers on MapLibre canvas use symbol layers
+    // Participant pins are DOM markers above the canvas: no icon occludes them
+    // (scroll the map into view first so the markers are inside the viewport for element hit-testing)
+    await page.locator(".map-frame").evaluate((frame) => frame.scrollIntoView({ block: "center" }));
+    const originPinsOnTop = await page.evaluate(() => {
+      return [...document.querySelectorAll(".meeet-origin-marker")].map((marker) => {
+        const rect = marker.getBoundingClientRect();
+        const points = [
+          { x: rect.x + rect.width / 2, y: rect.y + rect.height / 2 },
+          { x: rect.x + 1, y: rect.y + 1 },
+          { x: rect.x + rect.width - 1, y: rect.y + 1 },
+          { x: rect.x + 1, y: rect.y + rect.height - 1 },
+          { x: rect.x + rect.width - 1, y: rect.y + rect.height - 1 },
+        ];
+        return points.every((point) => {
+          const top = document.elementsFromPoint(point.x, point.y)[0];
+          return !!top && top.closest(".meeet-origin-marker") !== null;
+        });
+      });
+    });
+    expect(originPinsOnTop).toEqual([true, true]);
+
+    // Station markers on MapLibre canvas use per-mode symbol layers
     const layerTypes = await page.evaluate(() => {
       const map = (window as unknown as { __meeetMap?: { getLayer: (id: string) => { type: string } | undefined; getLayoutProperty: (id: string, name: string) => unknown } }).__meeetMap;
       if (!map) throw new Error("Map instance unavailable");
-      return ["meeet-stations-red", "meeet-stations-blue", "meeet-stations-fair", "meeet-stations-unclassified"].map((id) => {
+      return ["meeet-stations-bus", "meeet-stations-tram", "meeet-stations-ubahn", "meeet-stations-sbahn"].map((id) => {
         const layer = map.getLayer(id);
         const image = map.getLayoutProperty(id, "icon-image");
         return { id, type: layer?.type, image };
@@ -309,6 +331,40 @@ test.describe("v3 Munich meeting surface", () => {
       expect(layer.type).toBe("symbol");
       expect(layer.image).toBeDefined();
     }
+
+    // Strict paint order: bus < tram < ubahn < sbahn < selection outline; participant pins are DOM markers above the canvas (asserted above)
+    const layerOrder = await page.evaluate(() => {
+      const map = (window as unknown as { __meeetMap?: { getStyle: () => { layers: Array<{ id: string }> } } }).__meeetMap;
+      if (!map) throw new Error("Map instance unavailable");
+      return map.getStyle().layers.map((layer) => layer.id);
+    });
+    const indexOf = (id: string) => layerOrder.indexOf(id);
+    expect(indexOf("meeet-stations-bus")).toBeGreaterThanOrEqual(0);
+    expect(indexOf("meeet-stations-tram")).toBeGreaterThan(indexOf("meeet-stations-bus"));
+    expect(indexOf("meeet-stations-ubahn")).toBeGreaterThan(indexOf("meeet-stations-tram"));
+    expect(indexOf("meeet-stations-sbahn")).toBeGreaterThan(indexOf("meeet-stations-ubahn"));
+    expect(indexOf("meeet-selected-station-area")).toBeGreaterThan(indexOf("meeet-stations-sbahn"));
+
+    // Size hierarchy matches the issue #39 spec ratios: sbahn 200%, ubahn 166%, tram 133%, bus 100% of the bus visual size
+    // (visual size = image width / pixelRatio minus the padding on each side)
+    const iconSizes = await page.evaluate((iconPadding: number) => {
+      const map = (window as unknown as { __meeetMap?: { getImage: (id: string) => { data: { width: number }; pixelRatio: number } | undefined } }).__meeetMap;
+      if (!map) throw new Error("Map instance unavailable");
+      const visualSize = (id: string) => {
+        const image = map.getImage(id);
+        if (!image) throw new Error(`Image ${id} missing`);
+        return image.data.width / image.pixelRatio - 2 * iconPadding;
+      };
+      return {
+        sbahn: visualSize("meeet-station-sbahn-red"),
+        ubahn: visualSize("meeet-station-ubahn-red"),
+        tram: visualSize("meeet-station-tram-red"),
+        bus: visualSize("meeet-station-bus-red"),
+      };
+    }, STATION_ICON_PADDING);
+    expect(iconSizes.sbahn / iconSizes.bus).toBeCloseTo(STATION_ICON_SPEC_RATIOS.sbahn, 5);
+    expect(iconSizes.ubahn / iconSizes.bus).toBeCloseTo(STATION_ICON_SPEC_RATIOS.ubahn, 5);
+    expect(iconSizes.tram / iconSizes.bus).toBeCloseTo(STATION_ICON_SPEC_RATIOS.tram, 5);
 
     // Legend swatches for all classifications are visible
     for (const color of ["red", "blue", "fair", "neutral"]) {

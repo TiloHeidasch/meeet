@@ -170,7 +170,7 @@ export function writeScheduledArtifact(path: string, artifact: ScheduledRoutingA
   const absolutePath = resolve(path);
   validateArtifactStructure(artifact);
   const { compiledArtifactId, ...identity } = artifact.provenance;
-  const { provenance: _provenance, ...core } = artifact;
+  const { provenance, ...core } = artifact;
   if (calculateScheduledContentHash(identity.feedId, identity.timeZone, identity.files) !== identity.contentHash || calculateScheduledCompiledArtifactId(core, identity) !== compiledArtifactId) {
     throw new ScheduleArtifactUnavailableError("The scheduled artifact identity does not match its contents.");
   }
@@ -186,7 +186,7 @@ export function writeScheduledArtifact(path: string, artifact: ScheduledRoutingA
     payloadSha256: sha256Bytes(payload),
     compiledArtifactId,
     summary: bundleSummary(core),
-    provenance: artifact.provenance,
+    provenance,
     compilerVersion: SCHEDULED_COMPILER_VERSION,
   };
   const directory = dirname(absolutePath);
@@ -353,7 +353,7 @@ export function loadScheduledArtifact(
   if (!isScheduledRoutingArtifact(parsed)) throw new ScheduleArtifactUnavailableError("The configured scheduled artifact failed schema validation.");
   validateArtifactStructure(parsed);
   const { compiledArtifactId, ...identity } = parsed.provenance;
-  const { provenance: _provenance, ...core } = parsed;
+  const { provenance, ...core } = parsed;
   if (calculateScheduledContentHash(identity.feedId, identity.timeZone, identity.files) !== identity.contentHash) {
     throw new ScheduleArtifactUnavailableError("The configured scheduled artifact file-hash content identity does not match its provenance.");
   }
@@ -362,7 +362,7 @@ export function loadScheduledArtifact(
   }
   validateBundleSummary(manifest.summary, core);
   validateRawArchive(parsed, options.rawArchiveBytes);
-  validateFreshness(parsed.provenance.acquisition, options.now ?? defaultLoaderNow());
+  validateFreshness(provenance.acquisition, options.now ?? defaultLoaderNow());
   const frozen = deepFreeze(parsed);
   loadedScheduledArtifacts.set(absolutePath, frozen);
   return frozen;
