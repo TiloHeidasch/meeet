@@ -176,14 +176,14 @@ export interface ScheduledParticipantSurface {
   readonly stationArrivals: readonly StationArrivalField[];
 }
 
-export type ScheduledCellClassification = "red" | "blue" | "fair" | "unclassified";
+export type ScheduledStationAreaClassification = "red" | "blue" | "fair" | "unclassified";
 
 export interface ScheduledStationAreaCandidate {
   readonly stationAreaId: string;
   readonly name: string;
   readonly coordinate: ScheduledCoordinate;
   readonly mode: StationAreaMode;
-  readonly classification: ScheduledCellClassification;
+  readonly classification: ScheduledStationAreaClassification;
   readonly redArrivalSeconds: number | null;
   readonly blueArrivalSeconds: number | null;
   readonly fasterParticipant: "red" | "blue" | null;

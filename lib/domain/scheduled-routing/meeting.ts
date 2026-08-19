@@ -219,8 +219,8 @@ export async function calculateScheduledMeetingWithBasis(
         coverage: "scheduled-service-day-local-radius/v1",
         representativePointBasis: "station-area-coordinate/v1",
         classificationMethod: "scheduled-arrival-comparison-with-selected-tolerance/v1",
-        classificationBasis: "representative-point",
-        finalWalkingMethod: "geometric-station-walking-estimate-not-navigation",
+        classificationBasis: "scheduled-station-area-arrival/v1",
+        finalWalkingMethod: "scheduled-access-and-transfer-walking/v1",
       },
       stationAreas: {
         count: stationAreas.length,
