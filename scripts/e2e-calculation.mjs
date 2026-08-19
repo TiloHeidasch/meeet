@@ -1,7 +1,8 @@
 // E2E functional calculation gate.
 //
-// Runs against a built and started meeet server (fixture provider mode) and
-// performs one functional calculation through the public JSON endpoint.
+// Runs against a built and started meeet server (fixture provider mode with a
+// freshly compiled fixture schedule artifact) and performs one functional
+// calculation through the public JSON endpoint at now + 5 minutes.
 // Plain Node ESM, no dependencies, no TypeScript.
 
 const BASE_URL = process.env.MEEET_E2E_BASE_URL ?? "http://127.0.0.1:3000";
@@ -14,7 +15,7 @@ const REQUEST = {
   ],
   tolerancePercent: 10,
   changeTimePreset: "medium",
-  searchStartAt: "2026-08-11T08:05:00+02:00",
+  searchStartAt: new Date(Math.floor((Date.now() + 5 * 60 * 1000) / 1000) * 1000).toISOString(),
 };
 
 function fail(assertion, detail) {
