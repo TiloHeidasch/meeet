@@ -92,8 +92,7 @@ Changes flow through the promotion path `feature/<slug> → dev → main`; `main
 is the default production branch. Pushes to `main`, `dev`, and `feature/**`
 branches and release tags run the unified `publish-image.yml` workflow, which
 validates on Node 24 and builds and publishes the runner
-(`ghcr.io/tiloheidasch/meeet`) multi-platform image (`linux/amd64`,
-`linux/arm64`) on every trigger. `main` and `dev` pushes and release tags
+(`ghcr.io/tiloheidasch/meeet`) image for `linux/amd64` on every trigger. `main` and `dev` pushes and release tags
 additionally publish the compiler (`ghcr.io/tiloheidasch/meeet-artifact-compiler`);
 feature branch pushes publish the runner only. Every published image
 carries an immutable `sha-<full-sha>` tag, OCI revision labels, provenance,
