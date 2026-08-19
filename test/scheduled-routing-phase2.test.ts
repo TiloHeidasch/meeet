@@ -25,6 +25,7 @@ import {
   FIXTURE_SCHEDULED_ACCESS_PROVIDER,
   FIXTURE_SCHEDULED_ARTIFACT,
 } from "../lib/fixtures/scheduled-routing.ts";
+import { currentDateRange, fixtureFeedFiles } from "../scripts/fixture-schedule-transform.ts";
 import { MvgScheduledAccessSeedProvider } from "../lib/providers/mvg-scheduled-access.ts";
 import { handleMeetingPost } from "../lib/domain/meeting-api.ts";
 import { fixtureProviders } from "../lib/fixtures/providers.ts";
@@ -822,4 +823,72 @@ test("configured scheduled artifact errors propagate from the provider factory",
     MEEET_SCHEDULE_ARTIFACT_PATH: "/tmp/meeet-missing-scheduled-artifact.json",
     MEEET_SCHEDULED_MIN_MEMORY_GIB: "4",
   }), ScheduleArtifactUnavailableError);
+});
+
+test("fixture mode honors MEEET_SCHEDULE_ARTIFACT_PATH and keeps the fixture access provider", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "meeet-fixture-artifact-"));
+  try {
+    const dateRange = currentDateRange();
+    const feedFiles = fixtureFeedFiles(Date.now());
+    const artifact = compileScheduledArtifact({
+      sourceUrl: SCHEDULED_MVV_FEED_URL,
+      rawArchiveBytes: new TextEncoder().encode("fixture-factory-test"),
+      feedFiles,
+      retrievedAt: "2026-08-11T10:00:00Z",
+      feedId: "fixture-scheduled-feed",
+    });
+    const path = join(directory, "scheduled-artifact.json");
+    writeScheduledArtifact(path, artifact);
+
+    const providers = createMeetingProviders({
+      MEEET_PROVIDER_MODE: "fixture",
+      MEEET_SCHEDULE_ARTIFACT_PATH: path,
+    });
+    assert.equal(providers.scheduledArtifact?.feedId, "fixture-scheduled-feed");
+    assert.equal(providers.scheduledArtifact?.serviceDateRange.firstDate, dateRange.firstDate);
+    assert.equal(providers.scheduledArtifact?.serviceDateRange.lastDate, dateRange.lastDate);
+    assert.notEqual(providers.scheduledArtifact?.provenance.acquisition.feedValidFrom, "2026-08-01");
+    assert.equal(providers.scheduledAccess?.descriptor.name, "fixture-scheduled-access");
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("default fixture mode uses the pre-baked fixture artifact", () => {
+  const providers = createMeetingProviders({ MEEET_PROVIDER_MODE: "fixture" });
+  assert.equal(providers.scheduledArtifact?.feedId, "fixture-scheduled-feed");
+  assert.equal(providers.scheduledArtifact?.provenance.acquisition.feedValidFrom, "2026-08-01");
+  assert.equal(providers.scheduledAccess?.descriptor.name, "fixture-scheduled-access");
+});
+
+test("fixture schedule transform shifts stop times deterministically around the Berlin wall clock", () => {
+  const firstDeparture = (files: GtfsFeedFiles): string => files["stop_times.txt"].split("\n")[1]?.split(",")[2] ?? "unknown";
+  const noonFeed = fixtureFeedFiles(new Date("2026-08-18T14:00:00+02:00").getTime());
+  assert.equal(firstDeparture(noonFeed), "14:10:00");
+  const wrapFeed = fixtureFeedFiles(new Date("2026-08-18T07:00:00+02:00").getTime());
+  assert.equal(firstDeparture(wrapFeed), "31:10:00");
+  const midnightFeed = fixtureFeedFiles(new Date("2026-08-18T23:50:00+02:00").getTime());
+  assert.equal(firstDeparture(midnightFeed), "24:00:00");
+});
+
+test("fixture schedule transform re-dates the feed around today and still compiles", async () => {
+  const dateRange = currentDateRange();
+  const feedFiles = fixtureFeedFiles(new Date("2026-08-18T14:00:00+02:00").getTime());
+  const firstDate = dateRange.firstDate.replaceAll("-", "");
+  const lastDate = dateRange.lastDate.replaceAll("-", "");
+  assert.ok(feedFiles["feed_info.txt"].endsWith(`de,fixture-scheduled-2026-08,${firstDate},${lastDate}`));
+  assert.ok(feedFiles["calendar.txt"].endsWith(`1,${firstDate},${lastDate}`));
+  assert.ok(!feedFiles["feed_info.txt"].includes("20260801"));
+  assert.ok(!feedFiles["calendar.txt"].includes("20260831"));
+
+  const artifact = compileScheduledArtifact({
+    sourceUrl: SCHEDULED_MVV_FEED_URL,
+    rawArchiveBytes: new TextEncoder().encode("fixture-transform-deterministic"),
+    feedFiles,
+    retrievedAt: "2026-08-11T10:00:00Z",
+    feedId: "fixture-scheduled-feed",
+  });
+  assert.equal(artifact.feedId, "fixture-scheduled-feed");
+  assert.equal(artifact.serviceDateRange.firstDate, dateRange.firstDate);
+  assert.equal(artifact.serviceDateRange.lastDate, dateRange.lastDate);
 });
