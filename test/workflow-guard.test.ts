@@ -59,13 +59,12 @@ test("validation job runs Node 24 checks before publication", () => {
   assert.match(ciWorkflow, /name:\s*Validate Node 24 \(merge result\)/);
 });
 
-test("publish job builds and publishes both runner and compiler images with multi-platform and provenance", () => {
+test("publish job builds and publishes both runner and compiler images for linux/amd64 only with provenance", () => {
   const job = publishJob(publishWorkflow);
 
   // Runner image configuration
   assert.match(job, /images:\s*ghcr\.io\/\${{\s*steps\.owner\.outputs\.owner\s*}}\/meeet\b/);
   assert.match(job, /target:\s*runner/);
-  assert.match(job, /platforms:\s*linux\/amd64,linux\/arm64/);
   assert.match(job, /cache-from:\s*type=gha,scope=meeet-runner/);
   assert.match(job, /cache-to:\s*type=gha,mode=max,scope=meeet-runner/);
 
@@ -74,6 +73,11 @@ test("publish job builds and publishes both runner and compiler images with mult
   assert.match(job, /target:\s*artifact-compiler/);
   assert.match(job, /cache-from:\s*type=gha,scope=meeet-compiler/);
   assert.match(job, /cache-to:\s*type=gha,mode=max,scope=meeet-compiler/);
+
+  // Both runner and compiler builds target linux/amd64 as the single platform.
+  const platformMatches = job.match(/platforms:\s*[^\n]+/g);
+  assert.ok(platformMatches && platformMatches.length === 2, "both runner and compiler must declare a platforms: line");
+  assert.deepEqual(platformMatches, ["platforms: linux/amd64", "platforms: linux/amd64"]);
 
   // Shared tags and provenance settings
   const tagMatches = job.match(/type=sha,format=long,prefix=sha-/g);
@@ -84,6 +88,11 @@ test("publish job builds and publishes both runner and compiler images with mult
   // Digest summary
   assert.match(job, /MEEET_IMAGE=ghcr\.io\/\${GHCR_OWNER}\/meeet@\${RUNNER_DIGEST}/);
   assert.match(job, /MEEET_COMPILER_IMAGE=ghcr\.io\/\${GHCR_OWNER}\/meeet-artifact-compiler@\${COMPILER_DIGEST}/);
+});
+
+test("publish workflow targets linux/amd64 only and does not set up QEMU", () => {
+  assert.doesNotMatch(publishWorkflow, /linux\/arm64/, "arm64 builds must be dropped");
+  assert.doesNotMatch(publishWorkflow, /setup-qemu-action|QEMU/i, "QEMU emulation setup must be removed");
 });
 
 test("grants registry write permissions only in the publish job under least privilege", () => {
@@ -110,14 +119,14 @@ test("documentation does not contain manual compiler dispatch instructions", () 
   }
 });
 
-test("compiler is published only on main pushes and release tags", () => {
+test("compiler is published on main and dev pushes and release tags", () => {
   const job = publishJob(publishWorkflow);
   const compilerGuard =
-    "if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/')";
+    "if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/dev' || startsWith(github.ref, 'refs/tags/')";
   const guardMatches = job.match(new RegExp(compilerGuard.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "g"));
   assert.ok(
     guardMatches && guardMatches.length === 2,
-    "compiler metadata and compiler build steps must both carry the main/tag guard",
+    "compiler metadata and compiler build steps must both carry the main/dev/tag guard",
   );
 
   // The runner build step must not be gated.
@@ -213,14 +222,14 @@ test("docs describe the feature/dev/main promotion path", () => {
   }
 });
 
-test("docs state dev and feature branch pushes publish the runner image only", () => {
-  assert.match(readme, /dev and feature branch pushes publish the runner image only/);
-  assert.match(readme, /`?main`? and release tags publish both/);
+test("docs state feature branch pushes publish the runner image only", () => {
+  assert.match(readme, /feature branch pushes\s+publish the runner image only/);
+  assert.match(readme, /`?main`? and `?dev`? pushes and release tags\s+publish both/);
 });
 
-test("docs state the compiler is published only on main pushes and release tags", () => {
-  assert.match(deploymentGuide, /dev and feature branch pushes publish the runner only/);
-  assert.match(readme, /`?main`? and release tags publish both/);
+test("docs state the compiler is published on main and dev pushes and release tags", () => {
+  assert.match(deploymentGuide, /feature branch pushes\s+publish the runner only/);
+  assert.match(readme, /`?main`? and `?dev`? pushes and release tags\s+publish both/);
 });
 
 test("deployment guide documents GHCR image retention with no automated deletion", () => {
