@@ -83,14 +83,14 @@ export interface ScheduledMeetingMetadataDto {
     readonly acquisition: GtfsAcquisitionRecord;
   };
   readonly surface: ScheduledSurfaceMetadata & {
-    readonly classificationMethod: "representative-point-with-geometric-final-station-walking/v1";
+    readonly classificationMethod: "scheduled-arrival-comparison-with-selected-tolerance/v1";
     readonly classificationBasis: "representative-point";
-    readonly representativePointBasis: "inside-clipped-cell/v1";
+    readonly representativePointBasis: "station-area-coordinate/v1";
     readonly finalWalkingMethod: "geometric-station-walking-estimate-not-navigation";
   };
   readonly stationAreas: ScheduledStationAreaMetadata;
   readonly accessProvider: ProviderDescriptor;
-  readonly coverage: "munich-clipped-scheduled-grid/v1";
+  readonly coverage: "munich-scheduled-station-area-meeting/v1";
 }
 
 export interface ScheduledMeetingResponseDto {
@@ -477,9 +477,9 @@ function isScheduledStationAreaDto(value: unknown): value is ScheduledMeetingSta
 
 function isScheduledMetadataDto(value: unknown): value is ScheduledMeetingMetadataDto {
   if (!isRecord(value) || !isRecord(value.schedule) || !isRecord(value.surface) || !isScheduledStationAreaMetadata(value.stationAreas) || !isScheduledAccessProviderDescriptor(value.accessProvider)) return false;
-  return value.coverage === "munich-clipped-scheduled-grid/v1" &&
+  return value.coverage === "munich-scheduled-station-area-meeting/v1" &&
     typeof value.schedule.contractVersion === "string" && typeof value.schedule.feedId === "string" && value.schedule.timeZone === MEETING_TIME_ZONE && typeof value.schedule.scheduleContentHash === "string" && typeof value.schedule.compiledArtifactId === "string" && isDateRange(value.schedule.serviceDateRange) && isAcquisition(value.schedule.acquisition) &&
-    value.surface.classificationMethod === "representative-point-with-geometric-final-station-walking/v1" && value.surface.classificationBasis === "representative-point" && value.surface.representativePointBasis === "inside-clipped-cell/v1" && value.surface.finalWalkingMethod === "geometric-station-walking-estimate-not-navigation" && isSurfaceMetadata(value.surface);
+    value.surface.classificationMethod === "scheduled-arrival-comparison-with-selected-tolerance/v1" && value.surface.classificationBasis === "representative-point" && value.surface.representativePointBasis === "station-area-coordinate/v1" && value.surface.finalWalkingMethod === "geometric-station-walking-estimate-not-navigation" && isSurfaceMetadata(value.surface);
 }
 
 function isScheduledStationAreaMetadata(value: unknown): value is ScheduledStationAreaMetadata {
@@ -488,7 +488,7 @@ function isScheduledStationAreaMetadata(value: unknown): value is ScheduledStati
 
 function isSurfaceMetadata(value: unknown): value is ScheduledMeetingMetadataDto["surface"] {
   if (!isRecord(value)) return false;
-  return value.contractVersion === "meeet-scheduled-routing/v1" && typeof value.scheduleContentHash === "string" && typeof value.compiledArtifactId === "string" && typeof value.feedId === "string" && value.timeZone === MEETING_TIME_ZONE && typeof value.searchStartAt === "string" && value.routingHorizonSeconds === 86_400 && (value.selectedTolerancePercent === 5 || value.selectedTolerancePercent === 10 || value.selectedTolerancePercent === 15) && (value.changeTimeSeconds === 180 || value.changeTimeSeconds === 300 || value.changeTimeSeconds === 600) && typeof value.walkingVelocityMetersPerSecond === "number" && typeof value.walkingSecondsRoundingRule === "string" && typeof value.transferRadiusMeters === "number" && Array.isArray(value.accessSeedCounts) && value.accessSeedCounts.length === 2 && value.accessSeedCounts.every((count) => Number.isSafeInteger(count) && count >= 0) && Number.isSafeInteger(value.stationAreaCount) && Number.isSafeInteger(value.connectionCount) && value.coverage === "scheduled-service-day-local-radius/v1" && value.representativePointBasis === "inside-clipped-cell/v1";
+  return value.contractVersion === "meeet-scheduled-routing/v1" && typeof value.scheduleContentHash === "string" && typeof value.compiledArtifactId === "string" && typeof value.feedId === "string" && value.timeZone === MEETING_TIME_ZONE && typeof value.searchStartAt === "string" && value.routingHorizonSeconds === 86_400 && (value.selectedTolerancePercent === 5 || value.selectedTolerancePercent === 10 || value.selectedTolerancePercent === 15) && (value.changeTimeSeconds === 180 || value.changeTimeSeconds === 300 || value.changeTimeSeconds === 600) && typeof value.walkingVelocityMetersPerSecond === "number" && typeof value.walkingSecondsRoundingRule === "string" && typeof value.transferRadiusMeters === "number" && Array.isArray(value.accessSeedCounts) && value.accessSeedCounts.length === 2 && value.accessSeedCounts.every((count) => Number.isSafeInteger(count) && count >= 0) && Number.isSafeInteger(value.stationAreaCount) && Number.isSafeInteger(value.connectionCount) && value.coverage === "scheduled-service-day-local-radius/v1" && value.representativePointBasis === "station-area-coordinate/v1";
 }
 
 function isProviderDescriptor(value: unknown): value is ProviderDescriptor {
