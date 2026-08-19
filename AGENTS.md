@@ -59,7 +59,8 @@
 - The documented Unraid production profile is operator-owned and distinct from
   the tracked Compose template; do not overwrite it or infer host-specific
   resource limits.
-- dev and feature branch publication builds the runner image only; the compiler
-  image is published only by `publish-image.yml` on pushes to `main` and
-  release tags. Production is an operator-selected digest-pinned deployment of
-  a `main`-built runner image, and no dev/feature image auto-deploys.
+- Feature branch publication builds the runner image only; the compiler
+  image is published by `publish-image.yml` on pushes to `main` and `dev`
+  and on release tags. Production is an operator-selected digest-pinned
+  deployment of a `main`-built runner image, and no dev/feature image
+  auto-deploys.

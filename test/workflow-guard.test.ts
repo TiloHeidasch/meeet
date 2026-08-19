@@ -110,14 +110,14 @@ test("documentation does not contain manual compiler dispatch instructions", () 
   }
 });
 
-test("compiler is published only on main pushes and release tags", () => {
+test("compiler is published on main and dev pushes and release tags", () => {
   const job = publishJob(publishWorkflow);
   const compilerGuard =
-    "if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/')";
+    "if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/dev' || startsWith(github.ref, 'refs/tags/')";
   const guardMatches = job.match(new RegExp(compilerGuard.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "g"));
   assert.ok(
     guardMatches && guardMatches.length === 2,
-    "compiler metadata and compiler build steps must both carry the main/tag guard",
+    "compiler metadata and compiler build steps must both carry the main/dev/tag guard",
   );
 
   // The runner build step must not be gated.
@@ -213,14 +213,14 @@ test("docs describe the feature/dev/main promotion path", () => {
   }
 });
 
-test("docs state dev and feature branch pushes publish the runner image only", () => {
-  assert.match(readme, /dev and feature branch pushes publish the runner image only/);
-  assert.match(readme, /`?main`? and release tags publish both/);
+test("docs state feature branch pushes publish the runner image only", () => {
+  assert.match(readme, /feature branch pushes\s+publish the runner image only/);
+  assert.match(readme, /`?main`? and `?dev`? pushes and release tags\s+publish both/);
 });
 
-test("docs state the compiler is published only on main pushes and release tags", () => {
-  assert.match(deploymentGuide, /dev and feature branch pushes publish the runner only/);
-  assert.match(readme, /`?main`? and release tags publish both/);
+test("docs state the compiler is published on main and dev pushes and release tags", () => {
+  assert.match(deploymentGuide, /feature branch pushes\s+publish the runner only/);
+  assert.match(readme, /`?main`? and `?dev`? pushes and release tags\s+publish both/);
 });
 
 test("deployment guide documents GHCR image retention with no automated deletion", () => {
