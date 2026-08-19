@@ -744,7 +744,7 @@ export function runRouteFirstMeetingService(
     let normalizedJourneys: readonly RouteJourney[];
     try {
       normalizedJourneys = input.journeys.map((journey) => normalizeRouteJourney(journey));
-    } catch (error) {
+    } catch {
       return incomplete(input, "missing-coverage", enumerationEvidence);
     }
     const certifiedPathKeys = new Set<string>();
@@ -858,7 +858,7 @@ export function runRouteFirstMeetingService(
         const profiles = input.targetProfiles.filter((profile) => profile.edgeId === edge.id);
         fairRegions.push(allParticipantToleranceRegion(profiles, tolerance));
       }
-    } catch (error) {
+    } catch {
       return incomplete(input, "missing-coverage", enumerationEvidence);
     }
     const fairRegionGeometry: RouteFirstFairRegionGeometry[] = relevantEdges.map((edge) => ({ edgeId: edge.id, start: wireCoordinate(edge.start), end: wireCoordinate(edge.end) }));

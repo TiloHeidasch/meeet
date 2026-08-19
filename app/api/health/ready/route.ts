@@ -5,7 +5,7 @@ import { connection } from "next/server";
 import { loadScheduledArtifact } from "../../../../lib/domain/scheduled-routing/artifact.ts";
 import { readProviderConfig } from "../../../../lib/providers/config.ts";
 
-export async function GET(_request: Request): Promise<Response> {
+export async function GET(): Promise<Response> {
   await connection();
   return readinessResponse();
 }

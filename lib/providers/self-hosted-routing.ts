@@ -147,7 +147,7 @@ export class OtpGraphqlRoutingProvider implements PointToPointRoutingProvider {
             origin: toOtpLocation(request.origin, "origin"),
             destination: toOtpLocation(request.destination, "destination"),
             dateTime: toOtpDateTime(request.departureAt),
-            modes: toOtpModes(this.config.otpProfile),
+            modes: toOtpModes(),
             first: OTP_PAGE_SIZE,
             after,
           },
@@ -995,7 +995,7 @@ function toOtpDateTime(departureAt: string): { earliestDeparture: string } {
   return { earliestDeparture: departureAt };
 }
 
-function toOtpModes(_profile: string): {
+function toOtpModes(): {
   transit: {
     access: Array<"WALK">;
     egress: Array<"WALK">;
