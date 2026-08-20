@@ -316,3 +316,22 @@ test("every successful stream ends with exactly one terminal event and a trailin
   assert.equal(terminal.length, 1);
   assert.ok(body.endsWith("\n\n"));
 });
+
+test("stream lifecycle emits [meeet] started and finished log lines", async (t) => {
+  const logMock = t.mock.method(console, "log");
+  t.after(() => logMock.mock.restore());
+
+  const response = await handleMeetingStreamPost(streamRequest(), PROVIDERS, { admission: new ScheduledCalculationAdmission() });
+  assert.equal(response.status, 200);
+  await response.text();
+
+  const lines = logMock.mock.calls.map((call) => String(call.arguments[0]));
+  assert.ok(
+    lines.some((line) => line.includes("[meeet]") && line.includes("calculation: stream started")),
+    "expected a [meeet] calculation: stream started log line",
+  );
+  assert.ok(
+    lines.some((line) => line.includes("[meeet]") && line.includes("calculation: stream finished")),
+    "expected a [meeet] calculation: stream finished log line",
+  );
+});
