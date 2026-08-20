@@ -545,9 +545,9 @@ test("v3 validation is strict and scheduled orchestration emits only the v3 stat
   assert.ok(response.stationAreas.every((area) => area.stationAreaId !== "" && area.classification !== undefined));
   assert.equal(response.metadata.stationAreas.count, response.stationAreas.length);
   assert.equal(response.metadata.surface.classificationMethod, "scheduled-arrival-comparison-with-selected-tolerance/v1");
-  assert.equal(response.metadata.surface.classificationBasis, "representative-point");
+  assert.equal(response.metadata.surface.classificationBasis, "scheduled-station-area-arrival/v1");
   assert.equal(response.metadata.surface.representativePointBasis, "station-area-coordinate/v1");
-  assert.equal(response.metadata.surface.finalWalkingMethod, "geometric-station-walking-estimate-not-navigation");
+  assert.equal(response.metadata.surface.finalWalkingMethod, "scheduled-access-and-transfer-walking/v1");
   assert.equal(response.metadata.surface.changeTimeSeconds, 300);
   assert.equal(response.metadata.stationAreas.coverage, "official-munich-boundary-with-connected-artifact-station-areas/v1");
   assert.equal(validateScheduledMeetingResponse(response, parsed.data).success, true);

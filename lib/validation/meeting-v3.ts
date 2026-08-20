@@ -4,7 +4,7 @@ import { parseOffsetInstant } from "../domain/scheduled-routing/time.ts";
 import {
   CHANGE_TIME_PRESETS,
   type GtfsAcquisitionRecord,
-  type ScheduledCellClassification,
+  type ScheduledStationAreaClassification,
   type ScheduledChangeTimePreset,
   type ScheduledDeadlineCheck,
   type ScheduledSurfaceMetadata,
@@ -65,7 +65,7 @@ export interface ScheduledMeetingStationAreaDto {
   readonly name: string;
   readonly coordinate: { readonly latitude: number; readonly longitude: number };
   readonly mode: StationAreaMode;
-  readonly classification: ScheduledCellClassification;
+  readonly classification: ScheduledStationAreaClassification;
   readonly redArrivalSeconds: number | null;
   readonly blueArrivalSeconds: number | null;
   readonly fasterParticipant: "red" | "blue" | null;
@@ -84,9 +84,9 @@ export interface ScheduledMeetingMetadataDto {
   };
   readonly surface: ScheduledSurfaceMetadata & {
     readonly classificationMethod: "scheduled-arrival-comparison-with-selected-tolerance/v1";
-    readonly classificationBasis: "representative-point";
+    readonly classificationBasis: "scheduled-station-area-arrival/v1";
     readonly representativePointBasis: "station-area-coordinate/v1";
-    readonly finalWalkingMethod: "geometric-station-walking-estimate-not-navigation";
+    readonly finalWalkingMethod: "scheduled-access-and-transfer-walking/v1";
   };
   readonly stationAreas: ScheduledStationAreaMetadata;
   readonly accessProvider: ProviderDescriptor;
@@ -381,7 +381,7 @@ function validateDerivedStationAreaInvariant(value: unknown, index: number, stat
   }
 
   if (!isNullableWholeSecond(red) || !isNullableWholeSecond(blue)) return;
-  let expectedClassification: ScheduledCellClassification = "unclassified";
+  let expectedClassification: ScheduledStationAreaClassification = "unclassified";
   let expectedFasterParticipant: "red" | "blue" | null = null;
   let expectedWithinSelectedTolerance = false;
   if (isWholeSecond(red) && isWholeSecond(blue)) {
@@ -479,7 +479,7 @@ function isScheduledMetadataDto(value: unknown): value is ScheduledMeetingMetada
   if (!isRecord(value) || !isRecord(value.schedule) || !isRecord(value.surface) || !isScheduledStationAreaMetadata(value.stationAreas) || !isScheduledAccessProviderDescriptor(value.accessProvider)) return false;
   return value.coverage === "munich-scheduled-station-area-meeting/v1" &&
     typeof value.schedule.contractVersion === "string" && typeof value.schedule.feedId === "string" && value.schedule.timeZone === MEETING_TIME_ZONE && typeof value.schedule.scheduleContentHash === "string" && typeof value.schedule.compiledArtifactId === "string" && isDateRange(value.schedule.serviceDateRange) && isAcquisition(value.schedule.acquisition) &&
-    value.surface.classificationMethod === "scheduled-arrival-comparison-with-selected-tolerance/v1" && value.surface.classificationBasis === "representative-point" && value.surface.representativePointBasis === "station-area-coordinate/v1" && value.surface.finalWalkingMethod === "geometric-station-walking-estimate-not-navigation" && isSurfaceMetadata(value.surface);
+    value.surface.classificationMethod === "scheduled-arrival-comparison-with-selected-tolerance/v1" && value.surface.classificationBasis === "scheduled-station-area-arrival/v1" && value.surface.representativePointBasis === "station-area-coordinate/v1" && value.surface.finalWalkingMethod === "scheduled-access-and-transfer-walking/v1" && isSurfaceMetadata(value.surface);
 }
 
 function isScheduledStationAreaMetadata(value: unknown): value is ScheduledStationAreaMetadata {

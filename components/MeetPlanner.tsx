@@ -412,7 +412,7 @@ export default function MeetPlanner({ capability }: { capability: PlannerCapabil
         </header>
         <div className="planner-grid">
           <section className="planner-copy">
-            <div className="eyebrow">A better place to meet</div>
+            <div className="eyebrow">A better place to meeet</div>
             <h1>Find the middle,<br /><em>without guessing.</em></h1>
             <p className="lede">Two origins. One planned start. A map of where public transport gets you close enough.</p>
             {ui.calculationUnavailable && <div className="state-card" role="status"><strong>Meeting search unavailable</strong><span>{ui.unavailableMessage}</span></div>}
@@ -453,7 +453,7 @@ export default function MeetPlanner({ capability }: { capability: PlannerCapabil
               <div className="search-actions">
                 <button className="search-button" type="submit" disabled={!canSubmitMeetingCalculation(ui, status)}>
                   {status === "loading" && <span className="button-spinner" />}
-                  {status === "loading" ? "Calculating…" : "Show meeting surface"}
+                  {status === "loading" ? "Calculating…" : "meeet!"}
                 </button>
                 {status === "loading" && <button type="button" className="cancel-button" data-testid="cancel-calculation" onClick={cancelCalculation}>Cancel</button>}
               </div>
@@ -477,7 +477,7 @@ export default function MeetPlanner({ capability }: { capability: PlannerCapabil
             {result && (
               <section className={`result-summary ${noResult ? "no-result" : ""}`}>
                 <span className="eyebrow">{noResult ? "No meeting surface yet" : "Surface ready"}</span>
-                <h2>{noResult ? "No scheduled route reached the surface." : "A fair place to meet."}</h2>
+                <h2>{noResult ? "No scheduled route reached the surface." : "A fair place to meeet."}</h2>
                 <p>{noResult ? (result.reason === "no-access-seeds" ? "No nearby MVG access seed could be resolved for one or both origins, so the scheduled surface cannot be calculated." : "The MVV schedule could not reach a station from one or both origins during the planned search window.") : "Compare every eligible station area, then open the planned legs for either participant."}</p>
                 <ScheduleDisclosure result={result} />
               </section>
