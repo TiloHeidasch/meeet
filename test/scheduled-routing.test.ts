@@ -761,12 +761,20 @@ test("parseSearchStartInstant rounding is offset-invariant on spring and fall DS
   assert.equal(parseSearchStartInstant("2026-10-25T02:59:59+02:00", "Europe/Berlin").canonicalAt, "2026-10-25T01:00:00.000Z");
 });
 
-test("gtfsTime rejects nonzero seconds because the scheduled calculation is minute-aligned", () => {
+test("gtfsTime truncates nonzero seconds to the minute instead of rejecting the feed", () => {
   const nonzeroSecondsFiles: GtfsFeedFiles = {
     ...FIXTURE_FILES,
-    "stop_times.txt": FIXTURE_FILES["stop_times.txt"].replace("through,08:10:00,08:10:00,a-1,1,0,0", "through,08:10:05,08:10:05,a-1,1,0,0"),
+    "stop_times.txt": FIXTURE_FILES["stop_times.txt"]
+      .replace("through,08:10:00,08:10:00,a-1,1,0,0", "through,08:10:30,08:10:45,a-1,1,0,0")
+      .replace("through,08:20:00,08:21:00,b-1,2,0,0", "through,08:20:30,08:21:00,b-1,2,0,0"),
   };
-  assert.throws(() => importGtfsSchedule(nonzeroSecondsFiles, { acquisition: ACQUISITION }), /:00 seconds|minute-aligned/);
+  const schedule = importGtfsSchedule(nonzeroSecondsFiles, { acquisition: ACQUISITION });
+  const connection = schedule.connections.find((candidate) => candidate.tripId === "through");
+  assert.ok(connection);
+  assert.equal(connection.id, "through:0-1");
+  // 08:10:30 / 08:10:45 truncate to 08:10:00 (29400 s) and 08:20:30 to 08:20:00 (30000 s).
+  assert.equal(connection.departureTimeSeconds, 8 * 3_600 + 10 * 60);
+  assert.equal(connection.arrivalTimeSeconds, 8 * 3_600 + 20 * 60);
 });
 
 test("walkingSeconds rounds up to the next whole minute, with zero distance taking zero seconds", () => {

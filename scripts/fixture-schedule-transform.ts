@@ -69,13 +69,13 @@ function shiftGtfsTime(value: string, shiftMinutes: number): string {
   const minutes = Number(match[2]);
   const seconds = Number(match[3]);
   // Mirror lib/domain/scheduled-routing/gtfs.ts gtfsTime, which rejects hours
-  // past 99 even though the fixture input is always two-digit, and rejects
-  // nonzero seconds because the scheduled calculation is minute-aligned.
+  // past 99 even though the fixture input is always two-digit, and truncates
+  // nonzero seconds to the minute because the scheduled calculation is
+  // minute-aligned; the shifted output is always :00.
   if (hours > 99 || minutes > 59 || seconds > 59) throw new Error(`Invalid GTFS time ${value}.`);
-  if (seconds !== 0) throw new Error(`Invalid GTFS time ${value}: seconds must be :00.`);
   const totalMinutes = hours * 60 + minutes + shiftMinutes;
   const shiftedHours = Math.floor(totalMinutes / 60);
   const shiftedMinutes = totalMinutes % 60;
   if (shiftedHours > 99) throw new Error(`Shifted GTFS time ${value} exceeds the supported 99-hour range.`);
-  return `${String(shiftedHours).padStart(2, "0")}:${String(shiftedMinutes).padStart(2, "0")}:${match[3]}`;
+  return `${String(shiftedHours).padStart(2, "0")}:${String(shiftedMinutes).padStart(2, "0")}:00`;
 }
