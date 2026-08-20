@@ -94,6 +94,10 @@ function pathPoints(d: string): Point[] {
 
 const NUMBER = /-?\d*\.?\d+(?:e[-+]?\d+)?/gi;
 
+// Fixed-precision rounding for the flattened arc geometry (see flattenArc).
+const ROUND = 1e3;
+const round = (n: number) => Math.round(n * ROUND) / ROUND;
+
 function flattenArc(
   x1: number,
   y1: number,
@@ -147,7 +151,14 @@ function flattenArc(
   const out: Point[] = [];
   for (let step = 1; step <= segments; step += 1) {
     const theta = theta1 + (delta * step) / segments;
-    out.push([cx + rx * Math.cos(theta), cy + ry * Math.sin(theta)]);
+    // Round to a fixed precision so the flattened geometry is bit-identical
+    // across platforms: Math.hypot/Math.acos can differ in the last ULP
+    // between glibc (Linux CI) and macOS libm, which would otherwise make the
+    // raster output non-deterministic and trip the CI drift check.
+    out.push([
+      round(cx + rx * Math.cos(theta)),
+      round(cy + ry * Math.sin(theta)),
+    ]);
   }
   return out;
 }
