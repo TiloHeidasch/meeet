@@ -36,7 +36,9 @@ const fail = (issues: ClientValidationIssue[], path: (string | number)[], messag
 const object = (value: unknown): value is Record<string, unknown> => typeof value === "object" && value !== null && !Array.isArray(value);
 const keys = (value: Record<string, unknown>, allowed: readonly string[], path: (string | number)[], issues: ClientValidationIssue[]) => Object.keys(value).forEach((key) => { if (!allowed.includes(key)) fail(issues, [...path, key], "Unknown field is not allowed."); });
 const whole = (value: unknown): value is number => typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
-const nullableWhole = (value: unknown): value is number | null => value === null || whole(value);
+// The scheduled calculation is minute-aligned end to end: seconds must be a multiple of 60.
+const wholeMinuteSeconds = (value: unknown): value is number => whole(value) && value % 60 === 0;
+const nullableWhole = (value: unknown): value is number | null => value === null || wholeMinuteSeconds(value);
 const date = (value: unknown): value is string => typeof value === "string" && /^\d{4}-\d{2}-\d{2}$/.test(value);
 const instant = (value: unknown): value is string => typeof value === "string" && /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.0+)?(?:Z|[+-]\d{2}:\d{2})$/.test(value) && Number.isFinite(Date.parse(value));
 const coordinate = (value: unknown): value is { latitude: number; longitude: number } => object(value) && typeof value.latitude === "number" && Number.isFinite(value.latitude) && value.latitude >= -90 && value.latitude <= 90 && typeof value.longitude === "number" && Number.isFinite(value.longitude) && value.longitude >= -180 && value.longitude <= 180;
@@ -57,7 +59,7 @@ function ringRelation(point: { latitude: number; longitude: number }, ring: unkn
 }
 const position = (value: unknown): value is [number, number] => Array.isArray(value) && value.length === 2 && typeof value[0] === "number" && Number.isFinite(value[0]) && value[0] >= -180 && value[0] <= 180 && typeof value[1] === "number" && Number.isFinite(value[1]) && value[1] >= -90 && value[1] <= 90;
 const sha = (value: unknown): value is string => typeof value === "string" && /^[a-f0-9]{64}$/.test(value);
-const WALKING_ROUNDING = "ceil(distanceMetres / velocityMetresPerSecond), with zero distance taking zero seconds";
+const WALKING_ROUNDING = "ceil(distanceMetres / velocityMetresPerSecond / 60) * 60, with zero distance taking zero seconds";
 const CHANGE_TIME_SECONDS = { quick: 180, medium: 300, long: 600 } as const;
 const nonEmpty = (value: unknown): value is string => typeof value === "string" && value.trim() !== "";
 
@@ -65,7 +67,7 @@ function seed(value: unknown, path: (string | number)[], issues: ClientValidatio
   if (!object(value)) { fail(issues, path, "Access seed must be an object."); return false; }
   keys(value, ["seedId", "mvgStationId", "stationAreaId", "coordinate", "accessSeconds", "provenance"], path, issues);
   const p = value.provenance;
-  const valid = nonEmpty(value.seedId) && nonEmpty(value.mvgStationId) && nonEmpty(value.stationAreaId) && whole(value.accessSeconds) && coordinate(value.coordinate) && object(p) && (p.source === "mvg-nearby" || p.source === "fixture-static") && nonEmpty(p.endpoint) && typeof p.distanceMeters === "number" && Number.isFinite(p.distanceMeters) && p.distanceMeters >= 0 && whole(p.walkingSeconds) && typeof p.note === "string";
+  const valid = nonEmpty(value.seedId) && nonEmpty(value.mvgStationId) && nonEmpty(value.stationAreaId) && wholeMinuteSeconds(value.accessSeconds) && coordinate(value.coordinate) && object(p) && (p.source === "mvg-nearby" || p.source === "fixture-static") && nonEmpty(p.endpoint) && typeof p.distanceMeters === "number" && Number.isFinite(p.distanceMeters) && p.distanceMeters >= 0 && wholeMinuteSeconds(p.walkingSeconds) && typeof p.note === "string";
   if (object(value.coordinate)) keys(value.coordinate, ["latitude", "longitude"], [...path, "coordinate"], issues);
   if (object(p)) keys(p, ["source", "endpoint", "distanceMeters", "walkingSeconds", "note"], [...path, "provenance"], issues);
   if (!valid) fail(issues, path, "Access seed fields or provenance are invalid.");

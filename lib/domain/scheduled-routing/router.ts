@@ -18,7 +18,8 @@ import {
 } from "./gtfs.ts";
 import {
   addServiceDays,
-  parseOffsetInstant,
+  ceilToWholeMinuteSeconds,
+  parseSearchStartInstant,
   serviceDateAnchorEpochSeconds,
   serviceDateRangeForSearch,
 } from "./time.ts";
@@ -91,7 +92,7 @@ export function routeScheduledEarliestArrivals(
 ): ScheduledRoutingResult {
   const window = suppliedWindow ?? createScheduledRoutingWindow(schedule, searchStartAt, options);
   if (window.schedule !== schedule) throw new RangeError("A routing window belongs to a different schedule artifact.");
-  const parsedStart = parseOffsetInstant(searchStartAt, schedule.timeZone);
+  const parsedStart = parseSearchStartInstant(searchStartAt, schedule.timeZone);
   if (parsedStart.epochSeconds !== window.searchStartEpochSeconds) throw new RangeError("A routing window belongs to a different search start.");
   const scan = scanScheduledConnections(schedule, accessSeeds, window, options);
   const stationArrivals: StationArrivalField[] = schedule.stationAreas.map((area) => {
@@ -166,6 +167,7 @@ function scanScheduledConnections(
     if (area === undefined) throw new RangeError(`Access seed references unknown station area ${seed.stationAreaId}.`);
     validateWholeNonNegative(seed.accessSeconds, "Access seed accessSeconds");
     if (seed.accessSeconds > ROUTING_HORIZON_SECONDS) throw new RangeError("Access seed accessSeconds must not exceed the 24-hour routing horizon.");
+    if (seed.accessSeconds % 60 !== 0) throw new RangeError("Access seed accessSeconds must be minute-aligned.");
     const seedArrival = window.searchStartEpochSeconds + seed.accessSeconds;
     updateArrivalMinimum(area.id, seedArrival);
     updateBoardingReadyMinimum(area.id, seedArrival);
@@ -260,7 +262,7 @@ export function createScheduledRoutingWindow(
   };
   validateRoutingOptions(resolvedOptions);
   resolvedOptions.deadlineCheck?.("routing-window");
-  const parsedStart = parseOffsetInstant(searchStartAt, schedule.timeZone);
+  const parsedStart = parseSearchStartInstant(searchStartAt, schedule.timeZone);
   validateScheduledSearchWindow(schedule, parsedStart.epochSeconds);
   const horizonEndEpochSeconds = parsedStart.epochSeconds + ROUTING_HORIZON_SECONDS;
   const isCacheable = !instrumentation.onCandidateServiceDate && !instrumentation.serviceDateAnchor;
@@ -299,7 +301,7 @@ export function createScheduledRoutingWindow(
 }
 
 export function validateScheduledSearchWindow(schedule: ScheduledRoutingArtifact, searchStartEpochSeconds: number): void {
-  if (!Number.isSafeInteger(searchStartEpochSeconds)) throw new RangeError("searchStartAt must represent an exact whole second.");
+  if (!Number.isSafeInteger(searchStartEpochSeconds)) throw new RangeError("searchStartAt must represent an exact whole-minute-aligned second.");
   if (searchStartEpochSeconds < schedule.searchStartBounds.earliestEpochSeconds || searchStartEpochSeconds > schedule.searchStartBounds.latestEpochSeconds) {
     throw new RangeError("searchStartAt is outside the schedule's routable coverage bounds.");
   }
@@ -314,7 +316,8 @@ export function walkingSeconds(
     throw new RangeError("Walking velocity must be a positive finite number.");
   }
   const distanceMeters = haversineDistanceMeters(from, to);
-  return distanceMeters === 0 ? 0 : Math.ceil(distanceMeters / velocityMetersPerSecond);
+  if (distanceMeters === 0) return 0;
+  return ceilToWholeMinuteSeconds(distanceMeters / velocityMetersPerSecond);
 }
 
 export function isScheduledToleranceSatisfied(

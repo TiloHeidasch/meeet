@@ -861,6 +861,7 @@ function gtfsDate(value: string, table: CsvTable, index: number): string {
   return `${value.slice(0, 4)}-${value.slice(4, 6)}-${value.slice(6, 8)}`;
 }
 
+/** Only :00 seconds are routable; the scheduled calculation is minute-aligned end to end. */
 function gtfsTime(value: string, table: CsvTable, index: number, column: string): number {
   const match = /^(\d{1,3}):(\d{2}):(\d{2})$/.exec(value);
   if (!match) throw new GtfsValidationError(`${column} must use HH:MM:SS.`, table.fileName, index + 2);
@@ -868,6 +869,7 @@ function gtfsTime(value: string, table: CsvTable, index: number, column: string)
   const minutes = Number(match[2]);
   const seconds = Number(match[3]);
   if (minutes > 59 || seconds > 59 || hours > 99) throw new GtfsValidationError(`${column} is outside the supported GTFS time range.`, table.fileName, index + 2);
+  if (seconds !== 0) throw new GtfsValidationError(`${column} must use :00 seconds; the scheduled calculation is minute-aligned.`, table.fileName, index + 2);
   return hours * 3_600 + minutes * 60 + seconds;
 }
 
