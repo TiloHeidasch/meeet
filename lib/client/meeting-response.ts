@@ -46,8 +46,8 @@ const instant = (value: unknown): value is string => typeof value === "string" &
 // echoes that canonical value. Canonicalize the request the same way so any whole-second
 // input validates without depending on the UI emitting whole-minute starts.
 export const canonicalSearchStartMinute = (value: string): string => {
+  if (!instant(value)) return value;
   const epochMilliseconds = Date.parse(value);
-  if (!Number.isFinite(epochMilliseconds)) return value;
   return new Date(Math.ceil(epochMilliseconds / 60_000) * 60_000).toISOString();
 };
 const coordinate = (value: unknown): value is { latitude: number; longitude: number } => object(value) && typeof value.latitude === "number" && Number.isFinite(value.latitude) && value.latitude >= -90 && value.latitude <= 90 && typeof value.longitude === "number" && Number.isFinite(value.longitude) && value.longitude >= -180 && value.longitude <= 180;
