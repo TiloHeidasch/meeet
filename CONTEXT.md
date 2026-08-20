@@ -9,7 +9,11 @@ planned public-transport travel times.
 Participant Origins.
 
 **Search Start Time**: The offset-aware planned instant at which both searches
-begin. It is represented by `searchStartAt` and uses whole-second precision.
+begin. It is represented by `searchStartAt`, accepts whole-second precision,
+and is canonicalized by rounding up to the next whole minute (a whole-minute
+instant is unchanged). The scheduled calculation is minute-aligned end to
+end: every derived time — GTFS stop times, walking/access seconds, arrival
+seconds, and segment durations — is a whole minute.
 
 **Station area**: One physical transit location containing one or more GTFS
 boarding stop points.

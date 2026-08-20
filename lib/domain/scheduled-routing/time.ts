@@ -11,6 +11,7 @@ export interface ParsedOffsetInstant {
 const OFFSET_INSTANT_PATTERN =
   /^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?)(Z|[+-]\d{2}:\d{2})$/;
 
+/** Parses a whole-second offset instant into its canonical UTC representation. */
 export function parseOffsetInstant(value: string, timeZone: string): ParsedOffsetInstant {
   const match = typeof value === "string" ? OFFSET_INSTANT_PATTERN.exec(value) : null;
   const fractional = match?.[1].match(/\.(\d+)$/)?.[1];
@@ -30,6 +31,28 @@ export function parseOffsetInstant(value: string, timeZone: string): ParsedOffse
   return {
     epochSeconds: epochMilliseconds / 1_000,
     canonicalAt: instant.toISOString(),
+    timeZone,
+  };
+}
+
+/** Rounds a count of seconds up to the next whole minute (unchanged if already a multiple of 60). */
+export function ceilToWholeMinuteSeconds(seconds: number): number {
+  return Math.ceil(seconds / 60) * 60;
+}
+
+/**
+ * Parses a whole-second Search Start Time and canonicalizes it by rounding up
+ * to the next whole minute (a whole-minute instant is unchanged). The
+ * scheduled calculation basis is always minute-aligned end to end. Only use
+ * this for searchStartAt; other offset instants (acquisition timestamps,
+ * freshness clocks) must stay at their own precision via parseOffsetInstant.
+ */
+export function parseSearchStartInstant(value: string, timeZone: string): ParsedOffsetInstant {
+  const parsed = parseOffsetInstant(value, timeZone);
+  const roundedEpochSeconds = ceilToWholeMinuteSeconds(parsed.epochSeconds);
+  return {
+    epochSeconds: roundedEpochSeconds,
+    canonicalAt: new Date(roundedEpochSeconds * 1_000).toISOString(),
     timeZone,
   };
 }

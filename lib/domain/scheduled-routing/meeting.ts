@@ -14,6 +14,7 @@ import {
 } from "./router.ts";
 import {
   CHANGE_TIME_PRESETS,
+  WALKING_SECONDS_ROUNDING_RULE,
   type ScheduledAccessSeed,
   type ScheduledRoutingArtifact,
   type ScheduledDeadlineCheck,
@@ -211,7 +212,7 @@ export async function calculateScheduledMeetingWithBasis(
         selectedTolerancePercent: request.tolerancePercent,
         changeTimeSeconds,
         walkingVelocityMetersPerSecond,
-        walkingSecondsRoundingRule: "ceil(distanceMetres / velocityMetresPerSecond), with zero distance taking zero seconds",
+        walkingSecondsRoundingRule: WALKING_SECONDS_ROUNDING_RULE,
         transferRadiusMeters,
         accessSeedCounts: [scheduledSeedSets[0].length, scheduledSeedSets[1].length],
         stationAreaCount: artifact.stationAreas.length,

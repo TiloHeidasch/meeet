@@ -166,7 +166,7 @@ test("non-exact provider coordinates cannot change canonical readiness, marker c
         calls.count += 1;
         const area = input.schedule.stationAreas.find((candidate) => candidate.id === "fixture-a");
         if (area === undefined) throw new Error("Fixture boundary area missing.");
-        const accessSeconds = input.origin.latitude < 48.139 ? 299 : 330;
+        const accessSeconds = input.origin.latitude < 48.139 ? 300 : 360;
         const coordinate = shifted ? { latitude: area.coordinate.latitude, longitude: area.coordinate.longitude + 0.005 } : area.coordinate;
         return [{
           seedId: `boundary:${input.origin.latitude}:${shifted ? "shifted" : "canonical"}`,
@@ -205,8 +205,8 @@ test("non-exact provider coordinates cannot change canonical readiness, marker c
     coordinate: { latitude: 48.1374, longitude: 11.5755 },
     mode: "bus",
     classification: "fair",
-    redArrivalSeconds: 299,
-    blueArrivalSeconds: 330,
+    redArrivalSeconds: 300,
+    blueArrivalSeconds: 360,
     fasterParticipant: "red",
     withinSelectedTolerance: true,
   });
@@ -221,7 +221,7 @@ test("non-exact provider coordinates cannot change canonical readiness, marker c
   assert.equal(shiftedCalls.count, 2);
   const detailBody = await detail.json() as { stationArea: Record<string, unknown>; participants: Array<{ terminal: { totalSeconds: number | null } }> };
   assert.deepEqual(detailBody.stationArea, boundaryMarker);
-  assert.deepEqual(detailBody.participants.map((participant) => participant.terminal.totalSeconds), [299, 330]);
+  assert.deepEqual(detailBody.participants.map((participant) => participant.terminal.totalSeconds), [300, 360]);
 });
 
 test("calculate emits a bounded opaque reference and details reuse cached seeds without MVG resolution", async () => {

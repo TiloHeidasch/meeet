@@ -278,6 +278,7 @@ function validateAccessSeeds(seeds: readonly ScheduledAccessSeed[]): void {
   for (const seed of seeds) {
     if (seed.stationAreaId.trim() === "") throw new RangeError("Access seed stationAreaId must not be empty.");
     if (!Number.isSafeInteger(seed.accessSeconds) || seed.accessSeconds < 0 || seed.accessSeconds > ROUTING_HORIZON_SECONDS) throw new RangeError("Access seed accessSeconds must be a whole number within the routing horizon.");
+    if (seed.accessSeconds % 60 !== 0) throw new RangeError("Access seed accessSeconds must be minute-aligned.");
   }
 }
 
