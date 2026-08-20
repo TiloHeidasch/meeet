@@ -361,6 +361,3 @@ const isDirectRun = import.meta.url === pathToFileURL(process.argv[1] ?? "").hre
 if (isDirectRun) {
   main();
 }
-
-export { rasterize, encodePng, pathPoints };
-export type { BrandShape, Point };
