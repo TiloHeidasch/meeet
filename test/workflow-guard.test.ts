@@ -215,6 +215,13 @@ test("PR CI includes an e2e gate that builds, starts meeet, and runs a functiona
   assert.match(e2eScript, /5 \* 60 \* 1000/);
 });
 
+test("PR CI compiles the real MVV feed so compiler regressions fail the gate", () => {
+  const ciWorkflow = read(".github/workflows/ci.yml");
+  assert.match(ciWorkflow, /name:\s*Compile real MVV feed/);
+  assert.match(ciWorkflow, /schedule:compile:mvv/);
+  assert.match(ciWorkflow, /--output \/tmp\/mvv-real-scheduled-artifact\.json/);
+});
+
 test("docs describe the feature/dev/main promotion path", () => {
   const promotionPath = "feature/<slug> → dev → main";
   for (const doc of [agentsGuide, readme, deploymentGuide]) {
