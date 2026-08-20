@@ -635,7 +635,7 @@ test("scheduled routing checks injected deadlines at window, scan, and surface p
       selectedTolerancePercent: 10,
       walkingVelocityMetersPerSecond: 100,
       transferRadiusMeters: 100,
-      deadlineCheck: deadlineAtPhase("surface-cells"),
+      deadlineCheck: deadlineAtPhase("station-areas"),
     }),
     ScheduledCalculationDeadlineError,
   );
