@@ -1,0 +1,35 @@
+name: Clean up GHCR images
+
+on:
+  schedule:
+    # Weekly, Monday 03:23 UTC. Scheduled runs delete; the production digest
+    # guard (GHCR_PROTECTED_DIGESTS) must be set or the run aborts.
+    - cron: "23 3 * * 1"
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Preview the deletion plan without deleting (default: true)"
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  cleanup:
+    name: Enforce GHCR retention policy
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          fetch-depth: 0
+      - name: Enforce retention policy
+        env:
+          GHCR_OWNER: ${{ github.repository_owner }}
+          PACKAGES: meeet meeet-artifact-compiler
+          KEEP_PER_BRANCH: ${{ vars.GHCR_KEEP_SHA_TAGS_PER_BRANCH || '5' }}
+          PROTECTED_DIGESTS: ${{ vars.GHCR_PROTECTED_DIGESTS }}
+          DRY_RUN: ${{ inputs.dry_run || 'false' }}
+        run: bash .github/scripts/ghcr-retention-cleanup.sh
