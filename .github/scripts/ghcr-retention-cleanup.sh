@@ -10,14 +10,15 @@
 #     any branch it belongs to.
 #   - Release tags (v*): kept indefinitely.
 #   - Untagged versions are deleted unless protected.
-#   - Versions whose commit is not reachable from any current branch or tag
-#     (deleted or force-pushed branches) are deleted.
+#   - Versions whose commit is not an ancestor of any current branch (deleted
+#     or force-pushed branches) are deleted.
 #   - PROTECTED_DIGESTS mirrors the digest-pinned images in the operator-owned
 #     runtime .env; listed digests are never deleted. The run aborts
 #     (fail-closed) when the variable is missing or malformed.
 #
 # Environment:
-#   GHCR_OWNER         lowercase GHCR owner (default: lowercased repository owner)
+#   GHCR_OWNER         GHCR owner (lowercased by the script; default: owner of
+#                      GITHUB_REPOSITORY, i.e. the repository owner in Actions)
 #   PACKAGES           space-separated package names (default: meeet meeet-artifact-compiler)
 #   KEEP_PER_BRANCH    versions kept per branch (default: 5)
 #   PROTECTED_DIGESTS  required; newline- or space-separated sha256:<hex> digests
@@ -28,7 +29,7 @@
 
 set -euo pipefail
 
-GHCR_OWNER="${GHCR_OWNER:-$(printf '%s' "${GITHUB_REPOSITORY_OWNER:-}" | tr '[:upper:]' '[:lower:]')}"
+GHCR_OWNER="$(printf '%s' "${GHCR_OWNER:-${GITHUB_REPOSITORY:-}}" | tr '[:upper:]' '[:lower:]')"
 PACKAGES="${PACKAGES:-meeet meeet-artifact-compiler}"
 KEEP_PER_BRANCH="${KEEP_PER_BRANCH:-5}"
 DRY_RUN="${DRY_RUN:-true}"
@@ -102,23 +103,24 @@ classify() {
       continue
     fi
     for t in $(printf '%s' "$tags" | tr ',' ' '); do
-      if [[ "$t" =~ ^v[0-9] ]]; then
+      if [[ "$t" == v* ]]; then
         keep[$id]=1
         reasons[$id]="release tag"
         continue 2
       fi
     done
 
-    sha=""
+    # Collect every sha-<full-sha> tag; a version is attributed to a branch
+    # when any of its commits is an ancestor of that branch.
+    shas=()
     IFS=',' read -r -a tag_arr <<<"$tags"
     for t in "${tag_arr[@]}"; do
       if [[ "$t" =~ ^sha-([0-9a-f]{40})$ ]]; then
-        sha="${BASH_REMATCH[1]}"
-        break
+        shas+=("${BASH_REMATCH[1]}")
       fi
     done
 
-    if [[ -z "$sha" ]]; then
+    if (( ${#shas[@]} == 0 )); then
       if [[ -z "$tags" ]]; then
         keep[$id]=0
         reasons[$id]="untagged"
@@ -129,18 +131,23 @@ classify() {
       continue
     fi
 
-    if ! git cat-file -e "$sha^{commit}" 2>/dev/null; then
+    branches=""
+    reachable=0
+    for sha in "${shas[@]}"; do
+      if git cat-file -e "$sha^{commit}" 2>/dev/null; then
+        reachable=1
+        for b in "${BRANCHES[@]}"; do
+          if git merge-base --is-ancestor "$sha" "origin/$b" 2>/dev/null; then
+            branches="$branches $b"
+          fi
+        done
+      fi
+    done
+    if (( reachable == 0 )); then
       keep[$id]=0
       reasons[$id]="commit unreachable"
       continue
     fi
-
-    branches=""
-    for b in "${BRANCHES[@]}"; do
-      if git merge-base --is-ancestor "$sha" "origin/$b" 2>/dev/null; then
-        branches="$branches $b"
-      fi
-    done
     if [[ -z "$branches" ]]; then
       keep[$id]=0
       reasons[$id]="not on any branch"

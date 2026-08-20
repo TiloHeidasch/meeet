@@ -239,11 +239,25 @@ test("docs state the compiler is published on main and dev pushes and release ta
   assert.match(readme, /`?main`? and `?dev`? pushes and release tags\s+publish both/);
 });
 
-test("deployment guide documents GHCR image retention with no automated deletion", () => {
+test("deployment guide documents automated GHCR image retention with a fail-closed production guard", () => {
   const retentionSection = deploymentGuide.slice(deploymentGuide.indexOf("## GHCR image retention"));
   assert.match(retentionSection, /GHCR image retention/i);
-  assert.match(retentionSection, /no automated deletion/i);
-  assert.match(retentionSection, /#40/);
+  assert.match(retentionSection, /cleanup-images\.yml/);
+  assert.match(retentionSection, /GHCR_PROTECTED_DIGESTS/);
+  assert.match(retentionSection, /aborts without deleting anything/);
+  assert.match(retentionSection, /never deletes a listed digest/);
+});
+
+test("cleanup workflow runs on a schedule with least privilege and a dry-run dispatch default", () => {
+  const cleanupWorkflow = read(".github/workflows/cleanup-images.yml");
+  assert.match(cleanupWorkflow, /^on:\s*\n\s*schedule:/m);
+  assert.match(cleanupWorkflow, /workflow_dispatch:/m);
+  assert.match(cleanupWorkflow, /dry_run/);
+  assert.match(cleanupWorkflow, /^permissions:\n  contents:\s*read/m);
+  assert.match(cleanupWorkflow, /packages:\s*write/);
+  assert.doesNotMatch(cleanupWorkflow, /secrets\./);
+  assert.match(cleanupWorkflow, /ghcr-retention-cleanup\.sh/);
+  assert.match(cleanupWorkflow, /GHCR_PROTECTED_DIGESTS/);
 });
 
 test("deployment guide runtime .env sample uses digest-pinned runner image", () => {

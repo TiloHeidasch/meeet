@@ -25,11 +25,6 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           fetch-depth: 0
-      - name: Fetch all branches and tags
-        # Full history of every branch and tag; the cleanup script treats a
-        # commit as unreachable only after this fetch succeeded.
-        run: |
-          git fetch --prune origin '+refs/heads/*:refs/remotes/origin/*' '+refs/tags/*:refs/tags/*'
       - name: Enforce retention policy
         env:
           GHCR_OWNER: ${{ github.repository_owner }}

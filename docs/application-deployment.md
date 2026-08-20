@@ -138,35 +138,37 @@ from the default branch, so it becomes active when this workflow reaches
 Policy:
 
 - Per branch (`main`, `dev`, `feature/*`): keep the latest 5 `sha-<full-sha>`
-  tagged versions whose commit is an ancestor of that branch. A version is
-  kept when it is within the retention window of any branch it belongs to.
-  The count is configurable via the repository variable
-  `GHCR_KEEP_SHA_TAGS_PER_BRANCH`.
+  tagged versions whose commit is an ancestor of that branch, where "latest"
+  means most recently published. A version is kept when it is within the
+  retention window of any branch it belongs to. The count is configurable via
+  the repository variable `GHCR_KEEP_SHA_TAGS_PER_BRANCH`.
 - Release tags (`v*`): kept indefinitely.
 - Mutable branch tags (`main`, `dev`, `feature-*`) point at the newest version
-  of their branch and are therefore always within retention; stale feature
-  tags are removed together with the old versions they reference.
+  of their branch and are therefore normally within retention; stale feature
+  tags are removed together with the old versions they reference. (A
+  force-push could leave a mutable tag on a version whose commit is no longer
+  an ancestor; branch protection makes this unlikely, and the protected
+  digest list remains the authoritative production guard.)
 - Untagged versions are deleted unless protected.
-- Versions whose commit is no longer reachable from any current branch or tag
-  (deleted or force-pushed branches) are deleted.
+- Versions whose commit is not an ancestor of any current branch (deleted or
+  force-pushed branches) are deleted.
 
 Production safety guard: cleanup can never delete the digest-pinned images
 currently referenced by the operator-owned runtime `.env`. Because that `.env`
 lives outside this repository, the repository variable `GHCR_PROTECTED_DIGESTS`
 mirrors its digest pair (`sha256:<hex>` values, newline- or space-separated).
 The workflow aborts without deleting anything when the variable is missing or
-malformed, and it never deletes a listed digest. On every rotation, update the
-variable together with the Unraid `.env`; the previous digest pair stays within
-the per-branch retention window, and listing it in `GHCR_PROTECTED_DIGESTS`
-until the next rotation keeps rollback possible explicitly. The job log lists
-the protected digests and the full deletion plan for audit.
+malformed, and it never deletes a listed digest. On every rotation, add the
+new digest pair to the variable and keep the previous pair listed until the
+next rotation; the retention window alone does not protect the previous pair.
+The job log lists the protected digests and the full deletion plan for audit.
 
 The cleanup uses the `GITHUB_TOKEN` with `packages: write` only (least
 privilege). Deleting package versions through the REST API is in public
 preview and requires the repository to hold the admin role on the packages,
 which is granted by default because `publish-image.yml` publishes them.
-Versions with more than 5,000 downloads cannot be deleted through the API and
-are skipped with a warning.
+Versions with more than 5,000 downloads cannot be deleted through the API; the
+run fails so the operator notices and can delete them manually.
 
 Manual retention remains possible and unchanged: sha-tagged images may be
 pruned by the operator (GHCR UI or API) at any time, and the archived manifest
