@@ -4,12 +4,11 @@ import { useEffect, useMemo, useRef, useState, type FormEvent, type KeyboardEven
 import dynamic from "next/dynamic";
 import { validateMeetingResponse, type MeetingRequest, type MeetingResponse, type MeetingStationArea, type StationAreaMode } from "@/lib/client/meeting-response";
 import { validateStationAreaDetails, type StationAreaDetail } from "@/lib/client/station-area-details";
-import { readCalculationStream, type CalculationProgressPhase, type StationVerdict } from "@/lib/client/calculation-stream";
+import { CALCULATION_PROGRESS_PHASES, readCalculationStream, type CalculationProgressPhase, type StationVerdict } from "@/lib/client/calculation-stream";
 
 const MapLibreCanvas = dynamic(() => import("./MapLibreCanvas"), { ssr: false, loading: () => <div className="map-surface grid min-h-[430px] place-items-center rounded-[1.75rem] text-sm text-[#526057]">Preparing Munich map…</div> });
 const COLORS = ["#e85d4a", "#3d70c9"] as const;
 const PHASE_LABELS: Record<CalculationProgressPhase, string> = { "access-seeds": "Finding nearby transit access", "scheduled-routing": "Checking planned MVV journeys", "station-area-evaluation": "Comparing station areas", "validating-result": "Preparing the validated map" };
-const PHASE_ORDER: readonly CalculationProgressPhase[] = ["access-seeds", "scheduled-routing", "station-area-evaluation", "validating-result"];
 type Location = { label: string; lat: number; lng: number };
 type SearchResult = { label: string; latitude: number; longitude: number };
 type Participant = { id: "participant-1" | "participant-2"; location: Location | null };
@@ -467,8 +466,8 @@ export default function MeetPlanner({ capability }: { capability: PlannerCapabil
                   <strong className="progress-phase-label" aria-live="polite">{phase ? PHASE_LABELS[phase] : "Starting the planned calculation…"}</strong>
                 </div>
                 <ol className="progress-phases" aria-hidden="true">
-                  {PHASE_ORDER.map((item, index) => (
-                    <li key={item} className={phase ? (index < PHASE_ORDER.indexOf(phase) ? "done" : index === PHASE_ORDER.indexOf(phase) ? "active" : "") : ""}>{PHASE_LABELS[item]}</li>
+                  {CALCULATION_PROGRESS_PHASES.map((item, index) => (
+                    <li key={item} className={phase ? (index < CALCULATION_PROGRESS_PHASES.indexOf(phase) ? "done" : index === CALCULATION_PROGRESS_PHASES.indexOf(phase) ? "active" : "") : ""}>{PHASE_LABELS[item]}</li>
                   ))}
                 </ol>
                 <p className="progress-note">This is a planned MVV schedule calculation, not live transit information.</p>

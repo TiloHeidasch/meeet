@@ -3,6 +3,7 @@ import { inflateSync } from "node:zlib";
 import http from "node:http";
 import type net from "node:net";
 import { STATION_ICON_PADDING, STATION_ICON_SPEC_RATIOS } from "../lib/client/station-icon-sizes";
+import { CALCULATION_PROGRESS_CONTRACT_VERSION, CALCULATION_PROGRESS_PHASES, type CalculationProgressPhase } from "../lib/domain/calculation-progress-contract";
 
 const MAP_STYLE = "https://tiles.openfreemap.org/styles/liberty";
 const MAP_ORIGIN = "https://tiles.openfreemap.org";
@@ -22,7 +23,7 @@ function v3Fixture(request: { contractVersion: "meeet-meeting/v3"; participants:
   const stationAreas = [
     { stationAreaId: "area-red", name: "Red area", coordinate: { latitude: 48.132, longitude: 11.555 }, mode: "sbahn" as const, classification: "red" as const, redArrivalSeconds: 1200, blueArrivalSeconds: null, fasterParticipant: "red" as const, withinSelectedTolerance: false },
     { stationAreaId: "area-fair", name: "Fair area", coordinate: { latitude: 48.132, longitude: 11.585 }, mode: "ubahn" as const, classification: "fair" as const, redArrivalSeconds: 1800, blueArrivalSeconds: 1860, fasterParticipant: "red" as const, withinSelectedTolerance: true },
-    { stationAreaId: "area-blue", name: "Blue area", coordinate: { latitude: 48.132, longitude: 11.615 }, mode: "tram" as const, classification: "blue" as const, redArrivalSeconds: null, blueArrivalSeconds: 1300, fasterParticipant: "blue" as const, withinSelectedTolerance: false },
+    { stationAreaId: "area-blue", name: "Blue area", coordinate: { latitude: 48.132, longitude: 11.615 }, mode: "tram" as const, classification: "blue" as const, redArrivalSeconds: null, blueArrivalSeconds: 1260, fasterParticipant: "blue" as const, withinSelectedTolerance: false },
     { stationAreaId: "area-unclassified", name: "Unclassified area", coordinate: { latitude: 48.14, longitude: 11.59 }, mode: "bus" as const, classification: "unclassified" as const, redArrivalSeconds: null, blueArrivalSeconds: null, fasterParticipant: null, withinSelectedTolerance: false },
   ];
   const acquisition = { sourceUrl: "https://example.test/mvv.zip", retrievedAt: "2026-08-01T00:00:00.000Z", rawArchiveByteSize: 100, rawArchiveSha256: "a".repeat(64), feedVersion: "mvv-fixture-2026-08", feedValidFrom: "2026-08-01", feedValidUntil: "2026-08-31", attribution: "Deterministic MVV fixture", officialAttribution: "MVV", officialLicense: { name: "CC BY 4.0", url: "https://creativecommons.org/licenses/by/4.0/" }, officialProvenance: { source: "feed" as const, policyId: null } };
@@ -58,13 +59,13 @@ function sseFrame(event: string, data: unknown): string {
   return `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`;
 }
 
-function progressFrame(phase: string): string {
-  return sseFrame("progress", { contractVersion: "meeet-calculation-progress/v1", phase });
+function progressFrame(phase: CalculationProgressPhase): string {
+  return sseFrame("progress", { contractVersion: CALCULATION_PROGRESS_CONTRACT_VERSION, phase });
 }
 
 function verdictFrame(area: { stationAreaId: string; name: string; coordinate: { latitude: number; longitude: number }; classification: string; mode?: string }): string {
   return sseFrame("station-verdict", {
-    contractVersion: "meeet-calculation-progress/v1",
+    contractVersion: CALCULATION_PROGRESS_CONTRACT_VERSION,
     stationAreaId: area.stationAreaId,
     name: area.name,
     coordinate: area.coordinate,
@@ -74,13 +75,13 @@ function verdictFrame(area: { stationAreaId: string; name: string; coordinate: {
 }
 
 function progressStreamFrames(request?: Parameters<typeof v3Fixture>[0], outcome: "ok" | "no-access-seeds" = "ok"): string {
-  const p1 = progressFrame("access-seeds");
-  const p2 = progressFrame("scheduled-routing");
-  const p3 = progressFrame("station-area-evaluation");
+  const p1 = progressFrame(CALCULATION_PROGRESS_PHASES[0]);
+  const p2 = progressFrame(CALCULATION_PROGRESS_PHASES[1]);
+  const p3 = progressFrame(CALCULATION_PROGRESS_PHASES[2]);
   const verdicts = request
     ? v3Fixture(request, outcome).stationAreas.map(verdictFrame).join("")
     : "";
-  const p4 = progressFrame("validating-result");
+  const p4 = progressFrame(CALCULATION_PROGRESS_PHASES[3]);
   return `${p1}${p2}${p3}${verdicts}${p4}`;
 }
 function okStreamBody(request: Parameters<typeof v3Fixture>[0], outcome: "ok" | "no-access-seeds" = "ok"): string { return `${progressStreamFrames(request, outcome)}event: ref\ndata: {"calculationRef":"fixture-calculation-ref"}\n\nevent: result\ndata: ${JSON.stringify(v3Fixture(request, outcome))}\n\n`; }
@@ -439,9 +440,9 @@ test.describe("v3 Munich meeting surface", () => {
         "Cache-Control": "no-cache",
         "Connection": "keep-alive",
       });
-      res.write(progressFrame("access-seeds"));
-      res.write(progressFrame("scheduled-routing"));
-      res.write(progressFrame("station-area-evaluation"));
+      res.write(progressFrame(CALCULATION_PROGRESS_PHASES[0]));
+      res.write(progressFrame(CALCULATION_PROGRESS_PHASES[1]));
+      res.write(progressFrame(CALCULATION_PROGRESS_PHASES[2]));
       res.write(verdictFrame({ stationAreaId: "area-red", name: "Red area", coordinate: { latitude: 48.132, longitude: 11.555 }, classification: "red" }));
       res.write(verdictFrame({ stationAreaId: "area-fair", name: "Fair area", coordinate: { latitude: 48.132, longitude: 11.585 }, classification: "fair" }));
       req.on("close", () => {
@@ -482,9 +483,9 @@ test.describe("v3 Munich meeting surface", () => {
         "Cache-Control": "no-cache",
         "Connection": "keep-alive",
       });
-      res.write(progressFrame("access-seeds"));
-      res.write(progressFrame("scheduled-routing"));
-      res.write(progressFrame("station-area-evaluation"));
+      res.write(progressFrame(CALCULATION_PROGRESS_PHASES[0]));
+      res.write(progressFrame(CALCULATION_PROGRESS_PHASES[1]));
+      res.write(progressFrame(CALCULATION_PROGRESS_PHASES[2]));
       // Stream area-red initially as unclassified (a placeholder/conflicting verdict)
       res.write(verdictFrame({ stationAreaId: "area-red", name: "Red area", coordinate: { latitude: 48.132, longitude: 11.555 }, classification: "unclassified" }));
       res.write(verdictFrame({ stationAreaId: "area-fair", name: "Fair area", coordinate: { latitude: 48.132, longitude: 11.585 }, classification: "fair" }));
@@ -511,7 +512,7 @@ test.describe("v3 Munich meeting surface", () => {
           const fixture = v3Fixture(requestData);
           res.write(verdictFrame({ stationAreaId: "area-blue", name: "Blue area", coordinate: { latitude: 48.132, longitude: 11.615 }, classification: "blue" }));
           res.write(verdictFrame({ stationAreaId: "area-unclassified", name: "Unclassified area", coordinate: { latitude: 48.14, longitude: 11.59 }, classification: "unclassified" }));
-          res.write(progressFrame("validating-result"));
+          res.write(progressFrame(CALCULATION_PROGRESS_PHASES[3]));
           res.write(sseFrame("ref", { calculationRef: "fixture-calculation-ref" }));
           res.write(sseFrame("result", fixture));
           res.end();
