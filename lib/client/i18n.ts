@@ -13,7 +13,11 @@ import * as React from "react";
 
 export type Locale = "de" | "en";
 
-/** Matches German (`de`, `de-DE`, `de-AT`, …) before falling back to English. */
+/**
+ * Matches German (`de`, `de-DE`, `de-AT`, …) before falling back to English.
+ * Order-insensitive by design: any German preference wins, even a secondary
+ * one (product criterion: German from browser settings, English fallback).
+ */
 export function resolveLocale(languages: readonly string[]): Locale {
   return languages.some((language) => language.trim().toLowerCase().startsWith("de")) ? "de" : "en";
 }

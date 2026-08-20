@@ -15,6 +15,12 @@ const geistMono = Geist_Mono({
   subsets: ["latin"],
 });
 
+// The `lang` attribute and metadata resolve from the `Accept-Language` header
+// (server shell), while client UI text resolves from `navigator.languages`
+// (see lib/client/i18n.ts). Both share the same resolution logic, so they
+// agree in practice; a proxy rewriting the header could in principle
+// desynchronize them, which is an accepted limitation of the dual-source
+// design.
 async function HtmlWithLocale({ children }: { children: React.ReactNode }) {
   const requestHeaders = await headers();
   const locale = resolveLocaleFromHeader(requestHeaders.get("accept-language"));

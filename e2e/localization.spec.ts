@@ -24,6 +24,8 @@ test.describe("client UI localization", () => {
     try {
       await setup(page, "ok", false, true, 800);
       await openPlannerGerman(page);
+      await expect(page.locator("html")).toHaveAttribute("lang", "de");
+      await expect(page).toHaveTitle("meeet — einen fairen Treffpunkt finden");
       await expect(page.getByText("München · MVV-Fahrplansuche", { exact: true })).toBeVisible();
       await expect(page.getByRole("combobox", { name: "Startpunkt von Teilnehmer 1" })).toBeVisible();
       await expect(page.getByRole("combobox", { name: "Startpunkt von Teilnehmer 2" })).toBeVisible();
@@ -44,6 +46,8 @@ test.describe("client UI localization", () => {
     try {
       await setup(page);
       await page.goto("/");
+      await expect(page.locator("html")).toHaveAttribute("lang", "en");
+      await expect(page).toHaveTitle("meeet — find a fair meeting point");
       await expect(page.getByRole("heading", { name: /Find the middle/ })).toBeVisible();
       await expect(page.getByText("A better place to meeet", { exact: true })).toBeVisible();
       await expect(page.getByText("Munich · MVV scheduled search", { exact: true })).toBeVisible();
