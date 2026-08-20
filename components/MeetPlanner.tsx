@@ -21,7 +21,7 @@ export function canSubmitMeetingCalculation(ui: PlannerUiState, status: Status) 
 function isRecord(value: unknown): value is Record<string, unknown> { return typeof value === "object" && value !== null && !Array.isArray(value); }
 function errorMessage(value: unknown) { return isRecord(value) && isRecord(value.error) && typeof value.error.message === "string" ? value.error.message : undefined; }
 function errorCode(value: unknown) { return isRecord(value) && isRecord(value.error) && typeof value.error.code === "string" ? value.error.code : undefined; }
-function nextStart(): string { return new Date(Math.ceil((Date.now() + 300_000) / 1000) * 1000).toISOString(); }
+export function nextStart(): string { return new Date(Math.ceil((Date.now() + 300_000) / 60_000) * 60_000).toISOString(); }
 function formatDate(locale: Locale, iso: string) { return messages[locale].time.formatDate(iso); }
 function formatSeconds(locale: Locale, value: number | null) { if (value === null) return messages[locale].time.noScheduledArrival; return messages[locale].time.formatSeconds(value); }
 type ChangeTimePreset = "quick" | "medium" | "long";

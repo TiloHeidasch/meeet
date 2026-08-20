@@ -119,6 +119,17 @@ test("client adapter binds result start and tolerance to the submitted request",
   assert.equal(validateMeetingResponse(wrongOrigin, request).success, false);
 });
 
+test("client adapter accepts a surface start canonicalized to the next whole minute", () => {
+  const secondPrecision = { ...request, searchStartAt: "2026-08-11T08:05:59.000Z" };
+  assert.equal(validateMeetingResponse(response(), secondPrecision).success, false);
+  const canonical = response();
+  ((canonical.metadata as Record<string, unknown>).surface as Record<string, unknown>).searchStartAt = "2026-08-11T08:06:00.000Z";
+  assert.equal(validateMeetingResponse(canonical, secondPrecision).success, true);
+  const wrongCeil = response();
+  ((wrongCeil.metadata as Record<string, unknown>).surface as Record<string, unknown>).searchStartAt = "2026-08-11T08:07:00.000Z";
+  assert.equal(validateMeetingResponse(wrongCeil, secondPrecision).success, false);
+});
+
 test("client adapter rejects nested contract tampering", () => {
   const unknown = response();
   ((unknown.metadata as Record<string, unknown>).accessProvider as Record<string, unknown>).unexpected = true;
