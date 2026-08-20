@@ -115,7 +115,7 @@ MEEET_COMPILER_IMAGE=ghcr.io/tiloheidasch/meeet-artifact-compiler@sha256:<compil
 
 At startup the one-shot `compiler` service runs exactly that compiler image.
 Because the artifact manifest records the compiler version
-(`meeet-scheduled-compiler/v2`), a different compiler digest recompiles the
+(`meeet-scheduled-compiler/v3`), a different compiler digest recompiles the
 artifact even when the underlying feed data is unchanged, which is what makes a
 new compiler revision effective for rotation.
 
@@ -128,15 +128,51 @@ rotation as described below.
 
 ## GHCR image retention
 
-There is no automated deletion of GHCR images yet; automated cleanup is tracked
-in follow-up issue #40 and will be designed there before any deletion runs.
-Until then, retention is manual:
+Automated cleanup enforces the retention policy below. The scheduled workflow
+`.github/workflows/cleanup-images.yml` runs weekly (Monday 03:23 UTC) and can be
+triggered manually with `workflow_dispatch`; manual runs default to a dry run
+that prints the deletion plan without deleting. The scheduled trigger fires
+from the default branch, so it becomes active when this workflow reaches
+`main`; until then, use `workflow_dispatch`.
 
-- Keep at least the previously archived digest pair together with its archived
-  manifest and `.v8.bin` rollback pair.
-- sha-tagged images accumulate per commit and may be manually pruned by the
-  operator (GHCR UI or API).
-- Never delete the digest-pinned image currently referenced by the live `.env`.
+Policy:
+
+- Per branch (`main`, `dev`, `feature/*`): keep the latest 5 `sha-<full-sha>`
+  tagged versions whose commit is an ancestor of that branch, where "latest"
+  means most recently published. A version is kept when it is within the
+  retention window of any branch it belongs to. The count is configurable via
+  the repository variable `GHCR_KEEP_SHA_TAGS_PER_BRANCH`.
+- Release tags (`v*`): kept indefinitely.
+- Mutable branch tags (`main`, `dev`, `feature-*`) point at the newest version
+  of their branch and are therefore normally within retention; stale feature
+  tags are removed together with the old versions they reference. (A
+  force-push could leave a mutable tag on a version whose commit is no longer
+  an ancestor; branch protection makes this unlikely, and the protected
+  digest list remains the authoritative production guard.)
+- Untagged versions are deleted unless protected.
+- Versions whose commit is not an ancestor of any current branch (deleted or
+  force-pushed branches) are deleted.
+
+Production safety guard: cleanup can never delete the digest-pinned images
+currently referenced by the operator-owned runtime `.env`. Because that `.env`
+lives outside this repository, the repository variable `GHCR_PROTECTED_DIGESTS`
+mirrors its digest pair (`sha256:<hex>` values, newline- or space-separated).
+The workflow aborts without deleting anything when the variable is missing or
+malformed, and it never deletes a listed digest. On every rotation, add the
+new digest pair to the variable and keep the previous pair listed until the
+next rotation; the retention window alone does not protect the previous pair.
+The job log lists the protected digests and the full deletion plan for audit.
+
+The cleanup uses the `GITHUB_TOKEN` with `packages: write` only (least
+privilege). Deleting package versions through the REST API is in public
+preview and requires the repository to hold the admin role on the packages,
+which is granted by default because `publish-image.yml` publishes them.
+Versions with more than 5,000 downloads cannot be deleted through the API; the
+run fails so the operator notices and can delete them manually.
+
+Manual retention remains possible and unchanged: sha-tagged images may be
+pruned by the operator (GHCR UI or API) at any time, and the archived manifest
+and `.v8.bin` rollback pair on the host are never touched by this workflow.
 
 ## MVV artifact rotation
 
@@ -157,7 +193,7 @@ The decision path is:
    current artifact.
 3. Exit 0 either way.
 
-The compiler embeds a version (`meeet-scheduled-compiler/v2`) that is written
+The compiler embeds a version (`meeet-scheduled-compiler/v3`) that is written
 into the artifact manifest. An artifact carrying a different or missing compiler
 version is recompiled even when the underlying data is unchanged, which keeps
 rotation robust across artifact-structure changes.

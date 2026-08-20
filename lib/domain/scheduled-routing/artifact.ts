@@ -7,6 +7,7 @@ import { lstatSync, mkdtempSync, readFileSync, renameSync, rmSync, statSync, wri
 import { tmpdir } from "node:os";
 import { basename, dirname, extname, isAbsolute, join, resolve } from "node:path";
 import { ProviderConfigurationError } from "../../providers/config.ts";
+import { logCompilerProgress, logInfo, elapsedMs } from "../../log.ts";
 
 import {
   calculateScheduledCompiledArtifactId,
@@ -33,7 +34,7 @@ const OFFICIAL_MVV_ATTRIBUTION = "Münchner Verkehrs- und Tarifverbund GmbH (MVV
 const DEFAULT_CC_BY_4_LICENSE_URL = "https://creativecommons.org/licenses/by/4.0/";
 const MVV_ATTRIBUTION_POLICY_ID = "mvv-cc-by-4.0-fallback/v1" as const;
 const SCHEDULED_BUNDLE_CONTRACT_VERSION = "meeet-scheduled-routing-bundle/v1" as const;
-export const SCHEDULED_COMPILER_VERSION = "meeet-scheduled-compiler/v2" as const;
+export const SCHEDULED_COMPILER_VERSION = "meeet-scheduled-compiler/v3" as const;
 const SCHEDULED_BUNDLE_ENCODING = "node-v8-structured-clone/1" as const;
 const MAX_BUNDLE_MANIFEST_BYTES = 1 * 1024 * 1024;
 const MAX_BUNDLE_PAYLOAD_BYTES = 1 * 1024 * 1024 * 1024;
@@ -102,6 +103,7 @@ export function compileScheduledArtifact(input: CompileScheduledArtifactInput): 
   if (input.inputPath !== undefined) {
     if (!isAbsolute(input.inputPath)) throw new ScheduleArtifactUnavailableError("Offline GTFS compiler inputPath must be absolute.");
     rawArchiveBytes = new Uint8Array(readFileSync(input.inputPath));
+    logCompilerProgress(`loading local GTFS archive: ${input.inputPath} (${rawArchiveBytes.byteLength} bytes)`);
     feedFiles = extractGtfsTextFiles(input.inputPath);
   }
   if (rawArchiveBytes === undefined || feedFiles === undefined) {
@@ -132,12 +134,20 @@ function defaultAcquisitionRetrievedAt(): string {
   return new Date(Math.trunc(Date.now() / 1_000) * 1_000).toISOString();
 }
 
+function errorText(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
 type FetchCompileScheduledArtifactInput = Omit<CompileScheduledArtifactInput, "inputPath" | "rawArchiveBytes" | "feedFiles">;
 
 async function downloadScheduledMvvFeed(fetchImplementation: typeof fetch = fetch): Promise<Uint8Array> {
+  logCompilerProgress(`downloading MVV GTFS feed from ${SCHEDULED_MVV_FEED_URL}`);
+  const startedAt = performance.now();
   const response = await fetchImplementation(SCHEDULED_MVV_FEED_URL, { redirect: "error" });
   if (!response.ok) throw new ScheduleArtifactUnavailableError(`The MVV GTFS download returned HTTP ${response.status}.`);
-  return new Uint8Array(await response.arrayBuffer());
+  const bytes = new Uint8Array(await response.arrayBuffer());
+  logCompilerProgress(`feed download complete: ${bytes.byteLength} bytes in ${elapsedMs(startedAt)}ms`);
+  return bytes;
 }
 
 function compileScheduledArtifactFromBytes(
@@ -168,13 +178,17 @@ export async function fetchAndCompileScheduledArtifact(
 export function writeScheduledArtifact(path: string, artifact: ScheduledRoutingArtifact): void {
   if (!isAbsolute(path)) throw new ScheduleArtifactUnavailableError("Scheduled artifact output path must be absolute.");
   const absolutePath = resolve(path);
+  logCompilerProgress(`writing scheduled artifact to ${absolutePath}`);
   validateArtifactStructure(artifact);
+  logCompilerProgress("scheduled artifact structure validated");
   const { compiledArtifactId, ...identity } = artifact.provenance;
   const { provenance, ...core } = artifact;
   if (calculateScheduledContentHash(identity.feedId, identity.timeZone, identity.files) !== identity.contentHash || calculateScheduledCompiledArtifactId(core, identity) !== compiledArtifactId) {
     throw new ScheduleArtifactUnavailableError("The scheduled artifact identity does not match its contents.");
   }
+  logCompilerProgress(`scheduled artifact identity verified (compiledArtifactId=${compiledArtifactId})`);
   const payload = serialize(core);
+  logCompilerProgress(`payload serialized: ${payload.byteLength} bytes`);
   if (payload.byteLength > MAX_BUNDLE_PAYLOAD_BYTES) throw new ScheduleArtifactUnavailableError("The scheduled artifact payload exceeds the bundle size limit.");
   const payloadFile = `${basename(absolutePath, extname(absolutePath))}-${compiledArtifactId}.v8.bin`;
   const manifest: ScheduledBundleManifest = {
@@ -200,6 +214,7 @@ export function writeScheduledArtifact(path: string, artifact: ScheduledRoutingA
     renameSync(payloadTemporaryPath, join(directory, payloadFile));
     writeFileSync(manifestTemporaryPath, manifestBytes);
     renameSync(manifestTemporaryPath, absolutePath);
+    logCompilerProgress(`artifact written: payload=${payloadFile}, manifest=${absolutePath}`);
   } finally {
     rmSync(payloadTemporaryPath, { force: true });
     rmSync(manifestTemporaryPath, { force: true });
@@ -246,11 +261,15 @@ export async function rotateScheduledArtifact(input: RotateScheduledArtifactInpu
 
   const manifest = tryReadScheduledBundleManifest(outputPath);
   if (manifest === null) {
+    logCompilerProgress(`rotation: no existing artifact manifest at ${outputPath}`);
+    logCompilerProgress("rotation: proceeding to download and compile (reason=missing)");
     await downloadAndCompileScheduledArtifact(outputPath, sourceUrl, fetchImplementation);
     return { action: "compiled", reason: "missing", outputPath };
   }
+  logCompilerProgress(`rotation: existing artifact manifest found (compilerVersion=${manifest.compilerVersion ?? "legacy"}, feedVersion=${manifest.provenance.acquisition.feedVersion})`);
   const payloadPath = join(dirname(outputPath), manifest.payloadFile);
   if (!isExistingPayloadFile(payloadPath)) {
+    logCompilerProgress("rotation: proceeding to download and compile (reason=missing-payload)");
     await downloadAndCompileScheduledArtifact(outputPath, sourceUrl, fetchImplementation);
     return { action: "compiled", reason: "missing-payload", outputPath };
   }
@@ -258,31 +277,38 @@ export async function rotateScheduledArtifact(input: RotateScheduledArtifactInpu
     // A version mismatch means the current artifact cannot be trusted (a future
     // artifact structure may be unreadable), so a failed recompile must fail the
     // startup step instead of serving stale-version data.
+    logCompilerProgress("rotation: proceeding to download and compile (reason=compiler-version)");
     await downloadAndCompileScheduledArtifact(outputPath, sourceUrl, fetchImplementation);
     return { action: "compiled", reason: "compiler-version", outputPath };
   }
   if (isScheduledFeedValidityOutOfDate(manifest.provenance.acquisition, nowValue)) {
     try {
       await downloadAndCompileScheduledArtifact(outputPath, sourceUrl, fetchImplementation);
-    } catch {
+    } catch (error) {
+      logCompilerProgress(`rotation: feed check failed, keeping existing artifact: ${errorText(error)}`);
       return { action: "kept", reason: "check-unavailable", outputPath };
     }
+    logCompilerProgress("rotation: proceeding to download and compile (reason=feed-out-of-date)");
     return { action: "compiled", reason: "feed-out-of-date", outputPath };
   }
   let bytes: Uint8Array;
   try {
     bytes = await downloadScheduledMvvFeed(fetchImplementation);
-  } catch {
+  } catch (error) {
+    logCompilerProgress(`rotation: feed check failed, keeping existing artifact: ${errorText(error)}`);
     return { action: "kept", reason: "check-unavailable", outputPath };
   }
   if (sha256Bytes(bytes) === manifest.provenance.acquisition.rawArchiveSha256) {
+    logCompilerProgress("rotation: keeping existing artifact (reason=fresh)");
     return { action: "kept", reason: "fresh", outputPath };
   }
   try {
     compileAndWriteScheduledArtifact(outputPath, sourceUrl, bytes);
-  } catch {
+  } catch (error) {
+    logCompilerProgress(`rotation: feed check failed, keeping existing artifact: ${errorText(error)}`);
     return { action: "kept", reason: "check-unavailable", outputPath };
   }
+  logCompilerProgress("rotation: proceeding to download and compile (reason=feed-changed)");
   return { action: "compiled", reason: "feed-changed", outputPath };
 }
 
@@ -327,6 +353,9 @@ export function loadScheduledArtifact(
     validateFreshness(cached.provenance.acquisition, options.now ?? defaultLoaderNow());
     return cached;
   }
+  const startedAt = performance.now();
+  const heapUsedBefore = process.memoryUsage().heapUsed;
+  logInfo(`loading scheduled artifact from ${absolutePath}`);
   const manifest = readBundleManifest(absolutePath);
   const loaderNodeMajor = currentNodeMajor();
   if (manifest.writerNodeMajor !== loaderNodeMajor) throw new ScheduleArtifactUnavailableError(`The configured scheduled artifact was written by Node major ${manifest.writerNodeMajor}, but the loader is running Node major ${loaderNodeMajor}.`);
@@ -365,6 +394,10 @@ export function loadScheduledArtifact(
   validateFreshness(provenance.acquisition, options.now ?? defaultLoaderNow());
   const frozen = deepFreeze(parsed);
   loadedScheduledArtifacts.set(absolutePath, frozen);
+  const heapUsedAfter = process.memoryUsage().heapUsed;
+  logInfo(
+    `scheduled artifact loaded in ${elapsedMs(startedAt)}ms (heapDelta=${heapUsedAfter - heapUsedBefore} bytes; compiledArtifactId=${manifest.compiledArtifactId}; contentHash=${identity.contentHash}; feedId=${manifest.summary.feedId}; serviceDateRange=${manifest.summary.serviceDateRange.firstDate}..${manifest.summary.serviceDateRange.lastDate}; compilerVersion=${manifest.compilerVersion ?? "legacy"}; payloadByteLength=${manifest.payloadByteLength}; counts: routes=${manifest.summary.counts.routes}, trips=${manifest.summary.counts.trips}, stationAreas=${manifest.summary.counts.stationAreas}, calendars=${manifest.summary.counts.calendars}, exceptions=${manifest.summary.counts.exceptions}, connections=${manifest.summary.counts.connections})`,
+  );
   return frozen;
 }
 

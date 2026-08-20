@@ -24,7 +24,7 @@ function response(overrides: Record<string, unknown> = {}): Record<string, unkno
     stationAreas: [stationArea],
     metadata: {
       schedule: { contractVersion: "meeet-scheduled-routing/v1", feedId: "fixture", timeZone: "Europe/Berlin", scheduleContentHash: "a".repeat(64), compiledArtifactId: "c".repeat(64), serviceDateRange: { firstDate: "2026-08-01", lastDate: "2026-08-31" }, acquisition: { sourceUrl: "https://example.test/feed.zip", retrievedAt: "2026-08-01T00:00:00Z", rawArchiveByteSize: 1, rawArchiveSha256: "b".repeat(64), feedVersion: "fixture", feedValidFrom: "2026-08-01", feedValidUntil: "2026-08-31", attribution: "Fixture", officialAttribution: "MVV", officialLicense: { name: "CC BY 4.0", url: "https://creativecommons.org/licenses/by/4.0/" }, officialProvenance: { source: "feed", policyId: null } } },
-      surface: { contractVersion: "meeet-scheduled-routing/v1", searchStartAt: request.searchStartAt, selectedTolerancePercent: request.tolerancePercent, scheduleContentHash: "a".repeat(64), compiledArtifactId: "c".repeat(64), feedId: "fixture", timeZone: "Europe/Berlin", routingHorizonSeconds: 86400, walkingVelocityMetersPerSecond: 1.4, walkingSecondsRoundingRule: "ceil(distanceMetres / velocityMetresPerSecond), with zero distance taking zero seconds", transferRadiusMeters: 100, accessSeedCounts: [0, 0], stationAreaCount: 1, connectionCount: 1, changeTimeSeconds: 300, coverage: "scheduled-service-day-local-radius/v1", representativePointBasis: "station-area-coordinate/v1", classificationMethod: "scheduled-arrival-comparison-with-selected-tolerance/v1", classificationBasis: "scheduled-station-area-arrival/v1", finalWalkingMethod: "scheduled-access-and-transfer-walking/v1" },
+      surface: { contractVersion: "meeet-scheduled-routing/v1", searchStartAt: request.searchStartAt, selectedTolerancePercent: request.tolerancePercent, scheduleContentHash: "a".repeat(64), compiledArtifactId: "c".repeat(64), feedId: "fixture", timeZone: "Europe/Berlin", routingHorizonSeconds: 86400, walkingVelocityMetersPerSecond: 1.4, walkingSecondsRoundingRule: "ceil(distanceMetres / velocityMetresPerSecond / 60) * 60, with zero distance taking zero seconds", transferRadiusMeters: 100, accessSeedCounts: [0, 0], stationAreaCount: 1, connectionCount: 1, changeTimeSeconds: 300, coverage: "scheduled-service-day-local-radius/v1", representativePointBasis: "station-area-coordinate/v1", classificationMethod: "scheduled-arrival-comparison-with-selected-tolerance/v1", classificationBasis: "scheduled-station-area-arrival/v1", finalWalkingMethod: "scheduled-access-and-transfer-walking/v1" },
       accessProvider: { name: "fixture", deployment: "fixture", dataKind: "demo-static", liveData: false, asOf: "fixture", notes: "fixture", provenance: { role: "access", provider: "fixture", deployment: "fixture", dataKind: "demo-static", liveData: false, sourceUrl: null, license: null, attribution: "fixture", version: "fixture", retrievedAt: "fixture", notes: "fixture", feeds: null } },
       stationAreas: { count: 1, coverage: "official-munich-boundary-with-connected-artifact-station-areas/v1", selection: "all-eligible-scheduled-station-areas/v1" }, coverage: "munich-scheduled-station-area-meeting/v1",
     },
@@ -117,6 +117,17 @@ test("client adapter binds result start and tolerance to the submitted request",
   const wrongOrigin = response();
   (wrongOrigin.participants as Array<Record<string, unknown>>)[0].id = "another-origin";
   assert.equal(validateMeetingResponse(wrongOrigin, request).success, false);
+});
+
+test("client adapter accepts a surface start canonicalized to the next whole minute", () => {
+  const secondPrecision = { ...request, searchStartAt: "2026-08-11T08:05:59.000Z" };
+  assert.equal(validateMeetingResponse(response(), secondPrecision).success, false);
+  const canonical = response();
+  ((canonical.metadata as Record<string, unknown>).surface as Record<string, unknown>).searchStartAt = "2026-08-11T08:06:00.000Z";
+  assert.equal(validateMeetingResponse(canonical, secondPrecision).success, true);
+  const wrongCeil = response();
+  ((wrongCeil.metadata as Record<string, unknown>).surface as Record<string, unknown>).searchStartAt = "2026-08-11T08:07:00.000Z";
+  assert.equal(validateMeetingResponse(wrongCeil, secondPrecision).success, false);
 });
 
 test("client adapter rejects nested contract tampering", () => {

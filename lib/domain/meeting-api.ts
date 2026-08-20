@@ -45,6 +45,7 @@ import {
   type StationAreaDetailsResponseDto,
 } from "./station-area-details-contract.ts";
 import { validateStationAreaDetailsResponse } from "../validation/station-area-details-v1.ts";
+import { logError, logInfo } from "../log.ts";
 
 export {
   ScheduledCalculationAdmission,
@@ -142,6 +143,7 @@ export async function acquireScheduledMeetingCalculation(
   request: Request,
   options: HandleMeetingPostOptions = {},
 ): Promise<AcquireScheduledMeetingCalculationResult> {
+  const startedAt = Date.now();
   const declaredLength = request.headers.get("content-length");
   if (declaredLength && isTooLargeContentLength(declaredLength)) {
     return { kind: "error", ...errorOutcome(413, "REQUEST_TOO_LARGE", `Request body must not exceed ${MAX_MEETING_REQUEST_BODY_BYTES} bytes.`) };
@@ -169,8 +171,10 @@ export async function acquireScheduledMeetingCalculation(
   if (!parsedScheduled.success) {
     return { kind: "error", ...errorOutcome(400, "INVALID_REQUEST", "Request body must use the meeet-meeting/v3 scheduled contract.", parsedScheduled.issues) };
   }
+  logInfo(`calculation: request accepted (contract=${parsedScheduled.data.contractVersion}, participants=${parsedScheduled.data.participants.length}, tolerance=${parsedScheduled.data.tolerancePercent}%, changeTimePreset=${parsedScheduled.data.changeTimePreset}, searchStartAt=${parsedScheduled.data.searchStartAt})`);
   const release = (options.admission ?? scheduledCalculationAdmission).tryAcquire();
   if (release === null) {
+    logError(`calculation: rejected (concurrency limit reached, elapsed=${Date.now() - startedAt}ms)`);
     return { kind: "error", ...errorOutcome(503, "TEMPORARILY_UNAVAILABLE", "A scheduled meeting calculation is already in progress. Please try again shortly.") };
   }
   let deadline: ScheduledCalculationDeadline | undefined;
@@ -193,9 +197,12 @@ export async function acquireScheduledMeetingCalculation(
     release();
     if (error instanceof ProviderConfigurationError) throw error;
     if (deadline?.isExpired()) {
+      logError(`calculation: rejected (TEMPORARILY_UNAVAILABLE, elapsed=${Date.now() - startedAt}ms)`);
       return { kind: "error", ...errorOutcome(503, "TEMPORARILY_UNAVAILABLE", "The scheduled meeting calculation exceeded its 90-second deadline. Please try again shortly.") };
     }
-    return { kind: "error", ...scheduledErrorOutcome(error) };
+    const outcome = scheduledErrorOutcome(error);
+    logError(`calculation: rejected (${outcome.code}, elapsed=${Date.now() - startedAt}ms)`);
+    return { kind: "error", ...outcome };
   }
   return {
     kind: "acquired",
@@ -212,21 +219,31 @@ export async function runScheduledMeetingCalculation(
   hooks: ScheduledMeetingCalculationHooks,
 ): Promise<RunScheduledMeetingCalculationResult> {
   const { parsed, release, deadline, basisCache } = acquired;
+  const startedAt = Date.now();
   try {
     deadline.check();
+    logInfo("calculation: started");
     const providers = typeof providersSource === "function" ? providersSource() : providersSource;
     deadline.check();
     const calculationProviders = withDeadlineCheckedAccess(providers, deadline);
+    const loggingHooks: ScheduledMeetingCalculationHooks = {
+      ...hooks,
+      async onPhase(phase) {
+        logInfo(`calculation: phase ${phase} (${Date.now() - startedAt}ms)`);
+        await hooks.onPhase?.(phase);
+      },
+    };
     const calculation = await calculateScheduledMeetingWithBasis(parsed, {
       artifact: calculationProviders.scheduledArtifact,
       access: calculationProviders.scheduledAccess,
       deadlineCheck: deadline.check,
-    }, deadline.signal, hooks);
+    }, deadline.signal, loggingHooks);
     const result = calculation.response;
     deadline.check();
     const stationAreaCatalog = calculationProviders.scheduledArtifact === undefined
       ? undefined
       : buildScheduledStationAreaCatalog(calculationProviders.scheduledArtifact, deadline.check);
+    logInfo(`calculation: phase validating-result (${Date.now() - startedAt}ms)`);
     await hooks.onPhase?.("validating-result");
     if (!validateScheduledMeetingResponse(result, parsed, { stationAreaCatalog, deadlineCheck: deadline.check }).success) {
       return { kind: "error", ...errorOutcome(500, "CALCULATION_FAILED", "The scheduled meeting response failed validation.") };
@@ -243,13 +260,17 @@ export async function runScheduledMeetingCalculation(
       }
     }
     deadline.check();
+    logInfo(`calculation: complete (status=${result.status}, reason=${result.reason}, stationAreas=${result.stationAreas.length}, elapsed=${Date.now() - startedAt}ms)`);
     return { kind: "result", result, calculationRef: calculationReference };
   } catch (error) {
     if (error instanceof ProviderConfigurationError) throw error;
     if (deadline.isExpired()) {
+      logError(`calculation: failed (code=TEMPORARILY_UNAVAILABLE, elapsed=${Date.now() - startedAt}ms)`);
       return { kind: "error", ...errorOutcome(503, "TEMPORARILY_UNAVAILABLE", "The scheduled meeting calculation exceeded its 90-second deadline. Please try again shortly.") };
     }
-    return { kind: "error", ...scheduledErrorOutcome(error) };
+    const outcome = scheduledErrorOutcome(error);
+    logError(`calculation: failed (code=${outcome.code}, elapsed=${Date.now() - startedAt}ms)`);
+    return { kind: "error", ...outcome };
   } finally {
     deadline.dispose();
     release();
@@ -265,6 +286,7 @@ export async function handleMeetingStreamPost(
   if (acquired.kind === "error") {
     return jsonError(acquired.status, acquired.code, acquired.message, acquired.issues);
   }
+  logInfo("calculation: stream started");
   const heartbeatMs = options.heartbeatMs ?? MEETING_STREAM_DEFAULT_HEARTBEAT_MS;
   const encoder = new TextEncoder();
   const stream = new ReadableStream<Uint8Array>({
@@ -337,10 +359,12 @@ export async function handleMeetingStreamPost(
         } finally {
           clearInterval(heartbeat);
           close();
+          logInfo("calculation: stream finished");
         }
       })();
     },
     cancel() {
+      logInfo("calculation: stream cancelled (client disconnected)");
       // The client disconnected. Writes fail and stop; the request.signal abort
       // propagates through the deadline composite signal and aborts downstream
       // work, and the run's finally disposes the deadline and releases admission
@@ -358,6 +382,27 @@ export async function handleMeetingStreamPost(
 }
 
 export async function handleStationAreaDetailsPost(
+  request: Request,
+  stationAreaId: string,
+  providersSource: MeetingProvidersSource,
+  options: HandleMeetingPostOptions = {},
+): Promise<Response> {
+  const startedAt = Date.now();
+  logInfo(`details: request (stationAreaId=${stationAreaId})`);
+  let response: Response | undefined;
+  try {
+    response = await handleStationAreaDetailsPostInner(request, stationAreaId, providersSource, options);
+  } finally {
+    if (response === undefined) {
+      logInfo(`details: failed (elapsed=${Date.now() - startedAt}ms)`);
+    } else {
+      logInfo(`details: complete (status=${response.status}, elapsed=${Date.now() - startedAt}ms)`);
+    }
+  }
+  return response;
+}
+
+async function handleStationAreaDetailsPostInner(
   request: Request,
   stationAreaId: string,
   providersSource: MeetingProvidersSource,

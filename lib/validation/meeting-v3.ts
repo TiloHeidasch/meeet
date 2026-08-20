@@ -1,6 +1,6 @@
 import { isWithinOfficialMunichBoundary } from "../domain/boundary.ts";
 import { MEETING_TIME_ZONE } from "../domain/types.ts";
-import { parseOffsetInstant } from "../domain/scheduled-routing/time.ts";
+import { parseSearchStartInstant } from "../domain/scheduled-routing/time.ts";
 import {
   CHANGE_TIME_PRESETS,
   type GtfsAcquisitionRecord,
@@ -254,7 +254,7 @@ function parseSearchStartAt(value: unknown, issues: ScheduledValidationIssue[]):
     return undefined;
   }
   try {
-    return parseOffsetInstant(value, MEETING_TIME_ZONE).canonicalAt;
+    return parseSearchStartInstant(value, MEETING_TIME_ZONE).canonicalAt;
   } catch {
     issues.push(issue(["searchStartAt"], "invalid_datetime", "searchStartAt must be an offset-aware ISO instant with whole-second precision."));
     return undefined;
@@ -294,8 +294,8 @@ function validateResponseInvariants(value: Record<string, unknown>, metadata: Re
     return;
   }
   try {
-    const parsed = parseOffsetInstant(surface.searchStartAt, surface.timeZone);
-    if (parsed.canonicalAt !== surface.searchStartAt) issues.push(issue(["metadata", "surface", "searchStartAt"], "inconsistent", "Surface searchStartAt must use its canonical whole-second UTC representation."));
+    const parsed = parseSearchStartInstant(surface.searchStartAt, surface.timeZone);
+    if (parsed.canonicalAt !== surface.searchStartAt) issues.push(issue(["metadata", "surface", "searchStartAt"], "inconsistent", "Surface searchStartAt must use its canonical whole-minute UTC representation."));
   } catch {
     issues.push(issue(["metadata", "surface", "searchStartAt"], "invalid_datetime", "Surface searchStartAt must be an offset-aware ISO instant with whole-second precision."));
   }
@@ -358,8 +358,8 @@ function validateStationArea(value: unknown, index: number, issues: ScheduledVal
   else if (!isWithinOfficialMunichBoundary(value.coordinate)) issues.push(issue([...path, "coordinate"], "outside_official_munich_boundary", "Station-area coordinate must be inside the official Munich application boundary."));
   if (isRecord(value.coordinate)) addUnknownKeys(value.coordinate, ["latitude", "longitude"], [...path, "coordinate"], issues);
   if (value.classification !== "red" && value.classification !== "blue" && value.classification !== "fair" && value.classification !== "unclassified") issues.push(issue([...path, "classification"], "invalid_enum", "Station-area classification is invalid."));
-  if (!isNullableWholeSecond(value.redArrivalSeconds)) issues.push(issue([...path, "redArrivalSeconds"], "invalid_value", "redArrivalSeconds must be a whole second or null."));
-  if (!isNullableWholeSecond(value.blueArrivalSeconds)) issues.push(issue([...path, "blueArrivalSeconds"], "invalid_value", "blueArrivalSeconds must be a whole second or null."));
+  if (!isNullableWholeSecond(value.redArrivalSeconds)) issues.push(issue([...path, "redArrivalSeconds"], "invalid_value", "redArrivalSeconds must be a whole minute (in seconds) or null."));
+  if (!isNullableWholeSecond(value.blueArrivalSeconds)) issues.push(issue([...path, "blueArrivalSeconds"], "invalid_value", "blueArrivalSeconds must be a whole minute (in seconds) or null."));
   if (value.fasterParticipant !== null && value.fasterParticipant !== "red" && value.fasterParticipant !== "blue") issues.push(issue([...path, "fasterParticipant"], "invalid_enum", "Station-area fasterParticipant is invalid."));
   if (typeof value.withinSelectedTolerance !== "boolean") issues.push(issue([...path, "withinSelectedTolerance"], "invalid_type", "Station-area withinSelectedTolerance must be boolean."));
 }
@@ -537,8 +537,9 @@ function isNullableWholeSecond(value: unknown): value is number | null {
   return value === null || isWholeSecond(value);
 }
 
+/** The scheduled calculation is minute-aligned end to end: seconds must be a multiple of 60. */
 function isWholeSecond(value: unknown): value is number {
-  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
+  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0 && value % 60 === 0;
 }
 
 function isSelectedTolerance(value: unknown): value is 5 | 10 | 15 {

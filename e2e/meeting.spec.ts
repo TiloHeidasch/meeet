@@ -1,13 +1,11 @@
-import { expect, test, type Page } from "@playwright/test";
+import { expect, test } from "@playwright/test";
 import { inflateSync } from "node:zlib";
 import http from "node:http";
 import type net from "node:net";
 import { STATION_ICON_PADDING, STATION_ICON_SPEC_RATIOS } from "../lib/client/station-icon-sizes";
+import { LOCATIONS, v3Fixture, detailsFixture, ERROR_STREAM_FRAME, sseFrame, progressFrame, verdictFrame, progressStreamFrames, okStreamBody, setup, selectOrigin, openPlanner } from "./helpers";
+import { CALCULATION_PROGRESS_PHASES } from "../lib/domain/calculation-progress-contract";
 
-const MAP_STYLE = "https://tiles.openfreemap.org/styles/liberty";
-const MAP_ORIGIN = "https://tiles.openfreemap.org";
-const EMPTY_PNG = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=", "base64");
-const LOCATIONS = { Marienplatz: { label: "Marienplatz", latitude: 48.1374, longitude: 11.5755 }, Ostbahnhof: { label: "Ostbahnhof", latitude: 48.1257, longitude: 11.605 } } as const;
 function pngColorCount(input: Buffer): number {
   let offset = 8; let width = 0; let height = 0; let colorType = 0; let idat = Buffer.alloc(0);
   while (offset < input.length) { const length = input.readUInt32BE(offset); const type = input.toString("ascii", offset + 4, offset + 8); const data = input.subarray(offset + 8, offset + 8 + length); if (type === "IHDR") { width = data.readUInt32BE(0); height = data.readUInt32BE(4); colorType = data[9]!; } if (type === "IDAT") idat = Buffer.concat([idat, data]); offset += length + 12; }
@@ -15,32 +13,6 @@ function pngColorCount(input: Buffer): number {
   for (let y = 0; y < height; y++) { const filter = raw[cursor++]!; const row = Buffer.from(raw.subarray(cursor, cursor + stride)); cursor += stride; for (let x = 0; x < stride; x++) { const left = x >= channels ? row[x - channels]! : 0; const up = previous[x]!; const upperLeft = x >= channels ? previous[x - channels]! : 0; if (filter === 1) row[x] = (row[x]! + left) & 255; else if (filter === 2) row[x] = (row[x]! + up) & 255; else if (filter === 3) row[x] = (row[x]! + Math.floor((left + up) / 2)) & 255; else if (filter === 4) { const estimate = left + up - upperLeft; const pa = Math.abs(estimate - left); const pb = Math.abs(estimate - up); const pc = Math.abs(estimate - upperLeft); row[x] = (row[x]! + (pa <= pb && pa <= pc ? left : pb <= pc ? up : upperLeft)) & 255; } } for (let x = 0; x < width; x += 8) { const index = x * channels; colors.add(`${row[index]},${row[index + 1]},${row[index + 2]}`); } previous = row; }
   return colors.size;
 }
-
-const PRESET_SECONDS = { quick: 180, medium: 300, long: 600 } as const;
-
-function v3Fixture(request: { contractVersion: "meeet-meeting/v3"; participants: Array<{ id: string; origin: { label: string; latitude: number; longitude: number }; mode: "transit" }>; tolerancePercent: 5 | 10 | 15; searchStartAt: string; changeTimePreset: "quick" | "medium" | "long" }, reason: "ok" | "no-access-seeds" = "ok") {
-  const stationAreas = [
-    { stationAreaId: "area-red", name: "Red area", coordinate: { latitude: 48.132, longitude: 11.555 }, mode: "sbahn" as const, classification: "red" as const, redArrivalSeconds: 1200, blueArrivalSeconds: null, fasterParticipant: "red" as const, withinSelectedTolerance: false },
-    { stationAreaId: "area-fair", name: "Fair area", coordinate: { latitude: 48.132, longitude: 11.585 }, mode: "ubahn" as const, classification: "fair" as const, redArrivalSeconds: 1800, blueArrivalSeconds: 1860, fasterParticipant: "red" as const, withinSelectedTolerance: true },
-    { stationAreaId: "area-blue", name: "Blue area", coordinate: { latitude: 48.132, longitude: 11.615 }, mode: "tram" as const, classification: "blue" as const, redArrivalSeconds: null, blueArrivalSeconds: 1300, fasterParticipant: "blue" as const, withinSelectedTolerance: false },
-    { stationAreaId: "area-unclassified", name: "Unclassified area", coordinate: { latitude: 48.14, longitude: 11.59 }, mode: "bus" as const, classification: "unclassified" as const, redArrivalSeconds: null, blueArrivalSeconds: null, fasterParticipant: null, withinSelectedTolerance: false },
-  ];
-  const acquisition = { sourceUrl: "https://example.test/mvv.zip", retrievedAt: "2026-08-01T00:00:00.000Z", rawArchiveByteSize: 100, rawArchiveSha256: "a".repeat(64), feedVersion: "mvv-fixture-2026-08", feedValidFrom: "2026-08-01", feedValidUntil: "2026-08-31", attribution: "Deterministic MVV fixture", officialAttribution: "MVV", officialLicense: { name: "CC BY 4.0", url: "https://creativecommons.org/licenses/by/4.0/" }, officialProvenance: { source: "feed" as const, policyId: null } };
-  const seed = (id: string, coordinate: { latitude: number; longitude: number }) => ({ seedId: id, mvgStationId: id, stationAreaId: id, coordinate, accessSeconds: 120, provenance: { source: "fixture-static" as const, endpoint: "fixture", distanceMeters: 100, walkingSeconds: 120, note: "Deterministic browser fixture." } });
-  const schedule = { contractVersion: "meeet-scheduled-routing/v1", feedId: "mvv-fixture", timeZone: "Europe/Berlin", scheduleContentHash: "b".repeat(64), compiledArtifactId: "c".repeat(64), serviceDateRange: { firstDate: "2026-08-01", lastDate: "2026-08-31" }, acquisition };
-  const surface = { contractVersion: "meeet-scheduled-routing/v1", scheduleContentHash: schedule.scheduleContentHash, compiledArtifactId: schedule.compiledArtifactId, feedId: schedule.feedId, timeZone: schedule.timeZone, searchStartAt: request.searchStartAt, routingHorizonSeconds: 86400, selectedTolerancePercent: request.tolerancePercent, walkingVelocityMetersPerSecond: 1.4, walkingSecondsRoundingRule: "ceil(distanceMetres / velocityMetresPerSecond), with zero distance taking zero seconds", transferRadiusMeters: 100, accessSeedCounts: reason === "no-access-seeds" ? [0, 0] as [number, number] : [1, 1] as [number, number], stationAreaCount: 2, connectionCount: 2, changeTimeSeconds: PRESET_SECONDS[request.changeTimePreset], coverage: "scheduled-service-day-local-radius/v1" as const, representativePointBasis: "station-area-coordinate/v1" as const, classificationMethod: "scheduled-arrival-comparison-with-selected-tolerance/v1" as const, classificationBasis: "scheduled-station-area-arrival/v1" as const, finalWalkingMethod: "scheduled-access-and-transfer-walking/v1" as const };
-  const accessProvider = { name: "fixture MVG access", deployment: "fixture" as const, dataKind: "demo-static" as const, liveData: false, asOf: "fixture", notes: "Browser fixture", provenance: { role: "access" as const, provider: "fixture", deployment: "fixture" as const, dataKind: "demo-static" as const, liveData: false, sourceUrl: null, license: null, attribution: "Fixture", version: "fixture", retrievedAt: "fixture", notes: "Browser fixture", feeds: null } };
-  return { contractVersion: "meeet-meeting/v3" as const, status: reason === "ok" ? "ok" as const : "no-result" as const, reason: reason === "ok" ? null : reason, participants: [{ id: request.participants[0]!.id, color: "red" as const, origin: request.participants[0]!.origin, mode: "transit" as const, accessSeeds: reason === "no-access-seeds" ? [] : [seed("station-red", { latitude: 48.137, longitude: 11.576 })] }, { id: request.participants[1]!.id, color: "blue" as const, origin: request.participants[1]!.origin, mode: "transit" as const, accessSeeds: reason === "no-access-seeds" ? [] : [seed("station-blue", { latitude: 48.126, longitude: 11.605 })] }], stationAreas: reason === "ok" ? stationAreas : stationAreas.map((area) => ({ ...area, classification: "unclassified" as const, redArrivalSeconds: null, blueArrivalSeconds: null, fasterParticipant: null, withinSelectedTolerance: false })), metadata: { schedule, surface, accessProvider, stationAreas: { count: 4, coverage: "official-munich-boundary-with-connected-artifact-station-areas/v1" as const, selection: "all-eligible-scheduled-station-areas/v1" as const }, coverage: "munich-scheduled-station-area-meeting/v1" as const } };
-}
-function detailsFixture(request: { contractVersion: "meeet-meeting/v3"; participants: Array<{ id: string; origin: { label: string; latitude: number; longitude: number }; mode: "transit" }>; tolerancePercent: 5 | 10 | 15; searchStartAt: string; changeTimePreset: "quick" | "medium" | "long" }, areaId: string) {
-  const area = v3Fixture(request).stationAreas.find((item) => item.stationAreaId === areaId)!;
-  const fixture = v3Fixture(request);
-  const schedule = { ...fixture.metadata.schedule, acquisition: { ...fixture.metadata.schedule.acquisition, retrievedAt: "2026-08-01T00:00:00.000Z" } };
-  const participants = ["red", "blue"].map((color, index) => { const total = color === "red" ? area.redArrivalSeconds : area.blueArrivalSeconds; const origin = request.participants[index]!.origin; if (total === null) return { id: request.participants[index]!.id, color, origin, status: "unavailable", unavailableReason: area.classification === "unclassified" ? "station-area-unclassified" : "station-area-unavailable-for-participant", terminal: { totalSeconds: null, arrivalAt: null } }; const arrival = new Date(Date.parse(request.searchStartAt) + total * 1000).toISOString(); return { id: request.participants[index]!.id, color, origin, status: "available", unavailableReason: null, terminal: { totalSeconds: total, arrivalAt: arrival } }; });
-  return { contractVersion: "meeet-station-area-details/v1", status: "ok", reason: null, stationArea: area, participants, basis: { contractVersion: "meeet-meeting/v3", searchStartAt: request.searchStartAt, selectedTolerancePercent: request.tolerancePercent, routingHorizonSeconds: 86400, walkingVelocityMetersPerSecond: 1.4, walkingSecondsRoundingRule: "ceil(distanceMetres / velocityMetresPerSecond), with zero distance taking zero seconds", transferRadiusMeters: 100, changeTimeSeconds: PRESET_SECONDS[request.changeTimePreset], deterministicSelectionPolicy: "earliest-arrival/canonical-scan-first/v1", schedule, accessProvider: fixture.metadata.accessProvider } };
-}
-
-const ERROR_STREAM_FRAME = 'event: error\ndata: {"code":"PROVIDER_UNAVAILABLE","message":"scheduled service is temporarily unavailable."}\n\n';
 
 async function createStreamingTestServer(
   handler: (req: http.IncomingMessage, res: http.ServerResponse) => void,
@@ -53,47 +25,6 @@ async function createStreamingTestServer(
     close: () => new Promise<void>((resolve) => server.close(() => resolve())),
   };
 }
-
-function sseFrame(event: string, data: unknown): string {
-  return `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`;
-}
-
-function progressFrame(phase: string): string {
-  return sseFrame("progress", { contractVersion: "meeet-calculation-progress/v1", phase });
-}
-
-function verdictFrame(area: { stationAreaId: string; name: string; coordinate: { latitude: number; longitude: number }; classification: string; mode?: string }): string {
-  return sseFrame("station-verdict", {
-    contractVersion: "meeet-calculation-progress/v1",
-    stationAreaId: area.stationAreaId,
-    name: area.name,
-    coordinate: area.coordinate,
-    verdict: area.classification,
-    ...(area.mode ? { mode: area.mode } : {}),
-  });
-}
-
-function progressStreamFrames(request?: Parameters<typeof v3Fixture>[0], outcome: "ok" | "no-access-seeds" = "ok"): string {
-  const p1 = progressFrame("access-seeds");
-  const p2 = progressFrame("scheduled-routing");
-  const p3 = progressFrame("station-area-evaluation");
-  const verdicts = request
-    ? v3Fixture(request, outcome).stationAreas.map(verdictFrame).join("")
-    : "";
-  const p4 = progressFrame("validating-result");
-  return `${p1}${p2}${p3}${verdicts}${p4}`;
-}
-function okStreamBody(request: Parameters<typeof v3Fixture>[0], outcome: "ok" | "no-access-seeds" = "ok"): string { return `${progressStreamFrames(request, outcome)}event: ref\ndata: {"calculationRef":"fixture-calculation-ref"}\n\nevent: result\ndata: ${JSON.stringify(v3Fixture(request, outcome))}\n\n`; }
-
-async function setup(page: Page, outcome: "ok" | "no-access-seeds" | "error" = "ok", failMapStyle = false, mockStyle = true, streamDelayMs = 0) {
-  if (mockStyle) await page.route(MAP_STYLE, (route) => failMapStyle ? route.fulfill({ status: 503, body: "fixture style unavailable" }) : route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ version: 8, sources: { fixtureCartography: { type: "geojson", data: { type: "FeatureCollection", features: [{ type: "Feature", geometry: { type: "LineString", coordinates: [[11.54, 48.12], [11.63, 48.145]] }, properties: {} }] } } }, layers: [{ id: "background", type: "background" }, { id: "fixture-road", type: "line", source: "fixtureCartography", paint: { "line-color": "#526057", "line-width": 2 } }] }) }));
-  await page.route(`${MAP_ORIGIN}/sprites/liberty.json`, (route) => route.fulfill({ status: 200, contentType: "application/json", body: "{}" })); await page.route(`${MAP_ORIGIN}/sprites/liberty.png`, (route) => route.fulfill({ status: 200, contentType: "image/png", body: EMPTY_PNG }));
-  await page.route("**/api/locations/search**", async (route) => { const query = new URL(route.request().url()).searchParams.get("q") ?? ""; await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ locations: [LOCATIONS[query as keyof typeof LOCATIONS] ?? { label: query, latitude: 48.1374, longitude: 11.5755 }] }) }); });
-  await page.route("**/api/meeting/calculate/stream", async (route) => { if (streamDelayMs > 0) await new Promise((resolve) => setTimeout(resolve, streamDelayMs)); try { if (outcome === "error") { await route.fulfill({ status: 200, contentType: "text/event-stream", body: ERROR_STREAM_FRAME }); return; } await route.fulfill({ status: 200, contentType: "text/event-stream", body: okStreamBody(route.request().postDataJSON(), outcome) }); } catch { /* the client aborted the request (e.g. cancel) */ } });
-  await page.route("**/api/meeting/station-areas/*/details", async (route) => { const id = new URL(route.request().url()).pathname.split("/").at(-2)!; await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(detailsFixture(route.request().postDataJSON(), id)) }); });
-}
-async function selectOrigin(page: Page, index: number, name: keyof typeof LOCATIONS) { const input = page.getByRole("combobox", { name: `Participant ${index + 1} starting point` }); await input.fill(name); await page.getByRole("listbox").getByRole("button", { name, exact: true }).click(); await expect(input).toHaveValue(name); }
-async function openPlanner(page: Page) { await page.goto("/"); await expect(page.getByRole("heading", { name: /Find the middle/ })).toBeVisible(); await expect(page.getByText("A better place to meeet", { exact: true })).toBeVisible(); await expect(page.getByRole("combobox")).toHaveCount(2); }
 
 test.describe("v3 Munich meeting surface", () => {
   test("renders the real configured OpenFreeMap style", async ({ page }, testInfo) => {
@@ -162,7 +93,7 @@ test.describe("v3 Munich meeting surface", () => {
   test("does not show delayed evidence from a previous selection", async ({ page }) => { await setup(page); await openPlanner(page); await selectOrigin(page, 0, "Marienplatz"); await selectOrigin(page, 1, "Ostbahnhof"); await page.getByRole("button", { name: "meeet!" }).click(); await page.unroute("**/api/meeting/station-areas/*/details"); await page.route("**/api/meeting/station-areas/*/details", async (route) => { const id = new URL(route.request().url()).pathname.split("/").at(-2)!; if (id === "area-fair") await new Promise((resolve) => setTimeout(resolve, 400)); await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(detailsFixture(route.request().postDataJSON(), id)) }); }); const fair = page.locator('[data-station-area-id="area-fair"]'); const red = page.locator('[data-station-area-id="area-red"]'); await fair.click(); await red.click(); await expect(red).toHaveAttribute("aria-pressed", "true"); await expect(page.locator(".station-detail-panel").getByText("Red area", { exact: true })).toBeVisible(); await expect(page.locator(".station-detail-panel").getByText("Fair area", { exact: true })).toHaveCount(0); });
   test("uses the native chooser when the map is unavailable", async ({ page }) => { await setup(page, "ok", true); await openPlanner(page); await selectOrigin(page, 0, "Marienplatz"); await selectOrigin(page, 1, "Ostbahnhof"); await page.getByRole("button", { name: "meeet!" }).click(); await expect(page.locator(".map-frame")).toHaveAttribute("data-map-state", "unavailable"); const fair = page.locator('[data-station-area-id="area-fair"]'); await fair.click(); await expect(fair).toHaveAttribute("aria-pressed", "true"); await expect(page.getByRole("heading", { name: "Station-area details" })).toBeVisible(); });
   test("shows an explicit expired calculation reference and requires a manual recalculation", async ({ page }) => { let calculateCalls = 0; page.on("request", (request) => { if (request.url().includes("/api/meeting/calculate/stream")) calculateCalls += 1; }); await setup(page); await openPlanner(page); await selectOrigin(page, 0, "Marienplatz"); await selectOrigin(page, 1, "Ostbahnhof"); await page.getByRole("button", { name: "meeet!" }).click(); await expect(page.locator(".station-area-panel")).toBeVisible(); await page.unroute("**/api/meeting/station-areas/*/details"); await page.route("**/api/meeting/station-areas/*/details", (route) => route.fulfill({ status: 410, contentType: "application/json", body: JSON.stringify({ error: { code: "CALCULATION_REF_EXPIRED", message: "The calculation reference is missing or has expired. Recalculate the meeting surface." } }) })); const fair = page.locator('[data-station-area-id="area-fair"]'); await fair.click(); await expect(page.getByText(/calculation reference has expired/)).toBeVisible(); await expect(page.getByRole("button", { name: "Recalculate meeting surface" })).toBeVisible(); await expect(page.locator(".station-detail-panel").getByText("30 min", { exact: false })).toHaveCount(0); await page.waitForTimeout(400); expect(calculateCalls).toBe(1); const recalculated = page.waitForResponse((response) => response.url().includes("/api/meeting/calculate/stream")); await page.getByRole("button", { name: "Recalculate meeting surface" }).click(); await recalculated; await expect(page.locator(".station-area-panel")).toBeVisible(); expect(calculateCalls).toBe(2); });
-  test("keeps participant origins fixed while map pan and zoom stay interactive", async ({ page }) => { await setup(page); await openPlanner(page); await selectOrigin(page, 0, "Marienplatz"); await selectOrigin(page, 1, "Ostbahnhof"); await page.getByRole("button", { name: "meeet!" }).click(); await expect(page.getByText("Surface ready", { exact: true })).toBeVisible(); await expect(page.getByText(/Drag to adjust/)).toHaveCount(0); const canvas = page.locator(".maplibregl-canvas"); await canvas.scrollIntoViewIfNeeded(); const canvasRect = await canvas.boundingBox(); if (!canvasRect) throw new Error("Map canvas was not painted"); const marker = page.locator(".meeet-origin-marker").first(); await expect(marker).toHaveAttribute("aria-label", "Participant 1 origin."); const box = await marker.boundingBox(); if (!box) throw new Error("Origin marker was not painted"); const geoBefore = await page.evaluate((point) => { const map = (window as unknown as { __meeetMap?: { unproject: (point: { x: number; y: number }) => { lat: number; lng: number } } }).__meeetMap; if (!map) throw new Error("Map instance unavailable"); return map.unproject(point); }, { x: box.x + box.width / 2 - canvasRect.x, y: box.y + box.height / 2 - canvasRect.y }); await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2); await page.mouse.down(); await page.mouse.move(box.x + box.width / 2 + 60, box.y + box.height / 2 + 40, { steps: 8 }); await page.mouse.up(); await page.evaluate(() => new Promise<void>((resolve) => { const map = (window as unknown as { __meeetMap?: { isMoving: () => boolean; once: (event: string, callback: () => void) => void } }).__meeetMap; if (!map || !map.isMoving()) { resolve(); return; } map.once("moveend", () => resolve()); })); const afterBox = await marker.boundingBox(); if (!afterBox) throw new Error("Origin marker disappeared after drag attempt"); const geoAfter = await page.evaluate((point) => { const map = (window as unknown as { __meeetMap?: { unproject: (point: { x: number; y: number }) => { lat: number; lng: number } } }).__meeetMap; if (!map) throw new Error("Map instance unavailable"); return map.unproject(point); }, { x: afterBox.x + afterBox.width / 2 - canvasRect.x, y: afterBox.y + afterBox.height / 2 - canvasRect.y }); expect(Math.abs(geoAfter.lat - geoBefore.lat)).toBeLessThan(0.0005); expect(Math.abs(geoAfter.lng - geoBefore.lng)).toBeLessThan(0.0005); await expect(page.getByText("Surface ready", { exact: true })).toBeVisible(); await expect(page.getByText("Your inputs changed", { exact: false })).toHaveCount(0); const enabled = await page.evaluate(() => { const map = (window as unknown as { __meeetMap?: { dragPan: { isEnabled: () => boolean }; scrollZoom: { isEnabled: () => boolean }; touchZoomRotate: { isEnabled: () => boolean } } }).__meeetMap; if (!map) throw new Error("Map instance unavailable"); return { dragPan: map.dragPan.isEnabled(), scrollZoom: map.scrollZoom.isEnabled(), touchZoomRotate: map.touchZoomRotate.isEnabled() }; }); expect(enabled).toEqual({ dragPan: true, scrollZoom: true, touchZoomRotate: true }); const beforePan = await page.evaluate(() => { const map = (window as unknown as { __meeetMap?: { getCenter: () => { lat: number; lng: number } } }).__meeetMap; if (!map) throw new Error("Map instance unavailable"); return map.getCenter(); }); await page.mouse.move(canvasRect.x + canvasRect.width / 2, canvasRect.y + canvasRect.height / 2); await page.mouse.down(); await page.mouse.move(canvasRect.x + canvasRect.width / 2 + 120, canvasRect.y + canvasRect.height / 2 + 80, { steps: 10 }); await page.mouse.up(); await page.waitForFunction((before) => { const map = (window as unknown as { __meeetMap?: { getCenter: () => { lat: number; lng: number } } }).__meeetMap; if (!map) return false; const center = map.getCenter(); return Math.abs(center.lat - before.lat) > 0.0001 || Math.abs(center.lng - before.lng) > 0.0001; }, beforePan); const afterPan = await page.evaluate(() => { const map = (window as unknown as { __meeetMap?: { getCenter: () => { lat: number; lng: number } } }).__meeetMap; if (!map) throw new Error("Map instance unavailable"); return map.getCenter(); }); expect(Math.abs(afterPan.lat - beforePan.lat) > 0.0001 || Math.abs(afterPan.lng - beforePan.lng) > 0.0001).toBe(true); const zoomBefore = await page.evaluate(() => { const map = (window as unknown as { __meeetMap?: { getZoom: () => number } }).__meeetMap; if (!map) throw new Error("Map instance unavailable"); return map.getZoom(); }); await page.mouse.move(canvasRect.x + canvasRect.width / 2, canvasRect.y + canvasRect.height / 2); await page.mouse.wheel(0, -400); await page.waitForFunction((before) => { const map = (window as unknown as { __meeetMap?: { getZoom: () => number } }).__meeetMap; return !!map && map.getZoom() > before; }, zoomBefore); const zoomAfter = await page.evaluate(() => { const map = (window as unknown as { __meeetMap?: { getZoom: () => number } }).__meeetMap; if (!map) throw new Error("Map instance unavailable"); return map.getZoom(); }); expect(zoomAfter).toBeGreaterThan(zoomBefore); await expect(page.locator(".meeet-origin-marker")).toHaveCount(2); });
+  test("keeps participant origins fixed while map pan and zoom stay interactive", async ({ page }) => { await setup(page); await openPlanner(page); await selectOrigin(page, 0, "Marienplatz"); await selectOrigin(page, 1, "Ostbahnhof"); await page.getByRole("button", { name: "meeet!" }).click(); await expect(page.getByText("Surface ready", { exact: true })).toBeVisible(); await expect(page.locator('.map-frame[data-map-state="ready"]')).toHaveAttribute("data-station-markers-ready", "true"); await expect(page.getByText(/Drag to adjust/)).toHaveCount(0); const canvas = page.locator(".maplibregl-canvas"); await canvas.scrollIntoViewIfNeeded(); const canvasRect = await canvas.boundingBox(); if (!canvasRect) throw new Error("Map canvas was not painted"); const marker = page.locator(".meeet-origin-marker").first(); await expect(marker).toHaveAttribute("aria-label", "Participant 1 origin."); const box = await marker.boundingBox(); if (!box) throw new Error("Origin marker was not painted"); const geoBefore = await page.evaluate((point) => { const map = (window as unknown as { __meeetMap?: { unproject: (point: { x: number; y: number }) => { lat: number; lng: number } } }).__meeetMap; if (!map) throw new Error("Map instance unavailable"); return map.unproject(point); }, { x: box.x + box.width / 2 - canvasRect.x, y: box.y + box.height / 2 - canvasRect.y }); await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2); await page.mouse.down(); await page.mouse.move(box.x + box.width / 2 + 60, box.y + box.height / 2 + 40, { steps: 8 }); await page.mouse.up(); await page.evaluate(() => new Promise<void>((resolve) => { const map = (window as unknown as { __meeetMap?: { isMoving: () => boolean; once: (event: string, callback: () => void) => void } }).__meeetMap; if (!map || !map.isMoving()) { resolve(); return; } map.once("moveend", () => resolve()); })); const afterBox = await marker.boundingBox(); if (!afterBox) throw new Error("Origin marker disappeared after drag attempt"); const geoAfter = await page.evaluate((point) => { const map = (window as unknown as { __meeetMap?: { unproject: (point: { x: number; y: number }) => { lat: number; lng: number } } }).__meeetMap; if (!map) throw new Error("Map instance unavailable"); return map.unproject(point); }, { x: afterBox.x + afterBox.width / 2 - canvasRect.x, y: afterBox.y + afterBox.height / 2 - canvasRect.y }); expect(Math.abs(geoAfter.lat - geoBefore.lat)).toBeLessThan(0.0005); expect(Math.abs(geoAfter.lng - geoBefore.lng)).toBeLessThan(0.0005); await expect(page.getByText("Surface ready", { exact: true })).toBeVisible(); await expect(page.getByText("Your inputs changed", { exact: false })).toHaveCount(0); const enabled = await page.evaluate(() => { const map = (window as unknown as { __meeetMap?: { dragPan: { isEnabled: () => boolean }; scrollZoom: { isEnabled: () => boolean }; touchZoomRotate: { isEnabled: () => boolean } } }).__meeetMap; if (!map) throw new Error("Map instance unavailable"); return { dragPan: map.dragPan.isEnabled(), scrollZoom: map.scrollZoom.isEnabled(), touchZoomRotate: map.touchZoomRotate.isEnabled() }; }); expect(enabled).toEqual({ dragPan: true, scrollZoom: true, touchZoomRotate: true }); const beforePan = await page.evaluate(() => { const map = (window as unknown as { __meeetMap?: { getCenter: () => { lat: number; lng: number } } }).__meeetMap; if (!map) throw new Error("Map instance unavailable"); return map.getCenter(); }); await page.mouse.move(canvasRect.x + canvasRect.width / 2, canvasRect.y + canvasRect.height / 2); await page.mouse.down(); await page.mouse.move(canvasRect.x + canvasRect.width / 2 + 120, canvasRect.y + canvasRect.height / 2 + 80, { steps: 10 }); await page.mouse.up(); await page.waitForFunction((before) => { const map = (window as unknown as { __meeetMap?: { getCenter: () => { lat: number; lng: number } } }).__meeetMap; if (!map) return false; const center = map.getCenter(); return Math.abs(center.lat - before.lat) > 0.0001 || Math.abs(center.lng - before.lng) > 0.0001; }, beforePan); const afterPan = await page.evaluate(() => { const map = (window as unknown as { __meeetMap?: { getCenter: () => { lat: number; lng: number } } }).__meeetMap; if (!map) throw new Error("Map instance unavailable"); return map.getCenter(); }); expect(Math.abs(afterPan.lat - beforePan.lat) > 0.0001 || Math.abs(afterPan.lng - beforePan.lng) > 0.0001).toBe(true); const zoomBefore = await page.evaluate(() => { const map = (window as unknown as { __meeetMap?: { getZoom: () => number } }).__meeetMap; if (!map) throw new Error("Map instance unavailable"); return map.getZoom(); }); await page.mouse.move(canvasRect.x + canvasRect.width / 2, canvasRect.y + canvasRect.height / 2); await page.mouse.wheel(0, -400); await page.waitForFunction((before) => { const map = (window as unknown as { __meeetMap?: { getZoom: () => number } }).__meeetMap; return !!map && map.getZoom() > before; }, zoomBefore); const zoomAfter = await page.evaluate(() => { const map = (window as unknown as { __meeetMap?: { getZoom: () => number } }).__meeetMap; if (!map) throw new Error("Map instance unavailable"); return map.getZoom(); }); expect(zoomAfter).toBeGreaterThan(zoomBefore); await expect(page.locator(".meeet-origin-marker")).toHaveCount(2); });
   test("shows station names on marker hover and clears on pointer leave", async ({ page }) => {
     await setup(page); await openPlanner(page); await selectOrigin(page, 0, "Marienplatz"); await selectOrigin(page, 1, "Ostbahnhof"); await page.getByRole("button", { name: "meeet!" }).click(); await expect(page.locator('.map-frame[data-map-state="ready"]')).toHaveAttribute("data-station-markers-ready", "true");
     const tooltip = page.locator("[data-station-tooltip]"); await expect(tooltip).toHaveCount(0);
@@ -439,9 +370,9 @@ test.describe("v3 Munich meeting surface", () => {
         "Cache-Control": "no-cache",
         "Connection": "keep-alive",
       });
-      res.write(progressFrame("access-seeds"));
-      res.write(progressFrame("scheduled-routing"));
-      res.write(progressFrame("station-area-evaluation"));
+      res.write(progressFrame(CALCULATION_PROGRESS_PHASES[0]));
+      res.write(progressFrame(CALCULATION_PROGRESS_PHASES[1]));
+      res.write(progressFrame(CALCULATION_PROGRESS_PHASES[2]));
       res.write(verdictFrame({ stationAreaId: "area-red", name: "Red area", coordinate: { latitude: 48.132, longitude: 11.555 }, classification: "red" }));
       res.write(verdictFrame({ stationAreaId: "area-fair", name: "Fair area", coordinate: { latitude: 48.132, longitude: 11.585 }, classification: "fair" }));
       req.on("close", () => {
@@ -482,9 +413,9 @@ test.describe("v3 Munich meeting surface", () => {
         "Cache-Control": "no-cache",
         "Connection": "keep-alive",
       });
-      res.write(progressFrame("access-seeds"));
-      res.write(progressFrame("scheduled-routing"));
-      res.write(progressFrame("station-area-evaluation"));
+      res.write(progressFrame(CALCULATION_PROGRESS_PHASES[0]));
+      res.write(progressFrame(CALCULATION_PROGRESS_PHASES[1]));
+      res.write(progressFrame(CALCULATION_PROGRESS_PHASES[2]));
       // Stream area-red initially as unclassified (a placeholder/conflicting verdict)
       res.write(verdictFrame({ stationAreaId: "area-red", name: "Red area", coordinate: { latitude: 48.132, longitude: 11.555 }, classification: "unclassified" }));
       res.write(verdictFrame({ stationAreaId: "area-fair", name: "Fair area", coordinate: { latitude: 48.132, longitude: 11.585 }, classification: "fair" }));
@@ -511,7 +442,7 @@ test.describe("v3 Munich meeting surface", () => {
           const fixture = v3Fixture(requestData);
           res.write(verdictFrame({ stationAreaId: "area-blue", name: "Blue area", coordinate: { latitude: 48.132, longitude: 11.615 }, classification: "blue" }));
           res.write(verdictFrame({ stationAreaId: "area-unclassified", name: "Unclassified area", coordinate: { latitude: 48.14, longitude: 11.59 }, classification: "unclassified" }));
-          res.write(progressFrame("validating-result"));
+          res.write(progressFrame(CALCULATION_PROGRESS_PHASES[3]));
           res.write(sseFrame("ref", { calculationRef: "fixture-calculation-ref" }));
           res.write(sseFrame("result", fixture));
           res.end();
@@ -543,5 +474,103 @@ test.describe("v3 Munich meeting surface", () => {
     } finally {
       await server.close();
     }
+  });
+
+  test("refocuses the map onto rendered participant origins as they are selected", async ({ page }) => {
+    await setup(page); await openPlanner(page); await expect(page.locator(".map-frame")).toHaveAttribute("data-map-state", "ready");
+    const viewport = () => page.evaluate(() => { const map = (window as unknown as { __meeetMap?: { getCenter: () => { lat: number; lng: number }; getZoom: () => number } }).__meeetMap; if (!map) throw new Error("Map instance unavailable"); const center = map.getCenter(); return { lng: center.lng, lat: center.lat, zoom: map.getZoom() }; });
+    const refocus = page.getByRole("button", { name: "Refocus map" });
+    // Zero-location state: initial Munich viewport, refocus control present beside zoom controls but disabled
+    const initial = await viewport();
+    expect(initial.lng).toBeCloseTo(11.576, 3);
+    expect(initial.lat).toBeCloseTo(48.137, 3);
+    expect(initial.zoom).toBeCloseTo(11, 3);
+    const topRight = page.locator(".maplibregl-ctrl-top-right");
+    await expect(topRight.getByRole("button", { name: "Refocus map" })).toBeVisible();
+    await expect(topRight.locator(".maplibregl-ctrl-zoom-in")).toBeVisible();
+    // The refocus control stacks directly below the zoom controls (adjacent, same corner)
+    const controlOrder = await topRight.evaluate((container) => { const zoom = container.querySelector(".maplibregl-ctrl-zoom-in")?.getBoundingClientRect(); const refocusButton = container.querySelector("[data-refocus-map]")?.getBoundingClientRect(); if (!zoom || !refocusButton) return null; return { zoomTop: zoom.top, refocusTop: refocusButton.top }; });
+    expect(controlOrder).not.toBeNull();
+    expect(controlOrder!.refocusTop).toBeGreaterThan(controlOrder!.zoomTop);
+    await expect(refocus).toBeDisabled();
+    // Single origin: fit centers on it at a usable zoom
+    await selectOrigin(page, 0, "Marienplatz");
+    await expect(refocus).toBeEnabled();
+    await expect.poll(async () => { const v = await viewport(); return Math.abs(v.lng - 11.5755) < 1e-4 && Math.abs(v.lat - 48.1374) < 1e-4 && Math.abs(v.zoom - 13) < 0.01; }).toBe(true);
+    // Second origin: both origins inside the fitted bounds with visible edge margin
+    await selectOrigin(page, 1, "Ostbahnhof");
+    await expect.poll(async () => { const b = await page.evaluate(() => { const map = (window as unknown as { __meeetMap?: { getBounds: () => { getWest: () => number; getEast: () => number; getSouth: () => number; getNorth: () => number } } }).__meeetMap; if (!map) throw new Error("Map instance unavailable"); const bounds = map.getBounds(); return { west: bounds.getWest(), east: bounds.getEast(), south: bounds.getSouth(), north: bounds.getNorth() }; }); return b.west <= 11.5755 && b.east >= 11.605 && b.south <= 48.1257 && b.north >= 48.1374 && b.east - b.west < 0.06 && b.north - b.south < 0.06; }).toBe(true);
+    const inset = await page.evaluate(() => { const map = (window as unknown as { __meeetMap?: { project: (coordinate: [number, number]) => { x: number; y: number } } }).__meeetMap; if (!map) throw new Error("Map instance unavailable"); const canvas = document.querySelector(".maplibregl-canvas") as HTMLCanvasElement | null; if (!canvas) throw new Error("Map canvas missing"); const rect = canvas.getBoundingClientRect(); return ([[11.5755, 48.1374], [11.605, 48.1257]] as const).map((coordinate) => { const p = map.project([coordinate[0], coordinate[1]]); return { x: p.x, y: p.y, width: rect.width, height: rect.height }; }); });
+    for (const point of inset) {
+      expect(point.x).toBeGreaterThan(30);
+      expect(point.x).toBeLessThan(point.width - 30);
+      expect(point.y).toBeGreaterThan(30);
+      expect(point.y).toBeLessThan(point.height - 30);
+    }
+  });
+
+  test("handles identical origins without invalid bounds", async ({ page }) => {
+    await setup(page); await openPlanner(page); await expect(page.locator(".map-frame")).toHaveAttribute("data-map-state", "ready");
+    await selectOrigin(page, 0, "Marienplatz"); await selectOrigin(page, 1, "Marienplatz");
+    await expect(page.getByRole("button", { name: "Refocus map" })).toBeEnabled();
+    await expect.poll(async () => { const v = await page.evaluate(() => { const map = (window as unknown as { __meeetMap?: { getCenter: () => { lat: number; lng: number }; getZoom: () => number; getBounds: () => { getWest: () => number; getEast: () => number; getSouth: () => number; getNorth: () => number } } }).__meeetMap; if (!map) throw new Error("Map instance unavailable"); const center = map.getCenter(); const b = map.getBounds(); return { lng: center.lng, lat: center.lat, zoom: map.getZoom(), west: b.getWest(), east: b.getEast(), south: b.getSouth(), north: b.getNorth() }; }); return Math.abs(v.lng - 11.5755) < 1e-4 && Math.abs(v.lat - 48.1374) < 1e-4 && Math.abs(v.zoom - 15) < 0.01 && v.west <= v.east && v.south <= v.north; }).toBe(true);
+  });
+
+  test("refocuses the map onto rendered origins and station areas when results appear", async ({ page }) => {
+    await setup(page); await openPlanner(page); await selectOrigin(page, 0, "Marienplatz"); await selectOrigin(page, 1, "Ostbahnhof");
+    await page.getByRole("button", { name: "meeet!" }).click();
+    await expect(page.getByText("Surface ready", { exact: true })).toBeVisible();
+    await expect(page.locator('.map-frame[data-map-state="ready"]')).toHaveAttribute("data-station-markers-ready", "true");
+    const bounds = await page.evaluate(() => { const map = (window as unknown as { __meeetMap?: { getBounds: () => { getWest: () => number; getEast: () => number; getSouth: () => number; getNorth: () => number } } }).__meeetMap; if (!map) throw new Error("Map instance unavailable"); const b = map.getBounds(); return { west: b.getWest(), east: b.getEast(), south: b.getSouth(), north: b.getNorth() }; });
+    for (const [lng, lat] of [[11.5755, 48.1374], [11.605, 48.1257], [11.555, 48.132], [11.585, 48.132], [11.615, 48.132], [11.59, 48.14]] as const) {
+      expect(bounds.west).toBeLessThanOrEqual(lng);
+      expect(bounds.east).toBeGreaterThanOrEqual(lng);
+      expect(bounds.south).toBeLessThanOrEqual(lat);
+      expect(bounds.north).toBeGreaterThanOrEqual(lat);
+    }
+    expect(bounds.east - bounds.west).toBeLessThan(0.2);
+    expect(bounds.north - bounds.south).toBeLessThan(0.2);
+    await expect(page.getByRole("button", { name: "Refocus map" })).toBeEnabled();
+  });
+
+  test("refocuses the map onto rendered origins and unclassified station areas for a no-result surface", async ({ page }) => {
+    await setup(page, "no-access-seeds"); await openPlanner(page); await selectOrigin(page, 0, "Marienplatz"); await selectOrigin(page, 1, "Ostbahnhof");
+    await page.getByRole("button", { name: "meeet!" }).click();
+    await expect(page.getByText("No meeting surface yet", { exact: true })).toBeVisible();
+    await expect(page.locator('.map-frame[data-map-state="ready"]')).toHaveAttribute("data-station-markers-ready", "true");
+    const bounds = await page.evaluate(() => { const map = (window as unknown as { __meeetMap?: { getBounds: () => { getWest: () => number; getEast: () => number; getSouth: () => number; getNorth: () => number } } }).__meeetMap; if (!map) throw new Error("Map instance unavailable"); const b = map.getBounds(); return { west: b.getWest(), east: b.getEast(), south: b.getSouth(), north: b.getNorth() }; });
+    for (const [lng, lat] of [[11.5755, 48.1374], [11.605, 48.1257], [11.555, 48.132], [11.585, 48.132], [11.615, 48.132], [11.59, 48.14]] as const) {
+      expect(bounds.west).toBeLessThanOrEqual(lng);
+      expect(bounds.east).toBeGreaterThanOrEqual(lng);
+      expect(bounds.south).toBeLessThanOrEqual(lat);
+      expect(bounds.north).toBeGreaterThanOrEqual(lat);
+    }
+    expect(bounds.east - bounds.west).toBeLessThan(0.2);
+    expect(bounds.north - bounds.south).toBeLessThan(0.2);
+    await expect(page.getByRole("button", { name: "Refocus map" })).toBeEnabled();
+  });
+
+  test("refocus control restores the fitted viewport after manual pan", async ({ page }) => {
+    await setup(page); await openPlanner(page); await selectOrigin(page, 0, "Marienplatz"); await selectOrigin(page, 1, "Ostbahnhof");
+    await page.getByRole("button", { name: "meeet!" }).click();
+    await expect(page.getByText("Surface ready", { exact: true })).toBeVisible();
+    await expect(page.locator('.map-frame[data-map-state="ready"]')).toHaveAttribute("data-station-markers-ready", "true");
+    const viewport = () => page.evaluate(() => { const map = (window as unknown as { __meeetMap?: { getCenter: () => { lat: number; lng: number }; getZoom: () => number } }).__meeetMap; if (!map) throw new Error("Map instance unavailable"); const center = map.getCenter(); return { lng: center.lng, lat: center.lat, zoom: map.getZoom() }; });
+    const refocus = page.getByRole("button", { name: "Refocus map" });
+    const fitted = await viewport();
+    // Manual pan away from the fitted viewport
+    const canvas = page.locator(".maplibregl-canvas"); await canvas.scrollIntoViewIfNeeded();
+    const rect = await canvas.boundingBox(); if (!rect) throw new Error("Map canvas was not painted");
+    await page.mouse.move(rect.x + rect.width / 2, rect.y + rect.height / 2);
+    await page.mouse.down();
+    await page.mouse.move(rect.x + rect.width / 2 + 140, rect.y + rect.height / 2 + 90, { steps: 8 });
+    await page.mouse.up();
+    await page.evaluate(() => new Promise<void>((resolve) => { const map = (window as unknown as { __meeetMap?: { isMoving: () => boolean; once: (event: string, callback: () => void) => void } }).__meeetMap; if (!map || !map.isMoving()) { resolve(); return; } map.once("moveend", () => resolve()); }));
+    const panned = await viewport();
+    expect(panned.lng).not.toBeCloseTo(fitted.lng, 3);
+    // Refocus restores the fitted viewport
+    await refocus.focus();
+    await page.keyboard.press("Enter");
+    await expect.poll(async () => { const current = await viewport(); return Math.abs(current.lng - fitted.lng) < 1e-4 && Math.abs(current.lat - fitted.lat) < 1e-4 && Math.abs(current.zoom - fitted.zoom) < 0.01; }).toBe(true);
   });
 });

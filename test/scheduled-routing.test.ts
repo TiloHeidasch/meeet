@@ -8,12 +8,14 @@ import {
   importGtfsSchedule,
   isScheduledToleranceSatisfied,
   parseOffsetInstant,
+  parseSearchStartInstant,
   routeScheduledEarliestArrivals,
   createScheduledRoutingWindow,
   serviceDateRangeForSearch,
   serviceDateAnchorEpochSeconds,
   serviceDateForEpochSeconds,
   serviceDateSecondsToEpochSeconds,
+  walkingSeconds,
   type GtfsFeedFiles,
   type ScheduledMaterializedConnection,
   type ScheduledRoutingArtifact,
@@ -22,6 +24,16 @@ import { ScheduledCalculationDeadlineError } from "../lib/domain/scheduled-admis
 import { FIXTURE_SCHEDULED_ARTIFACT } from "../lib/fixtures/scheduled-routing.ts";
 
 const SEARCH_START = "2026-08-11T08:05:00+02:00";
+
+/**
+ * The latest whole-minute instant at or before a search-start bound. Bounds
+ * are computed at one-second precision (deliberately ending in :59 at their
+ * upper edge), but every searchStartAt is rounded up to the next whole
+ * minute, so this is the latest instant that actually stays in bounds.
+ */
+function latestWholeMinuteAt(latestEpochSeconds: number): string {
+  return new Date(Math.floor(latestEpochSeconds / 60) * 60 * 1_000).toISOString();
+}
 
 function deadlineAtPhase(target: string): (phase?: string) => void {
   return (phase?: string): void => {
@@ -144,7 +156,7 @@ function overlappingStreamFixture(firstDate: string, lastDate: string): GtfsFeed
 }
 
 function referenceMaterializeConnections(schedule: ScheduledRoutingArtifact, searchStartAt: string): ScheduledMaterializedConnection[] {
-  const searchStartEpochSeconds = parseOffsetInstant(searchStartAt, schedule.timeZone).epochSeconds;
+  const searchStartEpochSeconds = parseSearchStartInstant(searchStartAt, schedule.timeZone).epochSeconds;
   const horizonEndEpochSeconds = searchStartEpochSeconds + 86_400;
   const [firstCandidateDate, lastCandidateDate] = serviceDateRangeForSearch(searchStartEpochSeconds, schedule.timeZone, schedule.maximumServiceDayTimeSeconds);
   const results: ScheduledMaterializedConnection[] = [];
@@ -461,7 +473,7 @@ test("linear CSA preserves equal-time numeric sequence 1 to 10 and exactly one t
   const window = createScheduledRoutingWindow(schedule, SEARCH_START, { walkingVelocityMetersPerSecond: 10, transferRadiusMeters: 70 });
   const result = routeScheduledEarliestArrivals(schedule, [{ stationAreaId: "origin", accessSeconds: 0 }], SEARCH_START, { walkingVelocityMetersPerSecond: 10, transferRadiusMeters: 70 }, window);
   assert.equal(result.stationArrivals.find((arrival) => arrival.stationAreaId === "arrive")?.elapsedSeconds, 5 * 60);
-  assert.equal(result.stationArrivals.find((arrival) => arrival.stationAreaId === "transfer")?.elapsedSeconds, 5 * 60 + 6);
+  assert.equal(result.stationArrivals.find((arrival) => arrival.stationAreaId === "transfer")?.elapsedSeconds, 6 * 60);
   assert.equal(result.stationArrivals.find((arrival) => arrival.stationAreaId === "destination")?.elapsedSeconds, 25 * 60);
   assert.equal(result.stationArrivals.find((arrival) => arrival.stationAreaId === "walk-only")?.elapsedSeconds, null);
 });
@@ -612,6 +624,18 @@ test("surface classifies station areas across red, blue, and fair tolerance boun
   const oneSeed = calculateScheduledSurface({ schedule, accessSeedSets: [[{ stationAreaId: "station-a", accessSeconds: 0 }], []], searchStartAt: SEARCH_START, selectedTolerancePercent: 10, walkingVelocityMetersPerSecond: 100, transferRadiusMeters: 100 });
   assert.equal(oneSeed.status, "no-result");
   assert.equal(oneSeed.stationAreas.every((area) => area.classification === "unclassified"), true);
+
+  assert.throws(
+    () => calculateScheduledSurface({
+      schedule,
+      accessSeedSets: [[{ stationAreaId: "station-a", accessSeconds: 61 }], [{ stationAreaId: "station-b", accessSeconds: 0 }]],
+      searchStartAt: SEARCH_START,
+      selectedTolerancePercent: 10,
+      walkingVelocityMetersPerSecond: 100,
+      transferRadiusMeters: 100,
+    }),
+    /minute-aligned/,
+  );
 });
 
 test("scheduled routing checks injected deadlines at window, scan, and surface phases", () => {
@@ -720,11 +744,57 @@ test("zero and inclusive tolerance boundaries stay deterministic", () => {
   assert.throws(() => isScheduledToleranceSatisfied(1, 1, 0), /5, 10, or 15/);
 });
 
+test("parseSearchStartInstant canonicalizes to the next whole minute, unchanged for whole-minute instants", () => {
+  assert.equal(parseSearchStartInstant("2026-08-11T08:05:00+02:00", "Europe/Berlin").canonicalAt, "2026-08-11T06:05:00.000Z");
+  assert.equal(parseSearchStartInstant("2026-08-11T08:05:01+02:00", "Europe/Berlin").canonicalAt, "2026-08-11T06:06:00.000Z");
+  assert.equal(parseSearchStartInstant("2026-08-11T08:05:59+02:00", "Europe/Berlin").canonicalAt, "2026-08-11T06:06:00.000Z");
+  assert.equal(parseSearchStartInstant("2026-08-11T23:59:59+02:00", "Europe/Berlin").canonicalAt, "2026-08-11T22:00:00.000Z");
+  const rounded = parseSearchStartInstant("2026-08-11T08:05:01+02:00", "Europe/Berlin");
+  assert.equal(rounded.epochSeconds % 60, 0);
+  // parseOffsetInstant itself stays whole-second precision, with no rounding: it also
+  // parses non-searchStartAt instants (acquisition timestamps, freshness clocks).
+  assert.equal(parseOffsetInstant("2026-08-11T08:05:01+02:00", "Europe/Berlin").canonicalAt, "2026-08-11T06:05:01.000Z");
+});
+
+test("parseSearchStartInstant rounding is offset-invariant on spring and fall DST transition dates", () => {
+  assert.equal(parseSearchStartInstant("2026-03-29T01:59:59+01:00", "Europe/Berlin").canonicalAt, "2026-03-29T01:00:00.000Z");
+  assert.equal(parseSearchStartInstant("2026-10-25T02:59:59+02:00", "Europe/Berlin").canonicalAt, "2026-10-25T01:00:00.000Z");
+});
+
+test("gtfsTime truncates nonzero seconds to the minute instead of rejecting the feed", () => {
+  const nonzeroSecondsFiles: GtfsFeedFiles = {
+    ...FIXTURE_FILES,
+    "stop_times.txt": FIXTURE_FILES["stop_times.txt"]
+      .replace("through,08:10:00,08:10:00,a-1,1,0,0", "through,08:10:30,08:10:45,a-1,1,0,0")
+      .replace("through,08:20:00,08:21:00,b-1,2,0,0", "through,08:20:30,08:21:00,b-1,2,0,0"),
+  };
+  const schedule = importGtfsSchedule(nonzeroSecondsFiles, { acquisition: ACQUISITION });
+  const connection = schedule.connections.find((candidate) => candidate.tripId === "through");
+  assert.ok(connection);
+  assert.equal(connection.id, "through:0-1");
+  // 08:10:30 / 08:10:45 truncate to 08:10:00 (29400 s) and 08:20:30 to 08:20:00 (30000 s).
+  assert.equal(connection.departureTimeSeconds, 8 * 3_600 + 10 * 60);
+  assert.equal(connection.arrivalTimeSeconds, 8 * 3_600 + 20 * 60);
+});
+
+test("walkingSeconds rounds up to the next whole minute, with zero distance taking zero seconds", () => {
+  const origin = { latitude: 48.1000, longitude: 11.5000 };
+  assert.equal(walkingSeconds(origin, origin, 1.4), 0);
+  // A tiny nonzero distance still costs a full minute once rounded up.
+  assert.equal(walkingSeconds(origin, { latitude: 48.10001, longitude: 11.5000 }, 1.4), 60);
+  // A distance requiring roughly 30 raw seconds of walking rounds up to one whole minute.
+  const thirtySecondTarget = { latitude: origin.latitude + (1.4 * 30) / 111_000, longitude: origin.longitude };
+  assert.equal(walkingSeconds(origin, thirtySecondTarget, 1.4), 60);
+  // A distance requiring roughly 90 raw seconds of walking rounds up to the next whole minute.
+  const ninetySecondTarget = { latitude: origin.latitude + (1.4 * 90) / 111_000, longitude: origin.longitude };
+  assert.equal(walkingSeconds(origin, ninetySecondTarget, 1.4), 120);
+});
+
 test("search bounds use maximum service-day time, validate before seeds, and fail closed for strict instants", () => {
   const schedule = fixture();
   const bounds = schedule.searchStartBounds;
   assert.doesNotThrow(() => routeScheduledEarliestArrivals(schedule, [], bounds.earliestAt));
-  assert.doesNotThrow(() => routeScheduledEarliestArrivals(schedule, [], bounds.latestAt));
+  assert.doesNotThrow(() => routeScheduledEarliestArrivals(schedule, [], latestWholeMinuteAt(bounds.latestEpochSeconds)));
   const previousServiceOverlapEnd = serviceDateSecondsToEpochSeconds("2026-08-08", 24 * 3_600 + 10 * 60, "Europe/Berlin");
   assert.throws(() => routeScheduledEarliestArrivals(schedule, [], new Date((previousServiceOverlapEnd - 1) * 1_000).toISOString()), /coverage|bounds/);
   assert.doesNotThrow(() => routeScheduledEarliestArrivals(schedule, [], new Date((previousServiceOverlapEnd + 1) * 1_000).toISOString()));
@@ -759,7 +829,7 @@ test("search bounds observe active spring and fall DST service-day gaps", () => 
     [1_774_821_599, "2026-03-29T21:59:59.000Z"],
   );
   assert.doesNotThrow(() => routeScheduledEarliestArrivals(springSchedule, [], springSchedule.searchStartBounds.earliestAt));
-  assert.doesNotThrow(() => routeScheduledEarliestArrivals(springSchedule, [], springSchedule.searchStartBounds.latestAt));
+  assert.doesNotThrow(() => routeScheduledEarliestArrivals(springSchedule, [], latestWholeMinuteAt(springSchedule.searchStartBounds.latestEpochSeconds)));
 
   const fallFiles = {
     ...activeServiceSpanFixture("20261025", "20261026"),
@@ -777,7 +847,7 @@ test("search bounds observe active spring and fall DST service-day gaps", () => 
     [1_792_969_199, "2026-10-25T22:59:59.000Z"],
   );
   assert.doesNotThrow(() => routeScheduledEarliestArrivals(fallSchedule, [], fallSchedule.searchStartBounds.earliestAt));
-  assert.doesNotThrow(() => routeScheduledEarliestArrivals(fallSchedule, [], fallSchedule.searchStartBounds.latestAt));
+  assert.doesNotThrow(() => routeScheduledEarliestArrivals(fallSchedule, [], latestWholeMinuteAt(fallSchedule.searchStartBounds.latestEpochSeconds)));
 });
 
 test("one active service date passes service validation before its empty routable interval is rejected", () => {
@@ -813,6 +883,7 @@ test("direct and transfer arrivals respect the inclusive 24-hour horizon", () =>
   const exactDirect = routeScheduledEarliestArrivals(schedule, [{ stationAreaId: "boundary-a", accessSeconds: 86_400 }], SEARCH_START);
   assert.equal(exactDirect.stationArrivals.find((arrival) => arrival.stationAreaId === "boundary-a")?.elapsedSeconds, 86_400);
   assert.throws(() => routeScheduledEarliestArrivals(schedule, [{ stationAreaId: "boundary-a", accessSeconds: 86_401 }], SEARCH_START), /24-hour routing horizon/);
+  assert.throws(() => routeScheduledEarliestArrivals(schedule, [{ stationAreaId: "boundary-a", accessSeconds: 61 }], SEARCH_START), /minute-aligned/);
 
   const exactTransfer = routeScheduledEarliestArrivals(schedule, [{ stationAreaId: "boundary-a", accessSeconds: 0 }], SEARCH_START, { walkingVelocityMetersPerSecond: 10, transferRadiusMeters: 100 });
   assert.equal(exactTransfer.stationArrivals.find((arrival) => arrival.stationAreaId === "boundary-b")?.elapsedSeconds, 86_400);

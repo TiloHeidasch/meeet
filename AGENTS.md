@@ -33,6 +33,12 @@
 - PRs into `dev` and `main` must pass the e2e gate (required check
   `E2E build, spin up, calculate`): a full application build, a schedule-artifact
   compilation, a server spin-up, and one functional calculation.
+- PRs into `dev` and `main` must pass the real-feed compile gate (required
+  check `Compile real MVV feed`): the production rotation path
+  (`npm run schedule:compile:mvv`) must compile the live MVV Gesamt-GTFS
+  archive, so compiler regressions against the real feed shape fail CI
+  instead of only failing at production rotation. The operator must add this
+  check to branch protection alongside the e2e gate.
 - Reviews are performed by the oracle (code-review skill, both axes) as an
   advisory quality gate; the verdict never blocks merging. Branch protection
   requires no reviews on `dev` or `main`. PRs into `dev` are created and
