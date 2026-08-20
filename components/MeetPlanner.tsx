@@ -6,6 +6,7 @@ import { validateMeetingResponse, type MeetingRequest, type MeetingResponse, typ
 import { validateStationAreaDetails, type StationAreaDetail } from "@/lib/client/station-area-details";
 import { CALCULATION_PROGRESS_PHASES, readCalculationStream, CalculationStreamError, type CalculationProgressPhase, type StationVerdict } from "@/lib/client/calculation-stream";
 import { messages, useLocale, type Locale, type Messages } from "@/lib/client/i18n";
+import { BRAND_MARK_LETTER_D, BRAND_MARK_PLATE_D } from "@/lib/client/brand-mark";
 
 const MapLibreCanvas = dynamic(() => import("./MapLibreCanvas"), { ssr: false, loading: () => <MapLoading /> });
 const COLORS = ["#e85d4a", "#3d70c9"] as const;
@@ -414,7 +415,7 @@ export default function MeetPlanner({ capability }: { capability: PlannerCapabil
     <main className="planner-shell">
       <div className="planner-inner">
         <header className="brand-bar">
-          <div className="brand"><span className="brand-mark">m</span><span>meeet</span></div>
+          <div className="brand"><span className="brand-mark" aria-hidden="true"><svg viewBox="0 0 64 64"><path d={BRAND_MARK_PLATE_D} fill="var(--foreground)" /><path d={BRAND_MARK_LETTER_D} fill="var(--yellow)" /></svg></span><span>meeet</span></div>
           <span className="scope-pill">{t.planner.scopePill}</span>
         </header>
         <div className="planner-grid">

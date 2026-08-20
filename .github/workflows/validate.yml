@@ -28,3 +28,5 @@ jobs:
         run: npx tsc --noEmit
       - name: Lint
         run: npm run lint
+      - name: Brand icon drift check
+        run: npm run icons:brand && git diff --exit-code -- app/icon.svg app/icon.png app/apple-icon.png app/favicon.ico
