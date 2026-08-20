@@ -30,6 +30,7 @@
 set -euo pipefail
 
 GHCR_OWNER="$(printf '%s' "${GHCR_OWNER:-${GITHUB_REPOSITORY:-}}" | tr '[:upper:]' '[:lower:]')"
+GHCR_OWNER="${GHCR_OWNER%%/*}"
 PACKAGES="${PACKAGES:-meeet meeet-artifact-compiler}"
 KEEP_PER_BRANCH="${KEEP_PER_BRANCH:-5}"
 DRY_RUN="${DRY_RUN:-true}"
@@ -138,7 +139,7 @@ classify() {
         reachable=1
         for b in "${BRANCHES[@]}"; do
           if git merge-base --is-ancestor "$sha" "origin/$b" 2>/dev/null; then
-            branches="$branches $b"
+            [[ " $branches " == *" $b "* ]] || branches="$branches $b"
           fi
         done
       fi
