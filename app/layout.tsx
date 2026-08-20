@@ -1,5 +1,8 @@
 import type { Metadata } from "next";
 import { Geist, Geist_Mono } from "next/font/google";
+import { headers } from "next/headers";
+import { Suspense } from "react";
+import { messages, resolveLocaleFromHeader } from "@/lib/client/i18n";
 import "./globals.css";
 
 const geistSans = Geist({
@@ -12,10 +15,32 @@ const geistMono = Geist_Mono({
   subsets: ["latin"],
 });
 
-export const metadata: Metadata = {
-  title: "meeet — find a fair meeting point",
-  description: "Compare local demonstration travel estimates for Munich meeting places.",
-};
+// The `lang` attribute and metadata resolve from the `Accept-Language` header
+// (server shell), while client UI text resolves from `navigator.languages`
+// (see lib/client/i18n.ts). Both share the same resolution logic, so they
+// agree in practice; a proxy rewriting the header could in principle
+// desynchronize them, which is an accepted limitation of the dual-source
+// design.
+async function HtmlWithLocale({ children }: { children: React.ReactNode }) {
+  const requestHeaders = await headers();
+  const locale = resolveLocaleFromHeader(requestHeaders.get("accept-language"));
+  return (
+    <html
+      lang={locale}
+      className={`${geistSans.variable} ${geistMono.variable} h-full antialiased`}
+    >
+      <body className="min-h-full flex flex-col">
+        {children}
+      </body>
+    </html>
+  );
+}
+
+export async function generateMetadata(): Promise<Metadata> {
+  const requestHeaders = await headers();
+  const locale = resolveLocaleFromHeader(requestHeaders.get("accept-language"));
+  return { title: messages[locale].shell.metadataTitle, description: messages[locale].shell.metadataDescription };
+}
 
 export default function RootLayout({
   children,
@@ -23,13 +48,8 @@ export default function RootLayout({
   children: React.ReactNode;
 }>) {
   return (
-    <html
-      lang="en"
-      className={`${geistSans.variable} ${geistMono.variable} h-full antialiased`}
-    >
-      <body className="min-h-full flex flex-col">
-        {children}
-      </body>
-    </html>
+    <Suspense fallback={<html lang="en" className={`${geistSans.variable} ${geistMono.variable} h-full antialiased`}><body className="min-h-full flex flex-col">{children}</body></html>}>
+      <HtmlWithLocale>{children}</HtmlWithLocale>
+    </Suspense>
   );
 }
