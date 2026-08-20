@@ -412,7 +412,7 @@ export default function MeetPlanner({ capability }: { capability: PlannerCapabil
         </header>
         <div className="planner-grid">
           <section className="planner-copy">
-            <div className="eyebrow">A better place to meet</div>
+            <div className="eyebrow">A better place to meeet</div>
             <h1>Find the middle,<br /><em>without guessing.</em></h1>
             <p className="lede">Two origins. One planned start. A map of where public transport gets you close enough.</p>
             {ui.calculationUnavailable && <div className="state-card" role="status"><strong>Meeting search unavailable</strong><span>{ui.unavailableMessage}</span></div>}
@@ -453,7 +453,7 @@ export default function MeetPlanner({ capability }: { capability: PlannerCapabil
               <div className="search-actions">
                 <button className="search-button" type="submit" disabled={!canSubmitMeetingCalculation(ui, status)}>
                   {status === "loading" && <span className="button-spinner" />}
-                  {status === "loading" ? "Calculating…" : "Show meeting surface"}
+                  {status === "loading" ? "Calculating…" : "meeet!"}
                 </button>
                 {status === "loading" && <button type="button" className="cancel-button" data-testid="cancel-calculation" onClick={cancelCalculation}>Cancel</button>}
               </div>
