@@ -6,6 +6,7 @@ import "maplibre-gl/dist/maplibre-gl.css";
 import type { MeetingStationArea, StationAreaMode } from "@/lib/client/meeting-response";
 import { buildStationTerritories, type StationTerritory } from "@/lib/client/station-territories";
 import { STATION_ICON_PADDING, STATION_ICON_VISUAL_SIZES } from "@/lib/client/station-icon-sizes";
+import { messages, useLocale, type Locale } from "@/lib/client/i18n";
 
 export type MapParticipant = { id: string; number: number; label: string; latitude: number; longitude: number; color: "#e85d4a" | "#3d70c9" };
 type Props = { participants: readonly MapParticipant[]; stationAreas: readonly MeetingStationArea[]; resultState: "initial" | "ok" | "no-result"; selectedStationAreaId?: string | null; onStationAreaSelect?: (stationAreaId: string) => void };
@@ -182,7 +183,7 @@ function selectedStationOutlineImage(mode: StationAreaMode): ImageData {
   return context.getImageData(0, 0, canvas.width, canvas.height);
 }
 
-function syncOrigins(map: Map, participants: readonly MapParticipant[], markers: MutableRefObject<globalThis.Map<string, Marker>>) {
+function syncOrigins(map: Map, participants: readonly MapParticipant[], markers: MutableRefObject<globalThis.Map<string, Marker>>, locale: Locale) {
   const ids = new Set(participants.map((p) => p.id));
   markers.current.forEach((marker, id) => { if (!ids.has(id)) { marker.remove(); markers.current.delete(id); } });
   participants.forEach((p) => {
@@ -193,7 +194,7 @@ function syncOrigins(map: Map, participants: readonly MapParticipant[], markers:
       element.className = "meeet-origin-marker";
       element.innerHTML = PIN_SVG;
       element.style.color = p.color;
-      element.setAttribute("aria-label", `${p.label} origin.`);
+      element.setAttribute("aria-label", messages[locale].map.originAria(p.label));
       marker = new Marker({ element, anchor: "bottom" }).setLngLat([p.longitude, p.latitude]).addTo(map);
       markers.current.set(p.id, marker);
     } else marker.setLngLat([p.longitude, p.latitude]);
@@ -201,6 +202,7 @@ function syncOrigins(map: Map, participants: readonly MapParticipant[], markers:
 }
 
 export default function MapLibreCanvas({ participants, stationAreas, resultState, selectedStationAreaId = null, onStationAreaSelect }: Props) {
+  const locale = useLocale(); const t = messages[locale];
   const containerRef = useRef<HTMLDivElement>(null);
   const mapRef = useRef<Map | null>(null);
   const markersRef = useRef(new globalThis.Map<string, Marker>());
@@ -356,7 +358,7 @@ export default function MapLibreCanvas({ participants, stationAreas, resultState
     const generated = territoryData(stationAreas, resultState);
     territorySource?.setData(generated);
     setTerritoryFeatureCount(generated.features.length);
-    syncOrigins(map, participants, markersRef);
+    syncOrigins(map, participants, markersRef, locale);
     const markReady = () => {
       if (!map || map !== mapRef.current) return;
       const ready = stationAreas.length === 0 || stationAreas.every((area) => map.queryRenderedFeatures(map.project([area.coordinate.longitude, area.coordinate.latitude]), { layers: STATION_ICON_LAYERS }).some((feature) => feature.properties?.stationAreaId === area.stationAreaId));
@@ -364,7 +366,7 @@ export default function MapLibreCanvas({ participants, stationAreas, resultState
     };
     map.once("idle", markReady);
     return () => { map.off("idle", markReady); };
-  }, [stationAreas, stations, participants, state, resultState]);
+  }, [stationAreas, stations, participants, state, resultState, locale]);
 
   useEffect(() => {
     const map = mapRef.current;
@@ -373,10 +375,10 @@ export default function MapLibreCanvas({ participants, stationAreas, resultState
   }, [selectedStationAreaId, state]);
 
   const label = resultState === "ok"
-    ? `Munich meeting territory map with ${stationAreas.length} calculated station-area markers; unclassified territories are unfilled and gray markers are unclassified station areas`
+    ? t.map.ariaOk(stationAreas.length)
     : resultState === "no-result"
-    ? `Munich meeting territory map with ${stationAreas.length} unclassified station-area markers; unclassified territories are unfilled and gray markers are unclassified station areas`
-    : "Munich meeting map with two participant origins; unclassified territories are unfilled and gray markers are unclassified station areas";
+    ? t.map.ariaNoResult(stationAreas.length)
+    : t.map.ariaInitial;
 
   return (
     <section
@@ -392,13 +394,13 @@ export default function MapLibreCanvas({ participants, stationAreas, resultState
       data-territory-fill-opacity={TERRITORY_FILL_OPACITY}
       data-territory-feature-count={territoryFeatureCount}
     >
-      <h2 className="sr-only">Munich meeting map</h2>
+      <h2 className="sr-only">{t.map.heading}</h2>
       <div ref={containerRef} className="absolute inset-0" style={{ width: "100%", height: "100%" }} />
-      {state === "loading" && <div className="map-message" role="status">Loading Munich map…</div>}
+      {state === "loading" && <div className="map-message" role="status">{t.map.loading}</div>}
       {state === "unavailable" && (
         <div className="map-message" role="status">
-          <strong>Map unavailable</strong>
-          <span>The station-area territory map is unavailable; unclassified territories are unfilled. The planned route calculation is still separate.</span>
+          <strong>{t.map.unavailableTitle}</strong>
+          <span>{t.map.unavailableBody}</span>
         </div>
       )}
       {tooltip && state === "ready" && stationAreas.some((area) => area.stationAreaId === tooltip.stationAreaId) && (
