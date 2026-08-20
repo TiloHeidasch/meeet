@@ -24,7 +24,7 @@ export type ScheduledDeadlinePhase =
   | "meeting-result"
   | "routing-window"
   | "routing-scan"
-  | "surface-cells";
+  | "station-areas";
 
 /** Optional phase checkpoint; callers may inject the admission deadline check. */
 export type ScheduledDeadlineCheck = (phase: ScheduledDeadlinePhase) => void;
@@ -176,14 +176,14 @@ export interface ScheduledParticipantSurface {
   readonly stationArrivals: readonly StationArrivalField[];
 }
 
-export type ScheduledCellClassification = "red" | "blue" | "fair" | "unclassified";
+export type ScheduledStationAreaClassification = "red" | "blue" | "fair" | "unclassified";
 
 export interface ScheduledStationAreaCandidate {
   readonly stationAreaId: string;
   readonly name: string;
   readonly coordinate: ScheduledCoordinate;
   readonly mode: StationAreaMode;
-  readonly classification: ScheduledCellClassification;
+  readonly classification: ScheduledStationAreaClassification;
   readonly redArrivalSeconds: number | null;
   readonly blueArrivalSeconds: number | null;
   readonly fasterParticipant: "red" | "blue" | null;
@@ -224,7 +224,7 @@ export interface ScheduledSurfaceMetadata {
   readonly stationAreaCount: number;
   readonly connectionCount: number;
   readonly coverage: "scheduled-service-day-local-radius/v1";
-  readonly representativePointBasis: "inside-clipped-cell/v1";
+  readonly representativePointBasis: "station-area-coordinate/v1";
 }
 
 export interface ScheduledSurfaceResult {

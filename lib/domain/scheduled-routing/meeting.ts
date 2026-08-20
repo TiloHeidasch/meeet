@@ -217,10 +217,10 @@ export async function calculateScheduledMeetingWithBasis(
         stationAreaCount: artifact.stationAreas.length,
         connectionCount: artifact.connections.length,
         coverage: "scheduled-service-day-local-radius/v1",
-        representativePointBasis: "inside-clipped-cell/v1",
-        classificationMethod: "representative-point-with-geometric-final-station-walking/v1",
-        classificationBasis: "representative-point",
-        finalWalkingMethod: "geometric-station-walking-estimate-not-navigation",
+        representativePointBasis: "station-area-coordinate/v1",
+        classificationMethod: "scheduled-arrival-comparison-with-selected-tolerance/v1",
+        classificationBasis: "scheduled-station-area-arrival/v1",
+        finalWalkingMethod: "scheduled-access-and-transfer-walking/v1",
       },
       stationAreas: {
         count: stationAreas.length,
@@ -228,7 +228,7 @@ export async function calculateScheduledMeetingWithBasis(
         selection: "all-eligible-scheduled-station-areas/v1",
       },
       accessProvider: access.descriptor,
-      coverage: "munich-clipped-scheduled-grid/v1",
+      coverage: "munich-scheduled-station-area-meeting/v1",
     },
   });
   const basis: ScheduledCalculationBasis = {

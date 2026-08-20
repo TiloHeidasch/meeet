@@ -544,10 +544,10 @@ test("v3 validation is strict and scheduled orchestration emits only the v3 stat
   assert.ok(response.stationAreas.length > 0);
   assert.ok(response.stationAreas.every((area) => area.stationAreaId !== "" && area.classification !== undefined));
   assert.equal(response.metadata.stationAreas.count, response.stationAreas.length);
-  assert.equal(response.metadata.surface.classificationMethod, "representative-point-with-geometric-final-station-walking/v1");
-  assert.equal(response.metadata.surface.classificationBasis, "representative-point");
-  assert.equal(response.metadata.surface.representativePointBasis, "inside-clipped-cell/v1");
-  assert.equal(response.metadata.surface.finalWalkingMethod, "geometric-station-walking-estimate-not-navigation");
+  assert.equal(response.metadata.surface.classificationMethod, "scheduled-arrival-comparison-with-selected-tolerance/v1");
+  assert.equal(response.metadata.surface.classificationBasis, "scheduled-station-area-arrival/v1");
+  assert.equal(response.metadata.surface.representativePointBasis, "station-area-coordinate/v1");
+  assert.equal(response.metadata.surface.finalWalkingMethod, "scheduled-access-and-transfer-walking/v1");
   assert.equal(response.metadata.surface.changeTimeSeconds, 300);
   assert.equal(response.metadata.stationAreas.coverage, "official-munich-boundary-with-connected-artifact-station-areas/v1");
   assert.equal(validateScheduledMeetingResponse(response, parsed.data).success, true);
@@ -767,6 +767,29 @@ test("v3 response rejects retired boarding-stop identity on access seeds", async
   const mutable = mutableResponse(response);
   (mutable.participants[0]!.accessSeeds[0] as Record<string, unknown>).boardingStopId = "fixture-a-stop";
   assert.equal(validateScheduledMeetingResponse(mutable, parsed.data).success, false);
+});
+
+test("v3 response validation rejects the retired grid-cell surface contract", async () => {
+  const parsed = parseScheduledMeetingRequest(V3_REQUEST);
+  assert.equal(parsed.success, true);
+  if (!parsed.success) return;
+  const response = await validScheduledResponse();
+
+  const legacyCells = mutableResponse(response) as unknown as Record<string, unknown>;
+  legacyCells.cells = [{ id: "cell-1", geometry: { type: "MultiPolygon", coordinates: [[[[11.57, 48.13], [11.58, 48.13], [11.58, 48.14], [11.57, 48.14], [11.57, 48.13]]]] }, representativePoint: { latitude: 48.135, longitude: 11.575 }, classification: "fair", redArrivalSeconds: 600, blueArrivalSeconds: 660, fasterParticipant: "red", withinSelectedTolerance: true }];
+  const legacyCellsResult = validateScheduledMeetingResponse(legacyCells, parsed.data);
+  assert.equal(legacyCellsResult.success, false);
+  if (!legacyCellsResult.success) {
+    assert.ok(legacyCellsResult.issues.some((issue) => issue.path.includes("cells")));
+  }
+
+  const legacyGrid = mutableResponse(response);
+  (legacyGrid.metadata as unknown as Record<string, unknown>).grid = { columns: 24, rows: 16, cellCount: 1, geometry: "munich-clipped-surface-grid/v1" };
+  const legacyGridResult = validateScheduledMeetingResponse(legacyGrid, parsed.data);
+  assert.equal(legacyGridResult.success, false);
+  if (!legacyGridResult.success) {
+    assert.ok(legacyGridResult.issues.some((issue) => issue.path.includes("grid")));
+  }
 });
 
 test("scheduled HTTP path handles fixture success, no seeds, and unavailable artifacts without legacy fallback", async () => {
