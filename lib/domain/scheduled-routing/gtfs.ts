@@ -2,6 +2,7 @@ import "server-only";
 
 import { createHash, type Hash } from "node:crypto";
 
+import { logCompilerProgress } from "../../log.ts";
 import type {
   GtfsPickupDropOffType,
   GtfsAcquisitionRecord,
@@ -27,6 +28,8 @@ export interface GtfsImportOptions {
   readonly feedId?: string;
   readonly timeZone?: string;
   readonly acquisition: GtfsAcquisitionRecord;
+  /** Emit [compile] progress lines; defaults to true. Runner-side imports (e.g. fixtures) pass false. */
+  readonly logProgress?: boolean;
 }
 
 export type ScheduledArtifactCore = Omit<ScheduledRoutingArtifact, "provenance">;
@@ -103,6 +106,7 @@ export function importGtfsSchedule(
 ): ScheduledRoutingArtifact {
   const feedId = options.feedId ?? "gtfs-feed";
   const acquisition = normalizeAcquisition(options.acquisition);
+  const logProgress = options.logProgress ?? true;
   validateNonEmpty(feedId, "feedId");
 
   const fileNames = Object.keys(files).sort(compareScheduledIds);
@@ -130,6 +134,7 @@ export function importGtfsSchedule(
   const stopTimesTable = readTable(files, "stop_times.txt");
   const calendarTable = files["calendar.txt"] === undefined ? null : readTable(files, "calendar.txt");
   const exceptionsTable = files["calendar_dates.txt"] === undefined ? null : readTable(files, "calendar_dates.txt");
+  if (logProgress) logCompilerProgress("parsing GTFS tables (agency, routes, stops, trips, stop_times, calendar, calendar_dates)");
 
   requireColumns(agencyTable, ["agency_id", "agency_name", "agency_url", "agency_timezone"]);
   const agency = parseAgency(agencyTable);
@@ -149,14 +154,20 @@ export function importGtfsSchedule(
   }
 
   const routes = parseRoutes(routesTable);
+  if (logProgress) logCompilerProgress(`routes parsed: ${routes.length}`);
   const stops = parseStops(stopsTable);
+  if (logProgress) logCompilerProgress(`stops parsed: ${stops.length}`);
   const trips = parseTrips(tripsTable, routes);
+  if (logProgress) logCompilerProgress(`trips parsed: ${trips.length}`);
   const modesByArea = deriveStationAreaModes(stopTimesTable, trips, stops, routes);
   const stationAreas = createStationAreas(stops, modesByArea);
+  if (logProgress) logCompilerProgress(`station areas created: ${stationAreas.length}`);
   const calendars = parseCalendars(calendarTable);
   const exceptions = parseExceptions(exceptionsTable);
+  if (logProgress) logCompilerProgress(`calendars parsed: ${calendars.length}, exceptions parsed: ${exceptions.length}`);
   validateServices(trips, calendars, exceptions, calendarTable !== null);
   const connections = parseConnections(stopTimesTable, trips, stops, routes);
+  if (logProgress) logCompilerProgress(`connections parsed: ${connections.length}`);
   const serviceDateRange = deriveServiceDateRange(calendars, exceptions, trips);
   if (serviceDateRange.firstDate < acquisition.feedValidFrom || serviceDateRange.lastDate > acquisition.feedValidUntil) {
     throw new GtfsValidationError("Compiled service validity exceeds the acquired feed validity.");
@@ -184,6 +195,7 @@ export function importGtfsSchedule(
     connections: sortedConnections,
   };
   const provenance = createProvenance(files, fileNames, feedId, timeZone, acquisition, compiledPayload);
+  if (logProgress) logCompilerProgress(`provenance computed (contentHash=${provenance.contentHash}, compiledArtifactId=${provenance.compiledArtifactId})`);
 
   const artifact: ScheduledRoutingArtifact = {
     contractVersion: "meeet-scheduled-routing/v1",
@@ -200,6 +212,7 @@ export function importGtfsSchedule(
     connections: sortedConnections,
     provenance,
   };
+  if (logProgress) logCompilerProgress(`GTFS import complete (feedId=${feedId}, serviceDateRange=${serviceDateRange.firstDate}..${serviceDateRange.lastDate})`);
   return deepFreeze(artifact);
 }
 

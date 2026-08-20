@@ -423,3 +423,26 @@ test("ok surfaces expose cached unclassified markers as explicit unavailable det
     ["blue", "blue", "unavailable", "station-area-unclassified", { totalSeconds: null, arrivalAt: null }],
   ]);
 });
+
+test("details lifecycle emits [meeet] request and complete log lines", async (t) => {
+  const logMock = t.mock.method(console, "log");
+  t.after(() => logMock.mock.restore());
+
+  const cache = new InMemoryStationAreaCalculationBasisCache({ referenceFactory: () => "logging-reference" });
+  const calculate = await calculateRequest(cache);
+  assert.equal(calculate.status, 200);
+  const reference = calculate.headers.get("Meeet-Calculation-Ref");
+  assert.ok(reference);
+  const detail = await detailsRequest(reference!, cache, "fixture-c");
+  assert.equal(detail.status, 200);
+
+  const lines = logMock.mock.calls.map((call) => String(call.arguments[0]));
+  assert.ok(
+    lines.some((line) => line.includes("[meeet]") && line.includes("details: request (stationAreaId=fixture-c)")),
+    "expected a [meeet] details: request log line",
+  );
+  assert.ok(
+    lines.some((line) => line.includes("[meeet]") && line.includes("details: complete (status=200")),
+    "expected a [meeet] details: complete log line",
+  );
+});
