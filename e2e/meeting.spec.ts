@@ -4,6 +4,7 @@ import http from "node:http";
 import type net from "node:net";
 import { STATION_ICON_PADDING, STATION_ICON_SPEC_RATIOS } from "../lib/client/station-icon-sizes";
 import { LOCATIONS, v3Fixture, detailsFixture, ERROR_STREAM_FRAME, sseFrame, progressFrame, verdictFrame, progressStreamFrames, okStreamBody, setup, selectOrigin, openPlanner } from "./helpers";
+import { CALCULATION_PROGRESS_PHASES } from "../lib/domain/calculation-progress-contract";
 
 function pngColorCount(input: Buffer): number {
   let offset = 8; let width = 0; let height = 0; let colorType = 0; let idat = Buffer.alloc(0);
@@ -369,9 +370,9 @@ test.describe("v3 Munich meeting surface", () => {
         "Cache-Control": "no-cache",
         "Connection": "keep-alive",
       });
-      res.write(progressFrame("access-seeds"));
-      res.write(progressFrame("scheduled-routing"));
-      res.write(progressFrame("station-area-evaluation"));
+      res.write(progressFrame(CALCULATION_PROGRESS_PHASES[0]));
+      res.write(progressFrame(CALCULATION_PROGRESS_PHASES[1]));
+      res.write(progressFrame(CALCULATION_PROGRESS_PHASES[2]));
       res.write(verdictFrame({ stationAreaId: "area-red", name: "Red area", coordinate: { latitude: 48.132, longitude: 11.555 }, classification: "red" }));
       res.write(verdictFrame({ stationAreaId: "area-fair", name: "Fair area", coordinate: { latitude: 48.132, longitude: 11.585 }, classification: "fair" }));
       req.on("close", () => {
@@ -412,9 +413,9 @@ test.describe("v3 Munich meeting surface", () => {
         "Cache-Control": "no-cache",
         "Connection": "keep-alive",
       });
-      res.write(progressFrame("access-seeds"));
-      res.write(progressFrame("scheduled-routing"));
-      res.write(progressFrame("station-area-evaluation"));
+      res.write(progressFrame(CALCULATION_PROGRESS_PHASES[0]));
+      res.write(progressFrame(CALCULATION_PROGRESS_PHASES[1]));
+      res.write(progressFrame(CALCULATION_PROGRESS_PHASES[2]));
       // Stream area-red initially as unclassified (a placeholder/conflicting verdict)
       res.write(verdictFrame({ stationAreaId: "area-red", name: "Red area", coordinate: { latitude: 48.132, longitude: 11.555 }, classification: "unclassified" }));
       res.write(verdictFrame({ stationAreaId: "area-fair", name: "Fair area", coordinate: { latitude: 48.132, longitude: 11.585 }, classification: "fair" }));
@@ -441,7 +442,7 @@ test.describe("v3 Munich meeting surface", () => {
           const fixture = v3Fixture(requestData);
           res.write(verdictFrame({ stationAreaId: "area-blue", name: "Blue area", coordinate: { latitude: 48.132, longitude: 11.615 }, classification: "blue" }));
           res.write(verdictFrame({ stationAreaId: "area-unclassified", name: "Unclassified area", coordinate: { latitude: 48.14, longitude: 11.59 }, classification: "unclassified" }));
-          res.write(progressFrame("validating-result"));
+          res.write(progressFrame(CALCULATION_PROGRESS_PHASES[3]));
           res.write(sseFrame("ref", { calculationRef: "fixture-calculation-ref" }));
           res.write(sseFrame("result", fixture));
           res.end();

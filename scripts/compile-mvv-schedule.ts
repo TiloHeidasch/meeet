@@ -1,6 +1,7 @@
 import { mkdirSync } from "node:fs";
 import { dirname, isAbsolute, resolve } from "node:path";
 
+import { logCompilerProgress, elapsedMs } from "../lib/log.ts";
 import {
   SCHEDULED_MVV_FEED_URL,
   compileScheduledArtifact,
@@ -17,12 +18,19 @@ async function main(): Promise<void> {
   const outputPath = resolve(argumentsMap.output ?? "data/scheduled/mvv-scheduled-artifact.json");
   if (!isAbsolute(outputPath)) throw new Error("The schedule compiler output path must be absolute.");
   mkdirSync(dirname(outputPath), { recursive: true });
+  const mode = argumentsMap.input === undefined ? "rotation" : "offline compile";
+  logCompilerProgress(`schedule compiler startup (mode=${mode}, output=${outputPath}, sourceUrl=${argumentsMap.sourceUrl})`);
+  const startedAt = performance.now();
   if (argumentsMap.input === undefined) {
     const result = await rotateScheduledArtifact({ outputPath, sourceUrl: argumentsMap.sourceUrl });
     process.stdout.write(`${result.action}:${result.reason}\n`);
+    logCompilerProgress(`rotation complete: ${result.action} (${result.reason}) in ${elapsedMs(startedAt)}ms`);
   } else {
     const artifact = compileScheduledArtifact({ sourceUrl: argumentsMap.sourceUrl, inputPath: argumentsMap.input });
     writeScheduledArtifact(outputPath, artifact);
+    logCompilerProgress(
+      `offline compile complete: routes=${artifact.routes.length}, trips=${artifact.trips.length}, stationAreas=${artifact.stationAreas.length}, calendars=${artifact.calendars.length}, exceptions=${artifact.exceptions.length}, connections=${artifact.connections.length}, serviceDateRange=${artifact.serviceDateRange.firstDate}..${artifact.serviceDateRange.lastDate}, feedId=${artifact.feedId} in ${elapsedMs(startedAt)}ms`,
+    );
   }
   process.stdout.write(`${outputPath}\n`);
 }
@@ -57,6 +65,6 @@ function requireAbsolutePath(value: string, flag: string): string {
 }
 
 void main().catch((error: unknown) => {
-  process.stderr.write(`${error instanceof Error ? error.message : "Schedule compilation failed."}\n`);
+  logCompilerProgress(`compilation failed: ${error instanceof Error ? error.message : "Schedule compilation failed."}`);
   process.exitCode = 1;
 });

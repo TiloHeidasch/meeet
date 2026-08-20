@@ -95,6 +95,50 @@ test("readiness fails closed for missing, tampered, expired, wrong-node, and inv
   }
 });
 
+test("readiness logs [meeet] lines for ready and failing artifact probes", async (t) => {
+  const logMock = t.mock.method(console, "log");
+  const errorMock = t.mock.method(console, "error");
+  t.after(() => {
+    logMock.mock.restore();
+    errorMock.mock.restore();
+  });
+
+  const fixture = artifactFixture(currentDateRange());
+  try {
+    const ready = await withEnvironment({
+      NODE_ENV: "production",
+      MEEET_PROVIDER_MODE: "configured",
+      MEEET_PROVIDER_DEPLOYMENT: "managed",
+      MEEET_SCHEDULE_ARTIFACT_PATH: fixture.path,
+      MEEET_SCHEDULED_CONCURRENCY: "1",
+      MEEET_SCHEDULED_DEADLINE_MS: "90000",
+      MEEET_SCHEDULED_MIN_MEMORY_GIB: "4",
+    }, () => Promise.resolve(readinessResponse()));
+    assert.equal(ready.status, 204);
+    assert.ok(
+      logMock.mock.calls.some((call) => /\[meeet\].*readiness: ready/.test(String(call.arguments[0]))),
+      "expected a [meeet] readiness: ready log line",
+    );
+
+    const failing = await withEnvironment({
+      NODE_ENV: "production",
+      MEEET_PROVIDER_MODE: "configured",
+      MEEET_PROVIDER_DEPLOYMENT: "managed",
+      MEEET_SCHEDULE_ARTIFACT_PATH: join(fixture.directory, "missing.json"),
+      MEEET_SCHEDULED_CONCURRENCY: "1",
+      MEEET_SCHEDULED_DEADLINE_MS: "90000",
+      MEEET_SCHEDULED_MIN_MEMORY_GIB: "4",
+    }, () => Promise.resolve(readinessResponse()));
+    assert.equal(failing.status, 503);
+    assert.ok(
+      errorMock.mock.calls.some((call) => /\[meeet\].*readiness: unavailable/.test(String(call.arguments[0]))),
+      "expected a [meeet] readiness: unavailable log line",
+    );
+  } finally {
+    fixture.cleanup();
+  }
+});
+
 function artifactFixture(dateRange: { firstDate: string; lastDate: string }): {
   path: string;
   directory: string;

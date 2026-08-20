@@ -8,6 +8,7 @@ import {
 import { ScheduledCalculationAdmission } from "../lib/domain/scheduled-admission.ts";
 import { InMemoryStationAreaCalculationBasisCache } from "../lib/domain/station-area-details-cache.ts";
 import { FIXTURE_SCHEDULED_ACCESS_PROVIDER, FIXTURE_SCHEDULED_ARTIFACT } from "../lib/fixtures/scheduled-routing.ts";
+import { CALCULATION_PROGRESS_CONTRACT_VERSION, CALCULATION_PROGRESS_PHASES } from "../lib/domain/calculation-progress-contract.ts";
 import type { MeetingProviders } from "../lib/domain/providers.ts";
 
 const REQUEST = {
@@ -78,20 +79,15 @@ test("phases and station verdicts are emitted in order with the progress contrac
   const body = await response.text();
   const frames = parseSseFrames(body);
   const progress = frames.filter((frame) => frame.event === "progress");
-  assert.deepEqual(progress.map((frame) => JSON.parse(frame.data ?? "{}").phase), [
-    "access-seeds",
-    "scheduled-routing",
-    "station-area-evaluation",
-    "validating-result",
-  ]);
+  assert.deepEqual(progress.map((frame) => JSON.parse(frame.data ?? "{}").phase), [...CALCULATION_PROGRESS_PHASES]);
   for (const frame of progress) {
-    assert.equal(JSON.parse(frame.data ?? "{}").contractVersion, "meeet-calculation-progress/v1");
+    assert.equal(JSON.parse(frame.data ?? "{}").contractVersion, CALCULATION_PROGRESS_CONTRACT_VERSION);
   }
   const verdicts = frames.filter((frame) => frame.event === "station-verdict");
   assert.equal(verdicts.length, 3);
   for (const frame of verdicts) {
     const data = JSON.parse(frame.data ?? "{}");
-    assert.equal(data.contractVersion, "meeet-calculation-progress/v1");
+    assert.equal(data.contractVersion, CALCULATION_PROGRESS_CONTRACT_VERSION);
     assert.ok(typeof data.stationAreaId === "string" && data.stationAreaId.length > 0);
     assert.ok(typeof data.name === "string" && data.name.length > 0);
     assert.ok(typeof data.coordinate?.latitude === "number");
@@ -132,8 +128,8 @@ test("finality: verdicts are emitted strictly after station-area-evaluation phas
   const body = await response.text();
   const frames = parseSseFrames(body);
   const events = frames.map((f) => f.event ?? (f.comment ? ":comment" : "unknown"));
-  const stationAreaEvalIndex = events.findIndex((e, idx) => e === "progress" && JSON.parse(frames[idx]!.data ?? "{}").phase === "station-area-evaluation");
-  const validatingResultIndex = events.findIndex((e, idx) => e === "progress" && JSON.parse(frames[idx]!.data ?? "{}").phase === "validating-result");
+  const stationAreaEvalIndex = events.findIndex((e, idx) => e === "progress" && JSON.parse(frames[idx]!.data ?? "{}").phase === CALCULATION_PROGRESS_PHASES[2]);
+  const validatingResultIndex = events.findIndex((e, idx) => e === "progress" && JSON.parse(frames[idx]!.data ?? "{}").phase === CALCULATION_PROGRESS_PHASES[3]);
   assert.ok(stationAreaEvalIndex !== -1);
   assert.ok(validatingResultIndex !== -1);
   assert.ok(stationAreaEvalIndex < validatingResultIndex);
@@ -183,7 +179,7 @@ test("no-result request streams a terminal result event with status no-result an
   assert.equal(verdicts.length, 3);
   for (const frame of verdicts) {
     const data = JSON.parse(frame.data ?? "{}");
-    assert.equal(data.contractVersion, "meeet-calculation-progress/v1");
+    assert.equal(data.contractVersion, CALCULATION_PROGRESS_CONTRACT_VERSION);
     assert.equal(data.verdict, "unclassified");
   }
   const resultFrame = frames.find((frame) => frame.event === "result");
@@ -315,4 +311,23 @@ test("every successful stream ends with exactly one terminal event and a trailin
   const terminal = frames.filter((frame) => frame.event === "result" || frame.event === "error");
   assert.equal(terminal.length, 1);
   assert.ok(body.endsWith("\n\n"));
+});
+
+test("stream lifecycle emits [meeet] started and finished log lines", async (t) => {
+  const logMock = t.mock.method(console, "log");
+  t.after(() => logMock.mock.restore());
+
+  const response = await handleMeetingStreamPost(streamRequest(), PROVIDERS, { admission: new ScheduledCalculationAdmission() });
+  assert.equal(response.status, 200);
+  await response.text();
+
+  const lines = logMock.mock.calls.map((call) => String(call.arguments[0]));
+  assert.ok(
+    lines.some((line) => line.includes("[meeet]") && line.includes("calculation: stream started")),
+    "expected a [meeet] calculation: stream started log line",
+  );
+  assert.ok(
+    lines.some((line) => line.includes("[meeet]") && line.includes("calculation: stream finished")),
+    "expected a [meeet] calculation: stream finished log line",
+  );
 });

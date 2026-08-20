@@ -67,7 +67,7 @@ export const FIXTURE_SCHEDULED_GTFS_FILES: GtfsFeedFiles = {
 
 export const FIXTURE_SCHEDULED_ARTIFACT: ScheduledRoutingArtifact = importGtfsSchedule(
   FIXTURE_SCHEDULED_GTFS_FILES,
-  { feedId: "fixture-scheduled-feed", acquisition: FIXTURE_ACQUISITION },
+  { feedId: "fixture-scheduled-feed", acquisition: FIXTURE_ACQUISITION, logProgress: false },
 );
 
 const fixtureProvenance: ProviderProvenance = {

@@ -56,3 +56,35 @@ jobs:
         run: |
           kill "$(cat /tmp/meeet-server.pid)" 2>/dev/null || true
           pkill -f "next start" 2>/dev/null || true
+
+  # The fixture schedule used by the e2e gate above never exercises the real
+  # MVV feed, so a compiler regression against the live feed shape (issue #62)
+  # must be caught here instead of only at production rotation. The rotation
+  # path downloads the canonical Gesamt-GTFS archive and compiles it; any
+  # compile error fails the job.
+  real-feed-compile:
+    name: Compile real MVV feed
+    needs: validate
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out merge result
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - name: Set up Node 24
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+        with:
+          node-version: 24.x
+          cache: npm
+      - name: Install dependencies
+        run: npm ci
+      - name: Compile real MVV schedule artifact
+        # Bounded retry absorbs transient MVV-host failures without touching
+        # the compile script, which must keep production rotation semantics.
+        run: |
+          for attempt in 1 2 3; do
+            if npm run schedule:compile:mvv -- --output /tmp/mvv-real-scheduled-artifact.json; then
+              exit 0
+            fi
+            echo "real MVV feed compile attempt ${attempt} failed; retrying"
+            sleep 10
+          done
+          exit 1

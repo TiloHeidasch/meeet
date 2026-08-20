@@ -115,7 +115,7 @@ MEEET_COMPILER_IMAGE=ghcr.io/tiloheidasch/meeet-artifact-compiler@sha256:<compil
 
 At startup the one-shot `compiler` service runs exactly that compiler image.
 Because the artifact manifest records the compiler version
-(`meeet-scheduled-compiler/v2`), a different compiler digest recompiles the
+(`meeet-scheduled-compiler/v3`), a different compiler digest recompiles the
 artifact even when the underlying feed data is unchanged, which is what makes a
 new compiler revision effective for rotation.
 
@@ -157,7 +157,7 @@ The decision path is:
    current artifact.
 3. Exit 0 either way.
 
-The compiler embeds a version (`meeet-scheduled-compiler/v2`) that is written
+The compiler embeds a version (`meeet-scheduled-compiler/v3`) that is written
 into the artifact manifest. An artifact carrying a different or missing compiler
 version is recompiled even when the underlying data is unchanged, which keeps
 rotation robust across artifact-structure changes.

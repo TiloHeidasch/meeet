@@ -4,8 +4,9 @@ Status: accepted; this decision supersedes the earlier station-search model.
 
 meeet calculates a two-person Munich fairness surface from an immutable MVV
 GTFS schedule. The server accepts only `meeet-meeting/v3`. Each request has two
-transit Participants, two Munich origins, a whole-second `searchStartAt`, and a
-selected tolerance of 5%, 10%, or 15%.
+transit Participants, two Munich origins, a `searchStartAt` canonicalized to a
+whole minute (rounded up from whole-second input), and a selected tolerance of
+5%, 10%, or 15%.
 
 MVG supplies location search and bounded nearby access seeds. It is not the
 schedule or transit-routing authority. The compiled MVV artifact supplies

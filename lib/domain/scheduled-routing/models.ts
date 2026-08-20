@@ -15,7 +15,7 @@ export type ScheduledChangeTimePreset = keyof typeof CHANGE_TIME_PRESETS;
 export const SECONDS_PER_DAY = 86_400;
 export const ROUTING_HORIZON_SECONDS = SECONDS_PER_DAY;
 export const WALKING_SECONDS_ROUNDING_RULE =
-  "ceil(distanceMetres / velocityMetresPerSecond), with zero distance taking zero seconds";
+  "ceil(distanceMetres / velocityMetresPerSecond / 60) * 60, with zero distance taking zero seconds";
 
 export type ScheduledDeadlinePhase =
   | "meeting-start"

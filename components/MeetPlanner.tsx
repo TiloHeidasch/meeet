@@ -4,13 +4,12 @@ import { useEffect, useMemo, useRef, useState, type FormEvent, type KeyboardEven
 import dynamic from "next/dynamic";
 import { validateMeetingResponse, type MeetingRequest, type MeetingResponse, type MeetingStationArea, type StationAreaMode } from "@/lib/client/meeting-response";
 import { validateStationAreaDetails, type StationAreaDetail } from "@/lib/client/station-area-details";
-import { readCalculationStream, CalculationStreamError, type CalculationProgressPhase, type StationVerdict } from "@/lib/client/calculation-stream";
+import { CALCULATION_PROGRESS_PHASES, readCalculationStream, CalculationStreamError, type CalculationProgressPhase, type StationVerdict } from "@/lib/client/calculation-stream";
 import { messages, useLocale, type Locale, type Messages } from "@/lib/client/i18n";
 
 const MapLibreCanvas = dynamic(() => import("./MapLibreCanvas"), { ssr: false, loading: () => <MapLoading /> });
 const COLORS = ["#e85d4a", "#3d70c9"] as const;
 const PHASE_KEY: Record<CalculationProgressPhase, keyof Messages["phases"]> = { "access-seeds": "accessSeeds", "scheduled-routing": "scheduledRouting", "station-area-evaluation": "stationAreaEvaluation", "validating-result": "validatingResult" };
-const PHASE_ORDER: readonly CalculationProgressPhase[] = ["access-seeds", "scheduled-routing", "station-area-evaluation", "validating-result"];
 type Location = { label: string; lat: number; lng: number };
 type SearchResult = { label: string; latitude: number; longitude: number };
 type Participant = { id: "participant-1" | "participant-2"; location: Location | null };
@@ -475,8 +474,8 @@ export default function MeetPlanner({ capability }: { capability: PlannerCapabil
                   <strong className="progress-phase-label" aria-live="polite">{phase ? phaseLabel(locale, phase) : t.planner.progressStarting}</strong>
                 </div>
                 <ol className="progress-phases" aria-hidden="true">
-                  {PHASE_ORDER.map((item, index) => (
-                    <li key={item} className={phase ? (index < PHASE_ORDER.indexOf(phase) ? "done" : index === PHASE_ORDER.indexOf(phase) ? "active" : "") : ""}>{phaseLabel(locale, item)}</li>
+                  {CALCULATION_PROGRESS_PHASES.map((item, index) => (
+                    <li key={item} className={phase ? (index < CALCULATION_PROGRESS_PHASES.indexOf(phase) ? "done" : index === CALCULATION_PROGRESS_PHASES.indexOf(phase) ? "active" : "") : ""}>{phaseLabel(locale, item)}</li>
                   ))}
                 </ol>
                 <p className="progress-note">{t.planner.progressNote}</p>
