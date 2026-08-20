@@ -82,8 +82,8 @@ function validateMarker(value: Record<string, unknown>, path: Array<string | num
   else if (!isWithinOfficialMunichBoundary(value.coordinate)) issues.push(issue([...path, "coordinate"], "outside_official_munich_boundary", "station-area coordinate must be inside Munich."));
   if (isRecord(value.coordinate)) addUnknownKeys(value.coordinate, ["latitude", "longitude"], [...path, "coordinate"], issues);
   if (!isClassification(value.classification)) issues.push(issue([...path, "classification"], "invalid_enum", "station-area classification is invalid."));
-  if (!isNullableWholeSecond(value.redArrivalSeconds)) issues.push(issue([...path, "redArrivalSeconds"], "invalid_value", "redArrivalSeconds must be a whole second or null."));
-  if (!isNullableWholeSecond(value.blueArrivalSeconds)) issues.push(issue([...path, "blueArrivalSeconds"], "invalid_value", "blueArrivalSeconds must be a whole second or null."));
+  if (!isNullableWholeSecond(value.redArrivalSeconds)) issues.push(issue([...path, "redArrivalSeconds"], "invalid_value", "redArrivalSeconds must be a whole minute (in seconds) or null."));
+  if (!isNullableWholeSecond(value.blueArrivalSeconds)) issues.push(issue([...path, "blueArrivalSeconds"], "invalid_value", "blueArrivalSeconds must be a whole minute (in seconds) or null."));
   if (value.fasterParticipant !== null && value.fasterParticipant !== "red" && value.fasterParticipant !== "blue") issues.push(issue([...path, "fasterParticipant"], "invalid_enum", "fasterParticipant is invalid."));
   if (typeof value.withinSelectedTolerance !== "boolean") issues.push(issue([...path, "withinSelectedTolerance"], "invalid_type", "withinSelectedTolerance must be boolean."));
 }
@@ -285,7 +285,8 @@ function isClassification(value: unknown): value is "red" | "blue" | "fair" | "u
 
 function isSelectedTolerance(value: unknown): value is 5 | 10 | 15 { return value === 5 || value === 10 || value === 15; }
 function isDateString(value: unknown): value is string { return typeof value === "string" && /^\d{4}-\d{2}-\d{2}$/.test(value); }
-function isWholeSecond(value: unknown): value is number { return typeof value === "number" && Number.isSafeInteger(value) && value >= 0; }
+/** The scheduled calculation is minute-aligned end to end: seconds must be a multiple of 60. */
+function isWholeSecond(value: unknown): value is number { return typeof value === "number" && Number.isSafeInteger(value) && value >= 0 && value % 60 === 0; }
 function isNullableWholeSecond(value: unknown): boolean { return value === null || isWholeSecond(value); }
 function isNullableString(value: unknown): boolean { return value === null || typeof value === "string"; }
 function isNonEmptyString(value: unknown): value is string { return typeof value === "string" && value.trim() !== ""; }

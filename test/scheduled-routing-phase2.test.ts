@@ -284,6 +284,21 @@ test("loader normalizes its default freshness clock but keeps explicit fractiona
   await rm(directory, { recursive: true, force: true });
 });
 
+test("loader freshness clock stays at whole-second precision and is not minute-rounded like searchStartAt", async () => {
+  const artifact = compileScheduledArtifact({ sourceUrl: SCHEDULED_MVV_FEED_URL, rawArchiveBytes: new TextEncoder().encode("freshness-precision"), feedFiles: compilerFeedFiles(), retrievedAt: "2026-08-11T10:00:00Z" });
+  assert.equal(artifact.provenance.acquisition.feedValidUntil, "2026-08-31");
+  const directory = await mkdtemp(join(tmpdir(), "meeet-loader-freshness-"));
+  const manifestPath = join(directory, "scheduled-bundle.json");
+  writeScheduledArtifact(manifestPath, artifact);
+  // 2026-08-31T23:59:30+02:00 Berlin local: still the last valid feed day. A freshness
+  // clock that reused the searchStartAt minute-ceil rounding would round this up to
+  // 2026-09-01T00:00:00+02:00 and wrongly treat the feed as expired a minute early.
+  assert.doesNotThrow(() => loadScheduledArtifact(manifestPath, { now: "2026-08-31T21:59:30Z" }));
+  // One second after Berlin local midnight, the feed is genuinely expired.
+  assert.throws(() => loadScheduledArtifact(manifestPath, { now: "2026-08-31T22:00:01Z" }), ScheduleArtifactUnavailableError);
+  await rm(directory, { recursive: true, force: true });
+});
+
 test("loader rejects a bundle manifest written for a different Node major before payload deserialization", async () => {
   const artifact = compileScheduledArtifact({ sourceUrl: SCHEDULED_MVV_FEED_URL, rawArchiveBytes: new TextEncoder().encode("node-major-mismatch"), feedFiles: compilerFeedFiles(), retrievedAt: "2026-08-11T10:00:00Z" });
   const directory = await mkdtemp(join(tmpdir(), "meeet-node-major-"));
@@ -510,6 +525,18 @@ test("v3 request parsing canonicalizes exactly-zero fractional seconds and rejec
   assert.equal(parseScheduledMeetingRequest({ ...V3_REQUEST, searchStartAt: "2026-08-11T08:05:00.0001Z" }).success, false);
 });
 
+test("v3 request parsing rounds whole-second searchStartAt values up to the next whole minute", () => {
+  const onMinute = parseScheduledMeetingRequest({ ...V3_REQUEST, searchStartAt: "2026-08-11T08:05:00Z" });
+  assert.equal(onMinute.success, true);
+  if (onMinute.success) assert.equal(onMinute.data.searchStartAt, "2026-08-11T08:05:00.000Z");
+  const oneSecondPastMinute = parseScheduledMeetingRequest({ ...V3_REQUEST, searchStartAt: "2026-08-11T08:05:01Z" });
+  assert.equal(oneSecondPastMinute.success, true);
+  if (oneSecondPastMinute.success) assert.equal(oneSecondPastMinute.data.searchStartAt, "2026-08-11T08:06:00.000Z");
+  const lastSecondOfMinute = parseScheduledMeetingRequest({ ...V3_REQUEST, searchStartAt: "2026-08-11T08:05:59Z" });
+  assert.equal(lastSecondOfMinute.success, true);
+  if (lastSecondOfMinute.success) assert.equal(lastSecondOfMinute.data.searchStartAt, "2026-08-11T08:06:00.000Z");
+});
+
 test("scheduled meeting checks injected deadlines at each orchestration boundary", async () => {
   const parsed = parseScheduledMeetingRequest(V3_REQUEST);
   assert.equal(parsed.success, true);
@@ -651,6 +678,27 @@ test("v3 response validation derives exact station-area classification and rejec
   oneSidedArea.fasterParticipant = null;
   oneSidedArea.withinSelectedTolerance = false;
   assert.equal(validateScheduledMeetingResponse(oneSidedTamper, parsed.data).success, false);
+});
+
+test("v3 response validation rejects arrival and access seconds that are not minute-aligned", async () => {
+  const parsed = parseScheduledMeetingRequest(V3_REQUEST);
+  assert.equal(parsed.success, true);
+  if (!parsed.success) return;
+  const response = await validScheduledResponse();
+  assert.equal(validateScheduledMeetingResponse(response, parsed.data).success, true);
+  const sourceIndex = response.stationAreas.findIndex((area) => area.redArrivalSeconds !== null);
+  assert.ok(sourceIndex >= 0);
+
+  const arrivalTamper = mutableResponse(response);
+  const arrivalArea = arrivalTamper.stationAreas[sourceIndex]!;
+  arrivalArea.redArrivalSeconds = (arrivalArea.redArrivalSeconds as number) + 1;
+  assert.equal(validateScheduledMeetingResponse(arrivalTamper, parsed.data).success, false);
+
+  const accessTamper = mutableResponse(response);
+  const seed = accessTamper.participants[0]!.accessSeeds[0];
+  assert.ok(seed !== undefined);
+  seed.accessSeconds = (seed.accessSeconds as number) + 1;
+  assert.equal(validateScheduledMeetingResponse(accessTamper, parsed.data).success, false);
 });
 
 test("v3 response validation enforces no-result, identity, search-start, and seed-count bindings", async () => {
