@@ -93,7 +93,7 @@ async function setup(page: Page, outcome: "ok" | "no-access-seeds" | "error" = "
   await page.route("**/api/meeting/station-areas/*/details", async (route) => { const id = new URL(route.request().url()).pathname.split("/").at(-2)!; await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(detailsFixture(route.request().postDataJSON(), id)) }); });
 }
 async function selectOrigin(page: Page, index: number, name: keyof typeof LOCATIONS) { const input = page.getByRole("combobox", { name: `Participant ${index + 1} starting point` }); await input.fill(name); await page.getByRole("listbox").getByRole("button", { name, exact: true }).click(); await expect(input).toHaveValue(name); }
-async function openPlanner(page: Page) { await page.goto("/"); await expect(page.getByRole("heading", { name: /Find the middle/ })).toBeVisible(); await expect(page.getByRole("combobox")).toHaveCount(2); }
+async function openPlanner(page: Page) { await page.goto("/"); await expect(page.getByRole("heading", { name: /Find the middle/ })).toBeVisible(); await expect(page.getByText("A better place to meeet", { exact: true })).toBeVisible(); await expect(page.getByRole("combobox")).toHaveCount(2); }
 
 test.describe("v3 Munich meeting surface", () => {
   test("renders the real configured OpenFreeMap style", async ({ page }, testInfo) => {

@@ -477,7 +477,7 @@ export default function MeetPlanner({ capability }: { capability: PlannerCapabil
             {result && (
               <section className={`result-summary ${noResult ? "no-result" : ""}`}>
                 <span className="eyebrow">{noResult ? "No meeting surface yet" : "Surface ready"}</span>
-                <h2>{noResult ? "No scheduled route reached the surface." : "A fair place to meet."}</h2>
+                <h2>{noResult ? "No scheduled route reached the surface." : "A fair place to meeet."}</h2>
                 <p>{noResult ? (result.reason === "no-access-seeds" ? "No nearby MVG access seed could be resolved for one or both origins, so the scheduled surface cannot be calculated." : "The MVV schedule could not reach a station from one or both origins during the planned search window.") : "Compare every eligible station area, then open the planned legs for either participant."}</p>
                 <ScheduleDisclosure result={result} />
               </section>
