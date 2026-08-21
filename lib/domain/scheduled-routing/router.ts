@@ -124,6 +124,63 @@ export function routeScheduledEarliestArrivals(
   });
 }
 
+/**
+ * Runs both participant scans over the same read-only window, sharing the
+ * participant-independent continuation map across them. This is shared
+ * precomputation, not true thread parallelism: each participant still runs its
+ * own independent BFS pass (so results are identical to two sequential scans),
+ * but the expensive shared structures are built once instead of twice. Transfer
+ * neighborhoods are already precomputed on the shared station-area objects (see
+ * issue #76), so they are reused across both scans automatically. Worker
+ * threads were rejected to respect the multi-hundred-MB artifact memory
+ * envelope.
+ */
+export function scanScheduledConnectionsPair(
+  schedule: ScheduledRoutingArtifact,
+  accessSeedSets: readonly [readonly ScheduledAccessSeed[], readonly ScheduledAccessSeed[]],
+  window: ScheduledRoutingWindow,
+  options: ScheduledRoutingOptions = {},
+): [ScheduledScanState, ScheduledScanState] {
+  const graph = buildScheduledScanGraph(schedule, window, options.deadlineCheck ?? window.deadlineCheck);
+  return [
+    scanScheduledConnectionsForParticipant(schedule, accessSeedSets[0], window, options, graph),
+    scanScheduledConnectionsForParticipant(schedule, accessSeedSets[1], window, options, graph),
+  ];
+}
+
+export function routeScheduledEarliestArrivalsPair(
+  schedule: ScheduledRoutingArtifact,
+  accessSeedSets: readonly [readonly ScheduledAccessSeed[], readonly ScheduledAccessSeed[]],
+  searchStartAt: string,
+  options: ScheduledRoutingOptions = {},
+  suppliedWindow?: ScheduledRoutingWindow,
+): [ScheduledRoutingResult, ScheduledRoutingResult] {
+  const window = suppliedWindow ?? createScheduledRoutingWindow(schedule, searchStartAt, options);
+  if (window.schedule !== schedule) throw new RangeError("A routing window belongs to a different schedule artifact.");
+  const parsedStart = parseSearchStartInstant(searchStartAt, schedule.timeZone);
+  if (parsedStart.epochSeconds !== window.searchStartEpochSeconds) throw new RangeError("A routing window belongs to a different search start.");
+  const scans = scanScheduledConnectionsPair(schedule, accessSeedSets, window, options);
+  const toResult = (scan: ScheduledScanState): ScheduledRoutingResult => {
+    const stationArrivals: StationArrivalField[] = schedule.stationAreas.map((area) => {
+      const epochSeconds = scan.earliestArrivalByArea.get(area.id);
+      return {
+        stationAreaId: area.id,
+        arrivalEpochSeconds: epochSeconds === undefined ? null : epochSeconds,
+        elapsedSeconds: epochSeconds === undefined ? null : epochSeconds - parsedStart.epochSeconds,
+      };
+    });
+    return Object.freeze({
+      stationArrivals: Object.freeze(stationArrivals),
+      reachableStationAreaCount: stationArrivals.filter((arrival) => arrival.arrivalEpochSeconds !== null).length,
+      searchStartAt: parsedStart.canonicalAt,
+      searchStartEpochSeconds: parsedStart.epochSeconds,
+      horizonEndEpochSeconds: window.horizonEndEpochSeconds,
+      predecessorByArea: scan.predecessorByArea,
+    });
+  };
+  return [toResult(scans[0]), toResult(scans[1])];
+}
+
 interface ScheduledScanState {
   readonly earliestArrivalByArea: Map<string, number>;
   readonly window: ScheduledRoutingWindow;
@@ -131,11 +188,33 @@ interface ScheduledScanState {
   readonly predecessorByArea: Record<string, ItineraryEdge>;
 }
 
-function scanScheduledConnections(
+interface ScheduledScanGraph {
+  readonly stationById: Map<string, ScheduledStationArea>;
+  readonly continuationByPreviousKey: Map<string, ScheduledMaterializedConnection>;
+}
+
+function buildScheduledScanGraph(
+  schedule: ScheduledRoutingArtifact,
+  window: ScheduledRoutingWindow,
+  deadlineCheck?: ScheduledDeadlineCheck,
+): ScheduledScanGraph {
+  const stationById = new Map(schedule.stationAreas.map((area) => [area.id, area]));
+  const continuationByPreviousKey = new Map<string, ScheduledMaterializedConnection>();
+  for (let connectionIndex = 0; connectionIndex < window.connections.length; connectionIndex += 1) {
+    if (connectionIndex % ROUTING_CONNECTION_CHECKPOINT === 0) deadlineCheck?.("routing-scan");
+    const connection = window.connections[connectionIndex];
+    if (connection === undefined) continue;
+    if (connection.previousContinuationKey !== null) continuationByPreviousKey.set(connection.previousContinuationKey, connection);
+  }
+  return { stationById, continuationByPreviousKey };
+}
+
+function scanScheduledConnectionsForParticipant(
   schedule: ScheduledRoutingArtifact,
   accessSeeds: readonly ScheduledAccessSeed[],
   window: ScheduledRoutingWindow,
   options: ScheduledRoutingOptions,
+  graph: ScheduledScanGraph,
 ): ScheduledScanState {
   const resolvedOptions: ResolvedRoutingOptions = {
     walkingVelocityMetersPerSecond: window.walkingVelocityMetersPerSecond,
@@ -144,19 +223,11 @@ function scanScheduledConnections(
     deadlineCheck: options.deadlineCheck ?? window.deadlineCheck,
   };
   resolvedOptions.deadlineCheck?.("routing-scan");
-  const stationById = new Map(schedule.stationAreas.map((area) => [area.id, area]));
   const earliestArrivalByArea = new Map<string, number>();
   const earliestBoardingReadyByArea = new Map<string, number>();
   const reachableConnectionKeys = new Set<string>();
-  const continuationByPreviousKey = new Map<string, ScheduledMaterializedConnection>();
   const predecessorByArea: Record<string, ItineraryEdge> = {};
   const tripHeadsignById = new Map(schedule.trips.map((trip) => [trip.tripId, trip.headsign]));
-  for (let connectionIndex = 0; connectionIndex < window.connections.length; connectionIndex += 1) {
-    if (connectionIndex % ROUTING_CONNECTION_CHECKPOINT === 0) resolvedOptions.deadlineCheck?.("routing-scan");
-    const connection = window.connections[connectionIndex];
-    if (connection === undefined) continue;
-    if (connection.previousContinuationKey !== null) continuationByPreviousKey.set(connection.previousContinuationKey, connection);
-  }
 
   let enqueueForArea: ((areaId: string) => void) | null = null;
   const updateArrivalMinimum = (stationAreaId: string, arrivalEpochSeconds: number): boolean => {
@@ -194,7 +265,7 @@ function scanScheduledConnections(
     const seed = accessSeeds[seedIndex];
     if (seed === undefined) continue;
     resolvedOptions.deadlineCheck?.("routing-scan");
-    const area = stationById.get(seed.stationAreaId);
+    const area = graph.stationById.get(seed.stationAreaId);
     if (area === undefined) throw new RangeError(`Access seed references unknown station area ${seed.stationAreaId}.`);
     validateWholeNonNegative(seed.accessSeconds, "Access seed accessSeconds");
     if (seed.accessSeconds > ROUTING_HORIZON_SECONDS) throw new RangeError("Access seed accessSeconds must not exceed the 24-hour routing horizon.");
@@ -249,12 +320,12 @@ function scanScheduledConnections(
       if (connection === undefined || processed.has(connection.connectionKey)) continue;
       processed.add(connection.connectionKey);
       reachableConnectionKeys.add(connection.connectionKey);
-      const nextConnection = continuationByPreviousKey.get(connection.connectionKey);
+      const nextConnection = graph.continuationByPreviousKey.get(connection.connectionKey);
       if (nextConnection !== undefined && nextConnection.departureEpochSeconds === departureEpochSeconds) enqueueConnection(nextConnection);
       if (connection.source.dropOffType !== 0) continue;
 
       if (updateArrivalMinimum(connection.source.toStationAreaId, connection.arrivalEpochSeconds)) predecessorByArea[connection.source.toStationAreaId] = { kind: "connection", connection: buildConnectionRef(connection, tripHeadsignById) };
-      const arrivalArea = stationById.get(connection.source.toStationAreaId);
+      const arrivalArea = graph.stationById.get(connection.source.toStationAreaId);
       if (arrivalArea === undefined) throw new Error("Connection references a missing arrival station area.");
       if (window.spatialIndex !== undefined) {
         for (const transferArea of querySpatialIndex(window.spatialIndex, arrivalArea.coordinate, resolvedOptions.transferRadiusMeters)) {
@@ -263,7 +334,7 @@ function scanScheduledConnections(
       } else {
         for (const neighbor of arrivalArea.transferNeighbors) {
           if (neighbor.distanceMeters > resolvedOptions.transferRadiusMeters) continue;
-          const transferArea = stationById.get(neighbor.stationAreaId);
+          const transferArea = graph.stationById.get(neighbor.stationAreaId);
           if (transferArea === undefined) continue;
           emitTransfer(transferArea, neighbor.distanceMeters, arrivalArea, connection.arrivalEpochSeconds);
         }
@@ -289,6 +360,16 @@ function buildConnectionRef(
     routeType: connection.source.line.routeType,
     headsign: tripHeadsignById.get(connection.source.tripId) ?? "",
   };
+}
+
+function scanScheduledConnections(
+  schedule: ScheduledRoutingArtifact,
+  accessSeeds: readonly ScheduledAccessSeed[],
+  window: ScheduledRoutingWindow,
+  options: ScheduledRoutingOptions,
+): ScheduledScanState {
+  const graph = buildScheduledScanGraph(schedule, window, options.deadlineCheck ?? window.deadlineCheck);
+  return scanScheduledConnectionsForParticipant(schedule, accessSeeds, window, options, graph);
 }
 
 const routingWindowCache = new Map<string, ScheduledRoutingWindow>();
