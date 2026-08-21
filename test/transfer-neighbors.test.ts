@@ -9,6 +9,10 @@ import {
   type ScheduledRoutingArtifact,
 } from "../lib/domain/scheduled-routing/models.ts";
 import {
+  routeScheduledEarliestArrivals,
+  type ScheduledAccessSeed,
+} from "../lib/domain/scheduled-routing/index.ts";
+import {
   buildAreaSpatialIndex,
   findAreasWithinRadius,
   haversineDistanceMeters,
@@ -20,6 +24,7 @@ import {
 import { FIXTURE_SCHEDULED_ARTIFACT } from "../lib/fixtures/scheduled-routing.ts";
 
 const fixture = FIXTURE_SCHEDULED_ARTIFACT;
+const SEARCH_START = "2026-08-11T08:05:00+02:00";
 
 test("every compiled station area carries a precomputed transfer-neighbor list", () => {
   for (const area of fixture.stationAreas) {
@@ -81,4 +86,17 @@ test("artifact validation rejects a transfer neighbor with a negative distance",
   const manifestPath = join(directory, "scheduled-bundle.json");
   assert.throws(() => writeScheduledArtifact(manifestPath, tampered), ScheduleArtifactUnavailableError);
   await rm(directory, { recursive: true, force: true });
+});
+
+test("precomputed transfer-neighbor scan routes end-to-end and is monotonic across radii", () => {
+  const seedAreaId = fixture.stationAreas[0]!.id;
+  const seeds: ScheduledAccessSeed[] = [{ stationAreaId: seedAreaId, accessSeconds: 0 }];
+  const narrow = routeScheduledEarliestArrivals(fixture, seeds, SEARCH_START, { walkingVelocityMetersPerSecond: 1.4, transferRadiusMeters: 250 });
+  const wide = routeScheduledEarliestArrivals(fixture, seeds, SEARCH_START, { walkingVelocityMetersPerSecond: 1.4, transferRadiusMeters: TRANSFER_NEIGHBOR_RADIUS_METERS });
+  assert.ok(narrow.reachableStationAreaCount > 0, "narrow radius reaches at least one area via precomputed neighbors");
+  assert.ok(wide.reachableStationAreaCount >= narrow.reachableStationAreaCount, "wider radius reaches at least as many areas");
+  const narrowReached = new Set(narrow.stationArrivals.filter((arrival) => arrival.arrivalAt !== null).map((arrival) => arrival.stationAreaId));
+  for (const arrival of wide.stationArrivals) {
+    if (narrowReached.has(arrival.stationAreaId)) assert.ok(arrival.arrivalAt !== null, `area ${arrival.stationAreaId} reachable at narrow radius stays reachable when wider`);
+  }
 });
