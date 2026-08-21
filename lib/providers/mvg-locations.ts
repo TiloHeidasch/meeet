@@ -153,7 +153,15 @@ function parseLocationResult(value: unknown): LocationSearchResult | null {
     "title",
   ]);
   const coordinate = parseCoordinateValue(value);
-  if (!label || !coordinate || !isWithinOfficialMunichBoundary(coordinate)) {
+  if (!label || !coordinate) {
+    return null;
+  }
+  // External-Munich (MVV-area) ADDRESS and STATION results are retained
+  // regardless of the Munich boundary; POI, other, unknown, and missing
+  // types stay Munich-filtered. The MVG type field is case-insensitive.
+  const type = firstString(value, ["type"])?.toLowerCase();
+  const externalAllowed = type === "address" || type === "station";
+  if (!externalAllowed && !isWithinOfficialMunichBoundary(coordinate)) {
     return null;
   }
   return { label, ...coordinate };

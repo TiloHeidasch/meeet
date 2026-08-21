@@ -26,7 +26,7 @@ function response(overrides: Record<string, unknown> = {}): Record<string, unkno
       schedule: { contractVersion: "meeet-scheduled-routing/v1", feedId: "fixture", timeZone: "Europe/Berlin", scheduleContentHash: "a".repeat(64), compiledArtifactId: "c".repeat(64), serviceDateRange: { firstDate: "2026-08-01", lastDate: "2026-08-31" }, acquisition: { sourceUrl: "https://example.test/feed.zip", retrievedAt: "2026-08-01T00:00:00Z", rawArchiveByteSize: 1, rawArchiveSha256: "b".repeat(64), feedVersion: "fixture", feedValidFrom: "2026-08-01", feedValidUntil: "2026-08-31", attribution: "Fixture", officialAttribution: "MVV", officialLicense: { name: "CC BY 4.0", url: "https://creativecommons.org/licenses/by/4.0/" }, officialProvenance: { source: "feed", policyId: null } } },
       surface: { contractVersion: "meeet-scheduled-routing/v1", searchStartAt: request.searchStartAt, selectedTolerancePercent: request.tolerancePercent, scheduleContentHash: "a".repeat(64), compiledArtifactId: "c".repeat(64), feedId: "fixture", timeZone: "Europe/Berlin", routingHorizonSeconds: 86400, walkingVelocityMetersPerSecond: 1.4, walkingSecondsRoundingRule: "ceil(distanceMetres / velocityMetresPerSecond / 60) * 60, with zero distance taking zero seconds", transferRadiusMeters: 100, accessSeedCounts: [0, 0], stationAreaCount: 1, connectionCount: 1, changeTimeSeconds: 300, coverage: "scheduled-service-day-local-radius/v1", representativePointBasis: "station-area-coordinate/v1", classificationMethod: "scheduled-arrival-comparison-with-selected-tolerance/v1", classificationBasis: "scheduled-station-area-arrival/v1", finalWalkingMethod: "scheduled-access-and-transfer-walking/v1" },
       accessProvider: { name: "fixture", deployment: "fixture", dataKind: "demo-static", liveData: false, asOf: "fixture", notes: "fixture", provenance: { role: "access", provider: "fixture", deployment: "fixture", dataKind: "demo-static", liveData: false, sourceUrl: null, license: null, attribution: "fixture", version: "fixture", retrievedAt: "fixture", notes: "fixture", feeds: null } },
-      stationAreas: { count: 1, coverage: "official-munich-boundary-with-connected-artifact-station-areas/v1", selection: "all-eligible-scheduled-station-areas/v1" }, coverage: "munich-scheduled-station-area-meeting/v1",
+      stationAreas: { count: 1, coverage: "official-munich-boundary-with-connected-artifact-station-areas/v1", selection: "all-eligible-scheduled-station-areas/v1" }, origins: { coverage: "globally-valid-origin/v1" }, coverage: "munich-scheduled-station-area-meeting/v1",
     },
     ...overrides,
   };
@@ -211,4 +211,21 @@ test("client adapter rejects retired boarding-stop identity on access seeds", ()
     },
   ];
   assert.equal(validateMeetingResponse(legacy, request).success, false);
+});
+
+test("client adapter accepts the globally-valid-origin coverage and rejects tampering", () => {
+  assert.equal(validateMeetingResponse(response(), request).success, true);
+  const tampered = response();
+  ((tampered.metadata as Record<string, unknown>).origins as Record<string, unknown>).coverage = "munich-only-origin/v1";
+  const tamperedResult = validateMeetingResponse(tampered, request);
+  assert.equal(tamperedResult.success, false);
+  if (!tamperedResult.success) {
+    assert.ok(tamperedResult.issues.some((issue) => issue.path.includes("origins")));
+  }
+  const missing = response();
+  delete (missing.metadata as Record<string, unknown>).origins;
+  assert.equal(validateMeetingResponse(missing, request).success, false);
+  const unknownField = response();
+  ((unknownField.metadata as Record<string, unknown>).origins as Record<string, unknown>).unexpected = true;
+  assert.equal(validateMeetingResponse(unknownField, request).success, false);
 });

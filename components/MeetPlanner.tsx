@@ -6,6 +6,7 @@ import { validateMeetingResponse, type MeetingRequest, type MeetingResponse, typ
 import { validateStationAreaDetails, type StationAreaDetail } from "@/lib/client/station-area-details";
 import { CALCULATION_PROGRESS_PHASES, readCalculationStream, CalculationStreamError, type CalculationProgressPhase, type StationVerdict } from "@/lib/client/calculation-stream";
 import { messages, useLocale, type Locale, type Messages } from "@/lib/client/i18n";
+import { BRAND_MARK_LETTER_D, BRAND_MARK_PLATE_D } from "@/lib/client/brand-mark";
 
 const MapLibreCanvas = dynamic(() => import("./MapLibreCanvas"), { ssr: false, loading: () => <MapLoading /> });
 const COLORS = ["#e85d4a", "#3d70c9"] as const;
@@ -410,11 +411,12 @@ export default function MeetPlanner({ capability }: { capability: PlannerCapabil
   const stationAreas = result?.stationAreas ?? progressiveStationAreas;
   const mapParticipants = participants.flatMap((item, index) => item.location ? [{ id: item.id, number: index + 1, label: t.planner.participantLabel(index + 1), latitude: item.location.lat, longitude: item.location.lng, color: COLORS[index]! }] : []);
   const noResult = result?.status === "no-result";
+  const fairCount = result?.stationAreas.filter((area) => area.classification === "fair").length ?? 0;
   return (
     <main className="planner-shell">
       <div className="planner-inner">
         <header className="brand-bar">
-          <div className="brand"><span className="brand-mark">m</span><span>meeet</span></div>
+          <div className="brand"><span className="brand-mark" aria-hidden="true"><svg viewBox="0 0 64 64"><path d={BRAND_MARK_PLATE_D} fill="var(--foreground)" /><path d={BRAND_MARK_LETTER_D} fill="var(--yellow)" /></svg></span><span>meeet</span></div>
           <span className="scope-pill">{t.planner.scopePill}</span>
         </header>
         <div className="planner-grid">
@@ -484,8 +486,23 @@ export default function MeetPlanner({ capability }: { capability: PlannerCapabil
             {result && (
               <section className={`result-summary ${noResult ? "no-result" : ""}`}>
                 <span className="eyebrow">{noResult ? t.planner.noResultEyebrow : t.planner.resultEyebrow}</span>
-                <h2>{noResult ? t.planner.noResultHeading : t.planner.resultHeading}</h2>
-                <p>{noResult ? (result.reason === "no-access-seeds" ? t.planner.noResultAccessSeeds : t.planner.noResultNoStations) : t.planner.resultBody}</p>
+                {noResult ? (
+                  <>
+                    <h2>{t.planner.noResultHeading}</h2>
+                    <p>{result.reason === "no-access-seeds" ? t.planner.noResultAccessSeeds : t.planner.noResultNoStations}</p>
+                  </>
+                ) : (
+                  <>
+                    <h2>{t.planner.resultHeading(fairCount)}</h2>
+                    <p>{t.planner.resultTolerance(result.metadata.surface.selectedTolerancePercent)}</p>
+                    <div className="context-strip">
+                      <span className="context-item"><small>{t.contextStrip.plannedStart}</small><strong>{formatDate(locale, result.metadata.surface.searchStartAt)}</strong></span>
+                      <span className="context-item"><small>{t.contextStrip.tolerance}</small><strong>±{result.metadata.surface.selectedTolerancePercent}%</strong></span>
+                      <span className="context-item"><small>{t.contextStrip.basis}</small><strong>{t.contextStrip.basisValue}</strong></span>
+                    </div>
+                    <p className="result-action">{t.planner.resultAction(fairCount)}</p>
+                  </>
+                )}
                 <ScheduleDisclosure result={result} />
               </section>
             )}

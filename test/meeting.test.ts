@@ -125,3 +125,58 @@ test("refused admission emits a [meeet] concurrency rejection diagnostic", async
     release();
   }
 });
+
+test("v3 accepts an external-Munich (MVV-area) origin while preserving Munich results", async () => {
+  const providers: MeetingProviders = {
+    ...fixtureProviders,
+    scheduledArtifact: FIXTURE_SCHEDULED_ARTIFACT,
+    scheduledAccess: FIXTURE_SCHEDULED_ACCESS_PROVIDER,
+  };
+  const response = await handleMeetingPost(
+    new Request("https://meeet.test/api/meeting/calculate", {
+      method: "POST",
+      body: JSON.stringify({
+        contractVersion: "meeet-meeting/v3",
+        participants: [
+          { id: "red", origin: { label: "Garching Forschungszentrum", latitude: 48.2614, longitude: 11.6711 }, mode: "transit" },
+          { id: "blue", origin: { label: "Munich blue", latitude: 48.1400, longitude: 11.5700 }, mode: "transit" },
+        ],
+        tolerancePercent: 10,
+        changeTimePreset: "medium",
+        searchStartAt: "2026-08-11T08:05:00+02:00",
+      }),
+      headers: { "content-type": "application/json" },
+    }),
+    providers,
+  );
+  assert.equal(response.status, 200);
+  const body = await response.json() as { metadata: { origins: { coverage: string } }; stationAreas: Array<{ coordinate: { latitude: number; longitude: number } }> };
+  assert.equal(body.metadata.origins.coverage, "globally-valid-origin/v1");
+  assert.ok(body.stationAreas.length > 0, "Munich station-area results must be preserved");
+});
+
+test("v3 rejects malformed origin coordinates but accepts valid external ones", async () => {
+  const providers: MeetingProviders = {
+    ...fixtureProviders,
+    scheduledArtifact: FIXTURE_SCHEDULED_ARTIFACT,
+    scheduledAccess: FIXTURE_SCHEDULED_ACCESS_PROVIDER,
+  };
+  const malformed = await handleMeetingPost(
+    new Request("https://meeet.test/api/meeting/calculate", {
+      method: "POST",
+      body: JSON.stringify({
+        contractVersion: "meeet-meeting/v3",
+        participants: [
+          { id: "red", origin: { label: "Bad latitude", latitude: 91, longitude: 11.5755 }, mode: "transit" },
+          { id: "blue", origin: { label: "Munich blue", latitude: 48.1400, longitude: 11.5700 }, mode: "transit" },
+        ],
+        tolerancePercent: 10,
+        changeTimePreset: "medium",
+        searchStartAt: "2026-08-11T08:05:00+02:00",
+      }),
+      headers: { "content-type": "application/json" },
+    }),
+    providers,
+  );
+  assert.equal(malformed.status, 400);
+});
