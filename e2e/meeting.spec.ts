@@ -697,38 +697,94 @@ test.describe("v3 Munich meeting surface", () => {
     await expect.poll(async () => { const v = await page.evaluate(() => { const map = (window as unknown as { __meeetMap?: { getCenter: () => { lat: number; lng: number }; getZoom: () => number; getBounds: () => { getWest: () => number; getEast: () => number; getSouth: () => number; getNorth: () => number } } }).__meeetMap; if (!map) throw new Error("Map instance unavailable"); const center = map.getCenter(); const b = map.getBounds(); return { lng: center.lng, lat: center.lat, zoom: map.getZoom(), west: b.getWest(), east: b.getEast(), south: b.getSouth(), north: b.getNorth() }; }); return Math.abs(v.lng - 11.5755) < 1e-4 && Math.abs(v.lat - 48.1374) < 1e-4 && Math.abs(v.zoom - 15) < 0.01 && v.west <= v.east && v.south <= v.north; }).toBe(true);
   });
 
-  test("refocuses the map onto rendered origins and station areas when results appear", async ({ page }) => {
+  test("fits successful results to origins and only the best-ranked station area", async ({ page }) => {
     await setup(page); await openPlanner(page); await selectOrigin(page, 0, "Marienplatz"); await selectOrigin(page, 1, "Ostbahnhof");
     await page.getByRole("button", { name: "meeet!" }).click();
     await expect(page.getByText("Meeting result", { exact: true })).toBeVisible();
     await expect(page.locator('.map-frame[data-map-state="ready"]')).toHaveAttribute("data-station-markers-ready", "true");
     const bounds = await page.evaluate(() => { const map = (window as unknown as { __meeetMap?: { getBounds: () => { getWest: () => number; getEast: () => number; getSouth: () => number; getNorth: () => number } } }).__meeetMap; if (!map) throw new Error("Map instance unavailable"); const b = map.getBounds(); return { west: b.getWest(), east: b.getEast(), south: b.getSouth(), north: b.getNorth() }; });
-    for (const [lng, lat] of [[11.5755, 48.1374], [11.605, 48.1257], [11.555, 48.132], [11.585, 48.132], [11.615, 48.132], [11.59, 48.14]] as const) {
+    for (const [lng, lat] of [[11.5755, 48.1374], [11.605, 48.1257], [11.585, 48.132]] as const) {
       expect(bounds.west).toBeLessThanOrEqual(lng);
       expect(bounds.east).toBeGreaterThanOrEqual(lng);
       expect(bounds.south).toBeLessThanOrEqual(lat);
       expect(bounds.north).toBeGreaterThanOrEqual(lat);
     }
+    // The red and blue areas remain in the station-area source data, but neither can expand the fit.
+    expect(bounds.west).toBeGreaterThan(11.555);
+    expect(bounds.east).toBeLessThan(11.615);
     expect(bounds.east - bounds.west).toBeLessThan(0.2);
     expect(bounds.north - bounds.south).toBeLessThan(0.2);
     await expect(page.getByRole("button", { name: "Refocus map" })).toBeEnabled();
   });
 
-  test("refocuses the map onto rendered origins and unclassified station areas for a no-result surface", async ({ page }) => {
-    await setup(page, "no-access-seeds"); await openPlanner(page); await selectOrigin(page, 0, "Marienplatz"); await selectOrigin(page, 1, "Ostbahnhof");
+  test("fits no-result surfaces to origins and only the first ranked unclassified area", async ({ page }) => {
+    await setup(page, "no-access-seeds");
+    await page.unroute("**/api/meeting/calculate/stream");
+    await page.route("**/api/meeting/calculate/stream", async (route) => {
+      const request = route.request().postDataJSON();
+      const fixture = v3Fixture(request, "no-access-seeds");
+      const northern = fixture.stationAreas.find((area) => area.stationAreaId === "area-unclassified");
+      if (northern) northern.coordinate = { latitude: 48.16, longitude: 11.59 };
+      await route.fulfill({ status: 200, contentType: "text/event-stream", body: `${progressStreamFrames(request, "no-access-seeds")}event: ref\ndata: {"calculationRef":"fixture-calculation-ref"}\n\nevent: result\ndata: ${JSON.stringify(fixture)}\n\n` });
+    });
+    await openPlanner(page); await selectOrigin(page, 0, "Marienplatz"); await selectOrigin(page, 1, "Ostbahnhof");
     await page.getByRole("button", { name: "meeet!" }).click();
     await expect(page.getByText("No result yet", { exact: true })).toBeVisible();
     await expect(page.locator('.map-frame[data-map-state="ready"]')).toHaveAttribute("data-station-markers-ready", "true");
     const bounds = await page.evaluate(() => { const map = (window as unknown as { __meeetMap?: { getBounds: () => { getWest: () => number; getEast: () => number; getSouth: () => number; getNorth: () => number } } }).__meeetMap; if (!map) throw new Error("Map instance unavailable"); const b = map.getBounds(); return { west: b.getWest(), east: b.getEast(), south: b.getSouth(), north: b.getNorth() }; });
-    for (const [lng, lat] of [[11.5755, 48.1374], [11.605, 48.1257], [11.555, 48.132], [11.585, 48.132], [11.615, 48.132], [11.59, 48.14]] as const) {
+    for (const [lng, lat] of [[11.5755, 48.1374], [11.605, 48.1257], [11.615, 48.132]] as const) {
       expect(bounds.west).toBeLessThanOrEqual(lng);
       expect(bounds.east).toBeGreaterThanOrEqual(lng);
       expect(bounds.south).toBeLessThanOrEqual(lat);
       expect(bounds.north).toBeGreaterThanOrEqual(lat);
     }
+    // The remaining areas remain in the station-area source data, but must not influence fitting.
+    expect(bounds.west).toBeGreaterThan(11.555);
+    expect(bounds.north).toBeLessThan(48.16);
     expect(bounds.east - bounds.west).toBeLessThan(0.2);
     expect(bounds.north - bounds.south).toBeLessThan(0.2);
     await expect(page.getByRole("button", { name: "Refocus map" })).toBeEnabled();
+  });
+
+  test("refits and refocuses on a new top-ranked area after recalculation", async ({ page }) => {
+    let calculationCalls = 0;
+    await setup(page); await openPlanner(page); await selectOrigin(page, 0, "Marienplatz"); await selectOrigin(page, 1, "Ostbahnhof");
+    await page.unroute("**/api/meeting/calculate/stream");
+    await page.route("**/api/meeting/calculate/stream", async (route) => {
+      calculationCalls += 1;
+      const request = route.request().postDataJSON();
+      if (calculationCalls === 1) { await route.fulfill({ status: 200, contentType: "text/event-stream", body: okStreamBody(request) }); return; }
+      const changed = JSON.parse(JSON.stringify(v3Fixture(request))) as ReturnType<typeof v3Fixture>;
+      const blue = changed.stationAreas.find((area) => area.stationAreaId === "area-blue");
+      if (blue) Object.assign(blue, { redArrivalSeconds: 900, blueArrivalSeconds: 960, fasterParticipant: "red", withinSelectedTolerance: true, classification: "fair" });
+      await route.fulfill({ status: 200, contentType: "text/event-stream", body: `${progressStreamFrames(request)}${sseFrame("ref", { calculationRef: "fixture-calculation-ref" })}${sseFrame("result", changed)}` });
+    });
+    await page.getByRole("button", { name: "meeet!" }).click();
+    await expect(page.getByText("Meeting result", { exact: true })).toBeVisible();
+    const viewport = () => page.evaluate(() => { const map = (window as unknown as { __meeetMap?: { getCenter: () => { lat: number; lng: number }; getZoom: () => number; getBounds: () => { getWest: () => number; getEast: () => number } } }).__meeetMap; if (!map) throw new Error("Map instance unavailable"); const center = map.getCenter(); const bounds = map.getBounds(); return { lng: center.lng, lat: center.lat, zoom: map.getZoom(), west: bounds.getWest(), east: bounds.getEast() }; });
+    const initial = await viewport();
+    expect(initial.east).toBeLessThan(11.615);
+
+    await page.unroute("**/api/meeting/station-areas/*/details");
+    await page.route("**/api/meeting/station-areas/*/details", (route) => route.fulfill({ status: 410, contentType: "application/json", body: JSON.stringify({ error: { code: "CALCULATION_REF_EXPIRED", message: "The calculation reference is missing or has expired. Recalculate the meeting surface." } }) }));
+    await page.locator('[data-station-area-id="area-fair"]').click();
+    await expect(page.getByRole("button", { name: "Recalculate meeting places" })).toBeVisible();
+    await page.getByRole("button", { name: "Recalculate meeting places" }).click();
+    await expect.poll(() => calculationCalls).toBe(2);
+    await expect(page.getByText("Meeting result", { exact: true })).toBeVisible();
+    await expect.poll(async () => (await viewport()).east >= 11.615).toBe(true);
+    await page.evaluate(() => new Promise<void>((resolve) => { const map = (window as unknown as { __meeetMap?: { isMoving: () => boolean; once: (event: string, callback: () => void) => void } }).__meeetMap; if (!map || !map.isMoving()) { resolve(); return; } map.once("moveend", () => resolve()); }));
+    const changed = await viewport();
+    expect(changed.east).toBeGreaterThanOrEqual(11.615);
+    expect(changed.west).toBeGreaterThan(11.555);
+
+    const refocus = page.getByRole("button", { name: "Refocus map" });
+    const canvas = page.locator(".maplibregl-canvas"); await canvas.scrollIntoViewIfNeeded();
+    const rect = await canvas.boundingBox(); if (!rect) throw new Error("Map canvas was not painted");
+    await page.mouse.move(rect.x + rect.width / 2, rect.y + rect.height / 2); await page.mouse.down(); await page.mouse.move(rect.x + rect.width / 2 + 120, rect.y + rect.height / 2, { steps: 6 }); await page.mouse.up();
+    await page.evaluate(() => new Promise<void>((resolve) => { const map = (window as unknown as { __meeetMap?: { isMoving: () => boolean; once: (event: string, callback: () => void) => void } }).__meeetMap; if (!map || !map.isMoving()) { resolve(); return; } map.once("moveend", () => resolve()); }));
+    await refocus.focus(); await page.keyboard.press("Enter");
+    await expect.poll(async () => { const current = await viewport(); return Math.abs(current.lng - changed.lng) < 1e-4 && Math.abs(current.lat - changed.lat) < 1e-4 && Math.abs(current.zoom - changed.zoom) < 0.01; }).toBe(true);
   });
 
   test("refocus control restores the fitted viewport after manual pan", async ({ page }) => {
