@@ -11,6 +11,10 @@ import {
 } from "../lib/fixtures/scheduled-routing.ts";
 import { parseScheduledMeetingRequest } from "../lib/validation/meeting-v3.ts";
 
+// This literal MUST mirror the fixed REQUEST in scripts/profile-scheduled-calculation.ts
+// (same participant origins — labels need not match — plus tolerancePercent,
+// changeTimePreset, and searchStartAt) so the stage-order test stays comparable
+// to the profiling baseline.
 const V3_REQUEST = {
   contractVersion: "meeet-meeting/v3",
   participants: [

@@ -71,6 +71,12 @@ interface StageMeasurement {
   readonly heapDeltaBytes: number;
 }
 
+interface StageSpan {
+  readonly stage: ScheduledCalculationStage;
+  readonly startedAt: number;
+  readonly heapBefore: number;
+}
+
 function main(): void {
   const nodeMajor = Number(process.versions.node.split(".")[0]);
   if (nodeMajor !== 24) {
@@ -79,7 +85,7 @@ function main(): void {
     return;
   }
   const heapSnapshots = process.argv.includes("--heap-snapshots");
-  const cpuProfile = process.argv.includes("--cpu-prof");
+  const cpuProfile = process.argv.includes("--inspector-cpu");
   mkdirSync(PROFILES_DIR, { recursive: true });
 
   const parsed = parseScheduledMeetingRequest(REQUEST);
@@ -89,7 +95,10 @@ function main(): void {
     return;
   }
 
-  void run(parsed.data, heapSnapshots, cpuProfile);
+  void run(parsed.data, heapSnapshots, cpuProfile).catch((error: unknown) => {
+    console.error(`[profile] harness failed: ${error instanceof Error ? (error.stack ?? error.message) : String(error)}`);
+    process.exitCode = 1;
+  });
 }
 
 async function run(
@@ -103,48 +112,50 @@ async function run(
   };
 
   const profiler = cpuProfile ? await startCpuProfiler() : null;
+  const artifactLoadHeapBefore = process.memoryUsage().heapUsed;
   const artifactLoadStartedAt = performance.now();
   const artifact = loadScheduledArtifact(ARTIFACT_PATH);
-  recordStage("artifact-load", elapsedMs(artifactLoadStartedAt), 0);
+  const artifactLoadHeapDelta = process.memoryUsage().heapUsed - artifactLoadHeapBefore;
+  recordStage("artifact-load", elapsedMs(artifactLoadStartedAt), artifactLoadHeapDelta);
+  if (heapSnapshots) {
+    const snapshotStartedAt = performance.now();
+    writeHeapSnapshot(resolvePath(PROFILES_DIR, "heap-artifact-load.heapsnapshot"));
+    recordStage("heap-snapshot:artifact-load", elapsedMs(snapshotStartedAt), 0);
+  }
 
   // One cold calculation per process: drop any routing-window cache entries so
   // the measured window materialization is the real cold path.
   clearScheduledRoutingWindowCache();
 
   const access = new MvgScheduledAccessSeedProvider();
-  const stageStarts: number[] = [];
-  const stageHeapBefore: number[] = [];
-  const stageNames: ScheduledCalculationStage[] = [];
+  const stageSpans: StageSpan[] = [];
   const hooks = {
     async onStage(stage: ScheduledCalculationStage): Promise<void> {
       const now = performance.now();
       const heapNow = process.memoryUsage().heapUsed;
-      if (stageNames.length > 0) {
-        const previousIndex = stageNames.length - 1;
-        const previous = stageNames[previousIndex];
-        recordStage(previous, Math.trunc(now - stageStarts[previousIndex]), heapNow - stageHeapBefore[previousIndex]);
+      if (stageSpans.length > 0) {
+        const previous = stageSpans[stageSpans.length - 1];
+        recordStage(previous.stage, Math.trunc(now - previous.startedAt), heapNow - previous.heapBefore);
         if (heapSnapshots) {
           const snapshotStartedAt = performance.now();
-          writeHeapSnapshot(resolvePath(PROFILES_DIR, `heap-${previous}.heapsnapshot`));
-          recordStage(`heap-snapshot:${previous}`, elapsedMs(snapshotStartedAt), 0);
+          writeHeapSnapshot(resolvePath(PROFILES_DIR, `heap-${previous.stage}.heapsnapshot`));
+          recordStage(`heap-snapshot:${previous.stage}`, elapsedMs(snapshotStartedAt), 0);
         }
       }
-      stageNames.push(stage);
-      stageStarts.push(now);
-      stageHeapBefore.push(heapNow);
+      stageSpans.push({ stage, startedAt: now, heapBefore: heapNow });
     },
   };
 
   const calculation = await calculateScheduledMeetingWithBasis(request, { artifact, access }, undefined, hooks);
   const calculationEndedAt = performance.now();
   const heapAfterCalculation = process.memoryUsage().heapUsed;
-  const lastIndex = stageNames.length - 1;
-  if (lastIndex >= 0) {
-    recordStage(stageNames[lastIndex], Math.trunc(calculationEndedAt - stageStarts[lastIndex]), heapAfterCalculation - stageHeapBefore[lastIndex]);
+  if (stageSpans.length > 0) {
+    const lastSpan = stageSpans[stageSpans.length - 1];
+    recordStage(lastSpan.stage, Math.trunc(calculationEndedAt - lastSpan.startedAt), heapAfterCalculation - lastSpan.heapBefore);
     if (heapSnapshots) {
       const snapshotStartedAt = performance.now();
-      writeHeapSnapshot(resolvePath(PROFILES_DIR, `heap-${stageNames[lastIndex]}.heapsnapshot`));
-      recordStage(`heap-snapshot:${stageNames[lastIndex]}`, elapsedMs(snapshotStartedAt), 0);
+      writeHeapSnapshot(resolvePath(PROFILES_DIR, `heap-${lastSpan.stage}.heapsnapshot`));
+      recordStage(`heap-snapshot:${lastSpan.stage}`, elapsedMs(snapshotStartedAt), 0);
     }
   }
 
@@ -157,9 +168,8 @@ async function run(
   const serialized = JSON.stringify(calculation.response);
   recordStage("serialization", elapsedMs(serializationStartedAt), 0);
 
-  const cpuProfilePath = profiler === null ? null : await stopCpuProfiler(profiler, serialized);
-
   const totalElapsedMs = elapsedMs(artifactLoadStartedAt);
+  const cpuProfilePath = profiler === null ? null : await stopCpuProfiler(profiler, serialized);
   const report = {
     contractVersion: "meeet-calculation-profile/v1",
     nodeVersion: process.versions.node,

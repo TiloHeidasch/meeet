@@ -1,0 +1,29 @@
+{
+  "schema": "meeet-calculation-baseline-aggregate/v1",
+  "recordedAt": "2026-08-20",
+  "source": "Median of 3 fresh-process runs of scripts/profile-scheduled-calculation.ts on artifact c904767465cb… (feed 20260803, 9,313 station areas, 2,075,789 connections). Mirrors the 'Current baseline' table in calculation-baseline.md. Committed so hotspot shares are auditable without the gitignored CPU profile.",
+  "totalElapsedMs": 32857,
+  "stages": [
+    { "stage": "artifact-load", "medianMs": 20482, "sharePct": 62.3 },
+    { "stage": "scan-blue", "medianMs": 3497, "sharePct": 10.6 },
+    { "stage": "scan-red", "medianMs": 3032, "sharePct": 9.2 },
+    { "stage": "validation", "medianMs": 2069, "sharePct": 6.3 },
+    { "stage": "station-area-catalog", "medianMs": 1584, "sharePct": 4.8 },
+    { "stage": "routing-window", "medianMs": 826, "sharePct": 2.5 },
+    { "stage": "access-seeds", "medianMs": 580, "sharePct": 1.8 },
+    { "stage": "station-area-evaluation", "medianMs": 8, "sharePct": 0.0 },
+    { "stage": "response-build", "medianMs": 1, "sharePct": 0.0 },
+    { "stage": "participant-surfaces", "medianMs": 0, "sharePct": 0.0 },
+    { "stage": "serialization", "medianMs": 0, "sharePct": 0.0 },
+    { "stage": "inter-stage-overhead", "medianMs": 778, "sharePct": 2.4 }
+  ],
+  "hotspot2MunichBoundary": {
+    "definition": "Wall-clock time spent in isWithinOfficialMunichBoundary across buildScheduledStationAreaCatalog (all 9,313 station areas) and response validation (1,115 result areas).",
+    "upperBoundStages": ["station-area-catalog", "validation"],
+    "upperBoundMs": 3653,
+    "upperBoundSharePct": 11.1,
+    "correctedEstimateSharePct": 5.0,
+    "correctedEstimateMs": 1700,
+    "basis": "The boundary check is a subset of the catalog-build and validation stages. Their measured wall-clock time (1,584 ms + 2,069 ms = 3,653 ms) is 11.1% of the 32,857 ms total, so the boundary-specific portion cannot exceed that. The earlier ~29% CPU-profile frame attribution overstated wall-clock because those frames are sampled inside stages whose total time is only 11.1% of the run. A conservative ~5% (~1.7 s) reflects the boundary-specific portion; expected optimization gain is therefore scaled to ~1-2 s (not 8-10 s)."
+  }
+}

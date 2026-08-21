@@ -37,13 +37,15 @@ npm run profile:calculation -- --heap-snapshots   # + per-stage heap snapshots
 ```
 
 Output contract: the JSON report is written to
-`profiles/report-<compiledArtifactId>-<timestamp>.json` and its path is
+`profiles/report-<compiledArtifactId[:12]>-<timestamp>.json` and its path is
 printed to stdout; a ranked timing table goes to stderr. Exit codes:
 0 = success, 1 = calculation or validation failure, 2 = unsupported Node
 major. `profiles/` is gitignored.
 
-The CPU profile covers exactly the measured window (artifact load through
-serialization) via `node:inspector`, so tsx/loader startup is not included.
+The CPU profile covers the profiled window (profiler start just before artifact
+load through profiler stop just after serialization) via `node:inspector`, so
+tsx/loader startup is not included. It is approximately the measured window; the
+small difference is profiler start/stop overhead outside the measured stages.
 Heap snapshots are written at stage boundaries; snapshot write time is
 reported as separate `heap-snapshot:<stage>` rows so stage timings stay clean.
 
@@ -85,11 +87,16 @@ Median of 3 fresh-process runs.
 | response-build | 1 | 0.0% | +1,629,440 |
 | participant-surfaces | 0 | 0.0% | +2,368 |
 | serialization | 0 | 0.0% | — |
+| inter-stage overhead | 778 | 2.4% | — |
 | **Total** | **32,857** | 100% | ~+450 MB |
 
 ¹ Representative values from one run; heap deltas are GC-dependent and vary
 between runs (a stage can even show a negative delta when GC runs inside it).
 Use the heap snapshots for precise per-stage memory analysis.
+
+² Inter-stage overhead (hook dispatch, GC pauses, and profiler/snapshot I/O
+between measured stages) is the ~778 ms (2.4%) not captured by individual
+stage rows; it is shown as its own row so stage shares sum to 100%.
 
 Run-to-run variance is dominated by artifact-load (19.5-22.1 s across the
 three runs; disk-cache dependent). The response is deterministic across runs:
@@ -102,8 +109,13 @@ collapse already delivered part of the expected routing-phase win.
 
 ## Ranked hotspots and expected gains
 
-Measured with the CPU profile of the same window (34,921 samples ≈ 34.9 s,
-1 ms sampling) and the per-stage heap deltas above.
+Measured with the CPU profile of a single run (34,921 samples ≈ 34.9 s,
+1 ms sampling — a single run, not the 3-run median; its ~34.9 s reflects
+profiler start/stop bounds plus that run's artifact-load variance versus the
+32.9 s median measured window) and the per-stage heap deltas above. CPU-profile frame
+attribution can overstate a hotspot's wall-clock share relative to the
+per-stage timings, which bound it; hotspot #2 is corrected accordingly (see
+`calculation-baseline-aggregate.json`).
 
 ### 1. Artifact load — 20.5 s (62%)
 
@@ -128,22 +140,27 @@ Options and expected gains:
   cache); the cost is paid once per process, so the e2e gate and any
   fresh-process benchmark see it in full.
 
-### 2. Munich boundary point-in-polygon — ~10 s (29%)
+### 2. Munich boundary point-in-polygon — ~1.7 s (5%)
 
 `buildScheduledStationAreaCatalog` runs `isWithinOfficialMunichBoundary` for
 all 9,313 station areas, and response validation re-checks each of the 1,115
 result areas. Each check walks the district polygons
-(`isPointInRing`/`isPointInPolygon` in `geo.ts`); the CPU profile shows the
-boundary chain (`geo.ts` + `boundary.ts` frames) at ~29% of the window.
+(`isPointInRing`/`isPointInPolygon` in `geo.ts`). The boundary check is a
+subset of the catalog-build and validation stages, whose measured wall-clock
+time is 1,584 ms + 2,069 ms = 3,653 ms = 11.1% of the 32,857 ms total; the
+boundary-specific portion is conservatively ~5% (~1.7 s). The earlier ~29%
+CPU-profile frame attribution overstated wall-clock because those frames are
+sampled inside stages whose total time is only 11.1% of the run (see
+`calculation-baseline-aggregate.json`).
 
 Options and expected gains:
 
 - Precompute Munich membership at compile time: station areas are static per
   artifact, so the boundary filter can run once in the compiler and the
   result stored in the artifact. Catalog build becomes a sort + filter, and
-  validation can trust the catalog. Estimated 8-10 s saved.
+  validation can trust the catalog. Estimated 1-2 s saved.
 - Or index the boundary (grid/bounding-box prefilter) to make each check
-  O(1)-ish instead of walking every district ring. Estimated 6-8 s saved.
+  O(1)-ish instead of walking every district ring. Estimated 1-2 s saved.
 
 ### 3. Participant scans — 6.5 s combined (20%)
 
