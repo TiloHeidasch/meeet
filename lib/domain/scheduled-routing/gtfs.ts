@@ -20,6 +20,7 @@ import type {
   StationAreaMode,
 } from "./models.ts";
 import { TRANSFER_NEIGHBOR_RADIUS_METERS } from "./models.ts";
+import { freezeScheduledArtifact } from "./freeze.ts";
 import { addServiceDays, parseOffsetInstant, serviceDateAnchorEpochSeconds } from "./time.ts";
 import { buildAreaSpatialIndex, findAreasWithinRadius, haversineDistanceMeters } from "./spatial.ts";
 
@@ -216,7 +217,7 @@ export function importGtfsSchedule(
     provenance,
   };
   if (logProgress) logCompilerProgress(`GTFS import complete (feedId=${feedId}, serviceDateRange=${serviceDateRange.firstDate}..${serviceDateRange.lastDate})`);
-  return deepFreeze(artifact);
+  return freezeScheduledArtifact(artifact);
 }
 
 /** Short alias for callers treating the result as an imported snapshot. */
@@ -1027,16 +1028,4 @@ function writeCanonicalJson(writer: CanonicalHashWriter, value: unknown): void {
     return;
   }
   throw new TypeError("Cannot hash an unsupported provenance value.");
-}
-
-function deepFreeze<T>(value: T): T {
-  if (value !== null && typeof value === "object" && !Object.isFrozen(value)) {
-    if (Array.isArray(value)) {
-      for (const child of value) deepFreeze(child);
-    } else {
-      for (const child of Object.values(value)) deepFreeze(child);
-    }
-    Object.freeze(value);
-  }
-  return value;
 }

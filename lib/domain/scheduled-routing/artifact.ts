@@ -18,6 +18,7 @@ import {
   type GtfsFeedFiles,
   type ScheduledArtifactCore,
 } from "./gtfs.ts";
+import { freezeScheduledArtifact } from "./freeze.ts";
 import { parseOffsetInstant } from "./time.ts";
 import type {
   GtfsAcquisitionRecord,
@@ -412,7 +413,7 @@ export function loadScheduledArtifact(
   validateBundleSummary(manifest.summary, core);
   validateRawArchive(parsed, options.rawArchiveBytes);
   validateFreshness(provenance.acquisition, options.now ?? defaultLoaderNow());
-  const frozen = deepFreeze(parsed);
+  const frozen = freezeScheduledArtifact(parsed);
   loadedScheduledArtifacts.set(absolutePath, frozen);
   const heapUsedAfter = process.memoryUsage().heapUsed;
   logInfo(
@@ -950,16 +951,4 @@ function isExactRecordArray(value: unknown, requiredKeys: readonly string[]): va
 
 function sha256Bytes(value: Uint8Array): string {
   return createHash("sha256").update(value).digest("hex");
-}
-
-function deepFreeze<T>(value: T): T {
-  if (value !== null && typeof value === "object" && !Object.isFrozen(value)) {
-    if (Array.isArray(value)) {
-      for (const child of value) deepFreeze(child);
-    } else {
-      for (const child of Object.values(value)) deepFreeze(child);
-    }
-    Object.freeze(value);
-  }
-  return value;
 }

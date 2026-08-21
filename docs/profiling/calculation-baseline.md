@@ -255,3 +255,59 @@ The 2026-08-20 v1 baseline artifacts live in `profiles/` (gitignored):
 Analyze the CPU profile with any DevTools/`node --prof-process`-compatible
 tool. Note that tsx compiles each module to a single line, so function
 frames map to `file.ts:1`; aggregate by function name, not line.
+
+## Issue #91 schema-aware artifact freeze profile (2026-08-21)
+
+The controlled comparison used the v2 protocol with the same `package-lock.json`
+dependency resolution in two isolated temporary worktrees:
+
+- `origin/dev` baseline at merge-base `6d75b36b829993be9e50a2c47bbaab4cc1abc7ba`
+- current HEAD at `cce19f597de4e2bc2d38da4be286f75b176ef80d`
+
+Each worktree ran `npm ci --no-audit --no-fund`, then ran the identical profile
+command under Node 24.19.0:
+
+```sh
+NODE_OPTIONS=--conditions=react-server npm exec --yes --package=node@24 -- node --conditions=react-server node_modules/tsx/dist/cli.mjs scripts/profile-scheduled-calculation.ts
+```
+
+The real artifact source was
+`data/scheduled/mvv-scheduled-artifact.json`; byte-identical copies were used
+in both worktrees. Its identity and shape were:
+
+- `compiledArtifactId`: `88e0e6b01a3f92900c37fd6b2992601b8600551d207e78bd843396ead691512d`
+- payload: `808,821,104` bytes
+- counts: `9,313` station areas and `2,075,789` connections
+
+The unchanged aggregate reports were preserved as ignored artifacts at:
+
+- baseline: `profiles/report-88e0e6b01a3f-2026-08-21T14-34-46.634Z.json`
+- current HEAD: `profiles/report-88e0e6b01a3f-2026-08-21T14-35-51.136Z.json`
+
+Both reports contain three fresh child-process samples, Node `24.19.0`, three
+matching `sampleCompiledArtifactIds`, and successful strict validation.
+
+Raw baseline cold-load measurements (`origin/dev`):
+
+| Sample | Child process | Artifact-load elapsed (ms) | Artifact-load heap delta (bytes) |
+| ---: | ---: | ---: | ---: |
+| 1 | 67003 | 12,076 | 1,061,983,872 |
+| 2 | 67050 | 11,922 | 1,115,183,608 |
+| 3 | 67069 | 11,839 | 1,115,042,784 |
+| **Median** | — | **11,922** | **1,115,042,784** |
+
+Raw current-HEAD cold-load measurements:
+
+| Sample | Child process | Artifact-load elapsed (ms) | Artifact-load heap delta (bytes) |
+| ---: | ---: | ---: | ---: |
+| 1 | 67121 | 12,650 | 1,078,302,256 |
+| 2 | 67200 | 12,351 | 1,046,724,472 |
+| 3 | 67275 | 12,382 | 1,064,955,776 |
+| **Median** | — | **12,382** | **1,064,955,776** |
+
+After-minus-before median delta: **+460 ms** elapsed and
+**−50,087,008 bytes** heap delta. These are independent fresh-process median
+comparisons, not paired child measurements. Artifact-load elapsed time varied
+across the three samples (11,839–12,076 ms before; 12,351–12,650 ms after),
+and heap deltas are GC-dependent; the delta should therefore be read with that
+sample variance in mind.
