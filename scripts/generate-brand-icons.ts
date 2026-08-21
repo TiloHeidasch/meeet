@@ -98,6 +98,13 @@ const NUMBER = /-?\d*\.?\d+(?:e[-+]?\d+)?/gi;
 const ROUND = 1e3;
 const round = (n: number) => Math.round(n * ROUND) / ROUND;
 
+// Fixed-point factor for the rasterizer. All polygon geometry and sample
+// positions are scaled by FP into integers so the point-in-polygon test uses
+// exact integer arithmetic (no floating-point division/comparison). This makes
+// the rasterized pixels bit-identical across platforms and Node versions, which
+// is what the CI brand-icon drift check requires.
+const FP = 1e6;
+
 function flattenArc(
   x1: number,
   y1: number,
@@ -164,13 +171,22 @@ function flattenArc(
 }
 
 function pointInPolygon(px: number, py: number, points: ReadonlyArray<Point>): boolean {
-  // Even-odd ray casting.
+  // Even-odd ray casting using exact integer arithmetic. `px`/`py` and every
+  // point in `points` are fixed-point integers (scaled by FP), so the crossing
+  // test reduces to integer cross-products with no floating-point division —
+  // bit-identical on every platform and Node version.
   let inside = false;
   for (let i = 0, j = points.length - 1; i < points.length; j = i++) {
-    const [xi, yi] = points[i];
-    const [xj, yj] = points[j];
-    if (yi > py !== yj > py && px < ((xj - xi) * (py - yi)) / (yj - yi) + xi) {
-      inside = !inside;
+    const xi = points[i][0];
+    const yi = points[i][1];
+    const xj = points[j][0];
+    const yj = points[j][1];
+    if ((yi > py) !== (yj > py)) {
+      const dy = yj - yi;
+      const lhs = (xj - xi) * (py - yi);
+      const rhs = dy * (px - xi);
+      const crosses = dy > 0 ? rhs < lhs : rhs > lhs;
+      if (crosses) inside = !inside;
     }
   }
   return inside;
@@ -188,9 +204,9 @@ function rasterize(shapes: readonly BrandShape[], size: number): Uint8Array {
   const base = shapes[0];
   const scale = size / 64;
   const pixels = new Uint8Array(size * size * 4);
-  const colorAt = (x64: number, y64: number): BrandShape | null => {
+  const colorAt = (px: number, py: number): BrandShape | null => {
     for (let s = shapes.length - 1; s >= 0; s -= 1) {
-      if (pointInPolygon(x64, y64, shapes[s].points)) return shapes[s];
+      if (pointInPolygon(px, py, shapes[s].points)) return shapes[s];
     }
     return null;
   };
@@ -207,7 +223,9 @@ function rasterize(shapes: readonly BrandShape[], size: number): Uint8Array {
       let yellow = 0;
       let plate = 0;
       const record = (offset: Point): "none" | "mark" | "plate" => {
-        const shape = colorAt((x + offset[0]) / scale, (y + offset[1]) / scale);
+        const px = Math.round(((x + offset[0]) / scale) * FP);
+        const py = Math.round(((y + offset[1]) / scale) * FP);
+        const shape = colorAt(px, py);
         if (shape === null) return "none";
         if (shape === overlay) {
           yellow += 1;
@@ -344,8 +362,12 @@ function encodeIco(pngs: ReadonlyArray<{ readonly size: number; readonly png: Bu
 function main(): void {
   // Named constants for the two brand shapes; the letter is painted over the
   // plate. No path parsing and no array-position color assumptions anywhere.
-  const plate: BrandShape = { points: pathPoints(BRAND_MARK_PLATE_D), rgb: PLATE_RGB };
-  const letter: BrandShape = { points: pathPoints(BRAND_MARK_LETTER_D), rgb: LETTER_RGB };
+  // Geometry is lifted into fixed-point integers (scaled by FP) so the
+  // rasterizer's point-in-polygon test is exact and platform-independent.
+  const toFixed = (pts: ReadonlyArray<Point>): Point[] =>
+    pts.map(([x, y]) => [Math.round(x * FP), Math.round(y * FP)] as Point);
+  const plate: BrandShape = { points: toFixed(pathPoints(BRAND_MARK_PLATE_D)), rgb: PLATE_RGB };
+  const letter: BrandShape = { points: toFixed(pathPoints(BRAND_MARK_LETTER_D)), rgb: LETTER_RGB };
   const shapes = [plate, letter];
 
   writeFileSync(OUT.svg, buildSvg());
