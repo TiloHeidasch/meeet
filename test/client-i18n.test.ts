@@ -45,8 +45,15 @@ test("participant labels are localized", () => {
   assert.equal(messages.de.planner.participantLabel(1), "Teilnehmer 1");
 });
 
-test("map aria labels include the station-area marker count", () => {
-  assert.ok(messages.en.map.ariaOk(4).includes("4 calculated station-area markers"));
+test("map aria labels include the meeting-place marker count", () => {
+  assert.ok(messages.en.map.ariaOk(4).includes("4 meeting-place markers"));
+});
+
+test("result action stays truthful when no fair meeting places exist", () => {
+  assert.equal(messages.en.planner.resultAction(1), "Select a fair meeting place to compare the two planned arrivals.");
+  assert.equal(messages.en.planner.resultAction(0), "Select a meeting place to compare the two planned arrivals.");
+  assert.equal(messages.de.planner.resultAction(1), "Wähle einen fairen Treffpunkt aus, um die beiden geplanten Ankünfte zu vergleichen.");
+  assert.equal(messages.de.planner.resultAction(0), "Wähle einen Treffpunkt aus, um die beiden geplanten Ankünfte zu vergleichen.");
 });
 
 test("MVV-area origin copy is present and verbatim in both locales", () => {

@@ -14,6 +14,8 @@
     "start": "next start",
     "schedule:compile:mvv": "NODE_OPTIONS=--conditions=react-server tsx scripts/compile-mvv-schedule.ts",
     "schedule:compile:fixture": "NODE_OPTIONS=--conditions=react-server tsx scripts/compile-fixture-schedule.ts",
+    "profile:calculation": "NODE_OPTIONS=--conditions=react-server tsx scripts/profile-scheduled-calculation.ts",
+    "profile:calculation:cpu": "NODE_OPTIONS=--conditions=react-server tsx scripts/profile-scheduled-calculation.ts --inspector-cpu",
     "lint": "eslint",
     "test": "tsx --test --import ./test/server-only-register.mjs test/*.test.ts",
     "test:e2e": "playwright test",

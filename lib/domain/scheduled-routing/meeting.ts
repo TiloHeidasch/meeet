@@ -33,9 +33,27 @@ import type {
 
 export type { MeetingCalculationPhase, StationVerdict };
 
+/**
+ * Finer-grained pipeline stages inside a single calculation. The coarse
+ * `onPhase` contract is unchanged; `onStage` is an optional additive
+ * instrumentation seam used by the profiling harness (issue #72) and is not
+ * part of the client progress contract.
+ */
+export type ScheduledCalculationStage =
+  | "access-seeds"
+  | "station-area-catalog"
+  | "routing-window"
+  | "scan-red"
+  | "scan-blue"
+  | "participant-surfaces"
+  | "station-area-evaluation"
+  | "response-build";
+
 export interface ScheduledMeetingCalculationHooks {
   readonly onPhase?: (phase: MeetingCalculationPhase) => void | Promise<void>;
   readonly onStationVerdict?: (verdict: StationVerdict) => void | Promise<void>;
+  /** Called immediately before each pipeline stage starts. */
+  readonly onStage?: (stage: ScheduledCalculationStage) => void | Promise<void>;
 }
 
 export interface ScheduledMeetingProviderBundle {
@@ -110,6 +128,7 @@ export async function calculateScheduledMeetingWithBasis(
   let seedSets: [readonly ScheduledAccessSeedCandidate[], readonly ScheduledAccessSeedCandidate[]];
   try {
     await hooks?.onPhase?.("access-seeds");
+    await hooks?.onStage?.("access-seeds");
     const resolvedSeeds = await Promise.all(request.participants.map((participant) => access.resolveAccessSeeds({
       origin: participant.origin,
       schedule: artifact,
@@ -127,19 +146,24 @@ export async function calculateScheduledMeetingWithBasis(
   ];
   providers.deadlineCheck?.("meeting-surface");
   await hooks?.onPhase?.("scheduled-routing");
+  await hooks?.onStage?.("station-area-catalog");
   const stationAreaCatalog = buildScheduledStationAreaCatalog(artifact, providers.deadlineCheck);
+  await hooks?.onStage?.("routing-window");
   const window = createScheduledRoutingWindow(artifact, request.searchStartAt, {
     walkingVelocityMetersPerSecond,
     transferRadiusMeters,
     changeTimeSeconds,
     deadlineCheck: providers.deadlineCheck,
   });
-  const routes = scheduledSeedSets.map((seeds) => {
-    if (seeds.length === 0) return null;
-    return routeScheduledEarliestArrivals(artifact, seeds, request.searchStartAt, { deadlineCheck: providers.deadlineCheck }, window);
-  });
-  const firstRoute = routes[0];
-  const secondRoute = routes[1];
+  await hooks?.onStage?.("scan-red");
+  const firstRoute = scheduledSeedSets[0].length === 0
+    ? null
+    : routeScheduledEarliestArrivals(artifact, scheduledSeedSets[0], request.searchStartAt, { deadlineCheck: providers.deadlineCheck }, window);
+  await hooks?.onStage?.("scan-blue");
+  const secondRoute = scheduledSeedSets[1].length === 0
+    ? null
+    : routeScheduledEarliestArrivals(artifact, scheduledSeedSets[1], request.searchStartAt, { deadlineCheck: providers.deadlineCheck }, window);
+  await hooks?.onStage?.("participant-surfaces");
   const participantSurfaces: [ScheduledParticipantSurface, ScheduledParticipantSurface] = [
     createParticipantSurface(request.participants[0].id, artifact, firstRoute),
     createParticipantSurface(request.participants[1].id, artifact, secondRoute),
@@ -151,6 +175,7 @@ export async function calculateScheduledMeetingWithBasis(
   providers.deadlineCheck?.("meeting-surface");
 
   await hooks?.onPhase?.("station-area-evaluation");
+  await hooks?.onStage?.("station-area-evaluation");
   const stationAreas: ScheduledMeetingStationAreaDto[] = [];
   await evaluateScheduledStationAreaCandidates(
     stationAreaCatalog,
@@ -182,6 +207,7 @@ export async function calculateScheduledMeetingWithBasis(
     },
   );
   providers.deadlineCheck?.("meeting-result");
+  await hooks?.onStage?.("response-build");
   const response: ScheduledMeetingResponse = deepFreeze({
     contractVersion: "meeet-meeting/v3",
     status: noResult ? "no-result" : "ok",

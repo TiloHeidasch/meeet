@@ -24,6 +24,9 @@
 /.artifacts/
 /data/scheduled/
 
+# profiling artifacts (CPU profiles, heap snapshots)
+/profiles/
+
 # misc
 .DS_Store
 *.pem
