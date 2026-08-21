@@ -26,7 +26,8 @@ test.describe("client UI localization", () => {
       await openPlannerGerman(page);
       await expect(page.locator("html")).toHaveAttribute("lang", "de");
       await expect(page).toHaveTitle("meeet — einen fairen Treffpunkt finden");
-      await expect(page.getByText("München · MVV-Fahrplansuche", { exact: true })).toBeVisible();
+      await expect(page.getByText("MVV-Gebiet · Münchner Meeting-Fläche", { exact: true })).toBeVisible();
+      await expect(page.getByText("Geplante MVV-Fläche • Meeting in München • Startpunkte im MVV-Gebiet", { exact: true })).toBeVisible();
       await expect(page.getByRole("combobox", { name: "Startpunkt von Teilnehmer 1" })).toBeVisible();
       await expect(page.getByRole("combobox", { name: "Startpunkt von Teilnehmer 2" })).toBeVisible();
       await expect(page.getByText("Geplanter Start", { exact: true })).toBeVisible();
@@ -50,7 +51,8 @@ test.describe("client UI localization", () => {
       await expect(page).toHaveTitle("meeet — find a fair meeting point");
       await expect(page.getByRole("heading", { name: /Find the middle/ })).toBeVisible();
       await expect(page.getByText("A better place to meeet", { exact: true })).toBeVisible();
-      await expect(page.getByText("Munich · MVV scheduled search", { exact: true })).toBeVisible();
+      await expect(page.getByText("MVV area · Munich meeting surface", { exact: true })).toBeVisible();
+      await expect(page.getByText("Scheduled MVV surface • Munich meeting • MVV-area origins", { exact: true })).toBeVisible();
       await expect(page.getByRole("combobox", { name: "Participant 1 starting point" })).toBeVisible();
       await expect(page.getByRole("combobox", { name: "Participant 2 starting point" })).toBeVisible();
     } finally {
@@ -77,6 +79,33 @@ test.describe("client UI localization", () => {
       await expect(page.getByRole("heading", { name: "Ein fairer Ort zum Meeet." })).toBeVisible();
       await expect(page.getByText("Rot ist schneller", { exact: false })).toBeVisible();
       await expect(page.getByText("Surface ready", { exact: true })).toHaveCount(0);
+    } finally {
+      await context.close();
+    }
+  });
+
+  test("German missing-origin prompt references the MVV area", async ({ browser }) => {
+    const context = await browser.newContext({ baseURL: BASE_URL, locale: "de-DE" });
+    const page = await context.newPage();
+    try {
+      await setup(page, "ok", false, true, 800);
+      await openPlannerGerman(page);
+      await page.getByRole("button", { name: "meeet!" }).click();
+      await expect(page.getByText("Wähle einen Startpunkt im MVV-Gebiet.", { exact: true })).toBeVisible();
+    } finally {
+      await context.close();
+    }
+  });
+
+  test("English missing-origin prompt references the MVV area", async ({ browser }) => {
+    const context = await browser.newContext({ baseURL: BASE_URL, locale: "fr-FR" });
+    const page = await context.newPage();
+    try {
+      await setup(page);
+      await page.goto("/");
+      await expect(page.getByRole("heading", { name: /Find the middle/ })).toBeVisible();
+      await page.getByRole("button", { name: "meeet!" }).click();
+      await expect(page.getByText("Choose a starting point in the MVV area.", { exact: true })).toBeVisible();
     } finally {
       await context.close();
     }

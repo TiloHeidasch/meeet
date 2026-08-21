@@ -45,6 +45,25 @@ test("MVG location search parsing filters, deduplicates, bounds, and caps result
   assert.throws(() => parseMvgLocationSearchResults({ locations: null }));
 });
 
+test("MVG location search retains external ADDRESS/STATION and Munich-filters POI/missing types", () => {
+  const payload = {
+    locations: [
+      { type: "ADDRESS", name: "Garching Adresse", latitude: 48.2614, longitude: 11.6711 },
+      { type: "STATION", name: "Herrsching Bahnhof", latitude: 48.0025, longitude: 11.1764 },
+      { type: "POI", name: "External POI", latitude: 48.5000, longitude: 11.5000 },
+      { name: "External missing-type", latitude: 52.52, longitude: 13.405 },
+      { type: "address", name: "Marienplatz Adresse", latitude: A.latitude, longitude: A.longitude },
+    ],
+  };
+  const results = parseMvgLocationSearchResults(payload);
+  const labels = results.map((result) => result.label);
+  assert.ok(labels.includes("Garching Adresse"), "external ADDRESS must be retained");
+  assert.ok(labels.includes("Herrsching Bahnhof"), "external STATION must be retained");
+  assert.ok(labels.includes("Marienplatz Adresse"), "Munich ADDRESS must be retained");
+  assert.equal(labels.includes("External POI"), false, "external POI must stay Munich-filtered");
+  assert.equal(labels.includes("External missing-type"), false, "missing type must stay Munich-filtered");
+});
+
 test("MVG location search uses the fixed endpoint and no-store raw upstream fetch", async () => {
   assert.equal(MVG_UPSTREAM_REVALIDATE_SECONDS, 24 * 60 * 60);
   assert.equal(MVG_LOCATION_SEARCH_TIMEOUT_MS, 4_000);

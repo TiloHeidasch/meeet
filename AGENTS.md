@@ -2,7 +2,12 @@
 
 ## Product guardrails
 
-- Keep Munich as the only supported geographic boundary.
+- Keep Munich as the only supported geographic boundary for destinations,
+  surfaces, station-area candidates, markers, and territories. Participant
+  ORIGINS may be anywhere in the MVV area (external-Munich) and are accepted
+  globally by `meeet-meeting/v3`; an external origin is usable only when MVG
+  nearby resolves to a compiled-MVV-artifact access seed, otherwise the
+  calculation returns an explicit no-result.
 - The canonical calculation contract is `meeet-meeting/v3` with exactly two
   transit Participants, two origins, a Search Start Time, and selected 5/10/15%
   tolerance.

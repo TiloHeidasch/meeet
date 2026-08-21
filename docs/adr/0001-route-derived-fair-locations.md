@@ -4,9 +4,9 @@ Status: accepted; this decision supersedes the earlier station-search model.
 
 meeet calculates a two-person Munich fairness surface from an immutable MVV
 GTFS schedule. The server accepts only `meeet-meeting/v3`. Each request has two
-transit Participants, two Munich origins, a `searchStartAt` canonicalized to a
-whole minute (rounded up from whole-second input), and a selected tolerance of
-5%, 10%, or 15%.
+transit Participants, two origins accepted anywhere in the MVV area
+(external-Munich), a `searchStartAt` canonicalized to a whole minute (rounded up
+from whole-second input), and a selected tolerance of 5%, 10%, or 15%.
 
 MVG supplies location search and bounded nearby access seeds. It is not the
 schedule or transit-routing authority. The compiled MVV artifact supplies
@@ -53,6 +53,10 @@ station-area candidates.
   station-area markers remain the meeting-place candidates.
 - A selected tolerance is never escalated.
 - Munich clipping and station-area/boarding-stop identity are enforced by the
-  server contract.
+  server contract. Origins are accepted across the wider MVV area (not just
+  Munich); an external origin is usable only when MVG nearby resolves to a
+  compiled-MVV-artifact access seed, otherwise the calculation returns an
+  explicit no-result. The response discloses `metadata.origins.coverage`
+  (`globally-valid-origin/v1`).
 - Node 24 compilation, binary-artifact compatibility, memory capacity, a
   90-second API budget, and a concurrency guard are release qualifications.
