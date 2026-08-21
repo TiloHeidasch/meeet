@@ -10,6 +10,7 @@ import {
   parseOffsetInstant,
   parseSearchStartInstant,
   routeScheduledEarliestArrivals,
+  routeScheduledEarliestArrivalsPair,
   createScheduledRoutingWindow,
   serviceDateRangeForSearch,
   serviceDateAnchorEpochSeconds,
@@ -280,6 +281,47 @@ test("router scans the persisted connection template without sorting a cloned fu
     Array.prototype.sort = originalSort;
   }
   assert.equal(templateSortAttempted, false);
+});
+
+test("routeScheduledEarliestArrivalsPair matches two sequential routeScheduledEarliestArrivals calls", () => {
+  const schedule = fixture();
+  const seedsA = [{ stationAreaId: "station-a", accessSeconds: 0 }];
+  const seedsB = [{ stationAreaId: "station-c", accessSeconds: 0 }];
+  const options = { walkingVelocityMetersPerSecond: 10, transferRadiusMeters: 100 };
+  const sequential = [
+    routeScheduledEarliestArrivals(schedule, seedsA, SEARCH_START, options),
+    routeScheduledEarliestArrivals(schedule, seedsB, SEARCH_START, options),
+  ];
+  const paired = routeScheduledEarliestArrivalsPair(
+    schedule,
+    [seedsA, seedsB],
+    SEARCH_START,
+    options,
+  );
+  assert.deepEqual(paired[0], sequential[0]);
+  assert.deepEqual(paired[1], sequential[1]);
+  assert.ok(paired[0].reachableStationAreaCount > 0);
+});
+
+test("routeScheduledEarliestArrivalsPair matches sequential scans with asymmetric reachability", () => {
+  const schedule = fixture();
+  const seedsA = [{ stationAreaId: "station-a", accessSeconds: 0 }];
+  const seedsB = [{ stationAreaId: "station-unreachable", accessSeconds: 0 }];
+  const options = { walkingVelocityMetersPerSecond: 10, transferRadiusMeters: 100 };
+  const sequential = [
+    routeScheduledEarliestArrivals(schedule, seedsA, SEARCH_START, options),
+    routeScheduledEarliestArrivals(schedule, seedsB, SEARCH_START, options),
+  ];
+  const paired = routeScheduledEarliestArrivalsPair(
+    schedule,
+    [seedsA, seedsB],
+    SEARCH_START,
+    options,
+  );
+  assert.deepEqual(paired[0], sequential[0]);
+  assert.deepEqual(paired[1], sequential[1]);
+  assert.ok(paired[0].reachableStationAreaCount > 0);
+  assert.equal(paired[1].reachableStationAreaCount, 1);
 });
 
 test("routing-window materialization calculates one anchor per candidate service date", () => {

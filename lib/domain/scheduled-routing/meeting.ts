@@ -12,6 +12,7 @@ import {
   DEFAULT_WALKING_VELOCITY_METERS_PER_SECOND,
   createScheduledRoutingWindow,
   routeScheduledEarliestArrivals,
+  routeScheduledEarliestArrivalsPair,
 } from "./router.ts";
 import {
   CHANGE_TIME_PRESETS,
@@ -167,13 +168,27 @@ export async function calculateScheduledMeetingWithBasis(
     deadlineCheck: providers.deadlineCheck,
   });
   await hooks?.onStage?.("scan-red");
-  const firstRoute = scheduledSeedSets[0].length === 0
-    ? null
-    : routeScheduledEarliestArrivals(artifact, scheduledSeedSets[0], request.searchStartAt, { deadlineCheck: providers.deadlineCheck }, window);
   await hooks?.onStage?.("scan-blue");
-  const secondRoute = scheduledSeedSets[1].length === 0
-    ? null
-    : routeScheduledEarliestArrivals(artifact, scheduledSeedSets[1], request.searchStartAt, { deadlineCheck: providers.deadlineCheck }, window);
+  let firstRoute: ReturnType<typeof routeScheduledEarliestArrivals> | null = null;
+  let secondRoute: ReturnType<typeof routeScheduledEarliestArrivals> | null = null;
+  if (scheduledSeedSets[0].length > 0 && scheduledSeedSets[1].length > 0) {
+    const [pairedFirst, pairedSecond] = routeScheduledEarliestArrivalsPair(
+      artifact,
+      [scheduledSeedSets[0], scheduledSeedSets[1]],
+      request.searchStartAt,
+      { deadlineCheck: providers.deadlineCheck },
+      window,
+    );
+    firstRoute = pairedFirst;
+    secondRoute = pairedSecond;
+  } else {
+    if (scheduledSeedSets[0].length > 0) {
+      firstRoute = routeScheduledEarliestArrivals(artifact, scheduledSeedSets[0], request.searchStartAt, { deadlineCheck: providers.deadlineCheck }, window);
+    }
+    if (scheduledSeedSets[1].length > 0) {
+      secondRoute = routeScheduledEarliestArrivals(artifact, scheduledSeedSets[1], request.searchStartAt, { deadlineCheck: providers.deadlineCheck }, window);
+    }
+  }
   await hooks?.onStage?.("participant-surfaces");
   const participantSurfaces: [ScheduledParticipantSurface, ScheduledParticipantSurface] = [
     createParticipantSurface(request.participants[0].id, artifact, firstRoute),
