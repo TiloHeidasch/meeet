@@ -34,7 +34,7 @@ const OFFICIAL_MVV_ATTRIBUTION = "Münchner Verkehrs- und Tarifverbund GmbH (MVV
 const DEFAULT_CC_BY_4_LICENSE_URL = "https://creativecommons.org/licenses/by/4.0/";
 const MVV_ATTRIBUTION_POLICY_ID = "mvv-cc-by-4.0-fallback/v1" as const;
 const SCHEDULED_BUNDLE_CONTRACT_VERSION = "meeet-scheduled-routing-bundle/v1" as const;
-export const SCHEDULED_COMPILER_VERSION = "meeet-scheduled-compiler/v3" as const;
+export const SCHEDULED_COMPILER_VERSION = "meeet-scheduled-compiler/v4" as const;
 const SCHEDULED_BUNDLE_ENCODING = "node-v8-structured-clone/1" as const;
 const MAX_BUNDLE_MANIFEST_BYTES = 1 * 1024 * 1024;
 const MAX_BUNDLE_PAYLOAD_BYTES = 1 * 1024 * 1024 * 1024;
@@ -778,7 +778,7 @@ function isScheduledRoutingArtifact(value: unknown): value is ScheduledRoutingAr
     !Array.isArray(value.exceptions) ||
     !isExactRecordArray(value.routes, ["routeId", "shortName", "longName", "routeType"]) ||
     !isExactRecordArray(value.trips, ["tripId", "routeId", "serviceId", "headsign"]) ||
-    !isExactRecordArray(value.stationAreas, ["id", "name", "coordinate", "mode"]) ||
+    !isExactRecordArray(value.stationAreas, ["id", "name", "coordinate", "mode", "transferNeighbors"]) ||
     !isExactRecordArray(value.calendars, ["serviceId", "startDate", "endDate", "weekdays"]) ||
     !isExactRecordArray(value.exceptions, ["serviceId", "date", "exceptionType"]) ||
     !isExactRecordArray(value.connections, ["id", "tripId", "routeId", "serviceId", "fromStationAreaId", "toStationAreaId", "fromStopSequence", "toStopSequence", "departureTimeSeconds", "arrivalTimeSeconds", "pickupType", "dropOffType", "line"]) ||
@@ -814,7 +814,7 @@ function isScheduledRoutingArtifact(value: unknown): value is ScheduledRoutingAr
 
 function validateArtifactStructure(artifact: ScheduledRoutingArtifact): void {
   if ("boardingStops" in artifact) throw invalidArtifact("boarding stops");
-  if (artifact.routes.some((route) => typeof route.routeId !== "string" || typeof route.shortName !== "string" || typeof route.longName !== "string") || artifact.trips.some((trip) => typeof trip.tripId !== "string" || typeof trip.routeId !== "string" || typeof trip.serviceId !== "string" || typeof trip.headsign !== "string") || artifact.stationAreas.some((area) => typeof area.id !== "string" || typeof area.name !== "string" || !isRecord(area.coordinate) || (area.mode !== "sbahn" && area.mode !== "ubahn" && area.mode !== "tram" && area.mode !== "bus") || "boardingStopIds" in area || "parentStationId" in area) || artifact.calendars.some((calendar) => typeof calendar.serviceId !== "string" || !Array.isArray(calendar.weekdays)) || artifact.exceptions.some((exception) => typeof exception.serviceId !== "string" || typeof exception.date !== "string") || artifact.connections.some((connection) => typeof connection.id !== "string" || typeof connection.tripId !== "string" || typeof connection.routeId !== "string" || typeof connection.serviceId !== "string" || "fromStopId" in connection || "toStopId" in connection || typeof connection.fromStationAreaId !== "string" || typeof connection.toStationAreaId !== "string" || !isRecord(connection.line))) throw invalidArtifact("nested field type");
+  if (artifact.routes.some((route) => typeof route.routeId !== "string" || typeof route.shortName !== "string" || typeof route.longName !== "string") || artifact.trips.some((trip) => typeof trip.tripId !== "string" || typeof trip.routeId !== "string" || typeof trip.serviceId !== "string" || typeof trip.headsign !== "string") ||     artifact.stationAreas.some((area) => typeof area.id !== "string" || typeof area.name !== "string" || !isRecord(area.coordinate) || (area.mode !== "sbahn" && area.mode !== "ubahn" && area.mode !== "tram" && area.mode !== "bus") || "boardingStopIds" in area || "parentStationId" in area || !Array.isArray(area.transferNeighbors) || area.transferNeighbors.some((neighbor) => !isRecord(neighbor) || typeof neighbor.stationAreaId !== "string" || typeof neighbor.distanceMeters !== "number" || !Number.isFinite(neighbor.distanceMeters) || neighbor.distanceMeters < 0 || Object.keys(neighbor).length !== 2)) || artifact.calendars.some((calendar) => typeof calendar.serviceId !== "string" || !Array.isArray(calendar.weekdays)) || artifact.exceptions.some((exception) => typeof exception.serviceId !== "string" || typeof exception.date !== "string") || artifact.connections.some((connection) => typeof connection.id !== "string" || typeof connection.tripId !== "string" || typeof connection.routeId !== "string" || typeof connection.serviceId !== "string" || "fromStopId" in connection || "toStopId" in connection || typeof connection.fromStationAreaId !== "string" || typeof connection.toStationAreaId !== "string" || !isRecord(connection.line))) throw invalidArtifact("nested field type");
   const routeIds = uniqueSorted(artifact.routes.map((route) => route.routeId), "routes");
   uniqueSorted(artifact.trips.map((trip) => trip.tripId), "trips");
   const areaIds = uniqueSorted(artifact.stationAreas.map((area) => area.id), "stationAreas");
@@ -831,6 +831,11 @@ function validateArtifactStructure(artifact: ScheduledRoutingArtifact): void {
   if (artifact.routes.some((route) => !Number.isSafeInteger(route.routeType) || route.routeType < 0 || route.routeType > 999)) throw invalidArtifact("route type");
   for (const area of artifact.stationAreas) {
     validateCoordinate(area.coordinate, "station area coordinate");
+    const selfNeighbor = area.transferNeighbors.find((neighbor) => neighbor.stationAreaId === area.id);
+    if (selfNeighbor === undefined || selfNeighbor.distanceMeters !== 0) throw invalidArtifact("transfer neighbor self reference");
+    for (const neighbor of area.transferNeighbors) {
+      if (!areaIdSet.has(neighbor.stationAreaId)) throw invalidArtifact("transfer neighbor reference");
+    }
   }
   for (const trip of artifact.trips) {
     if (!routeIdSet.has(trip.routeId) || !serviceIds.has(trip.serviceId)) throw invalidArtifact("trip reference");

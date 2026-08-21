@@ -13,12 +13,15 @@ import type {
   ScheduledRoutingArtifact,
   ScheduledSearchStartBounds,
   ScheduledStationArea,
+  ScheduledTransferNeighbor,
   ScheduledTrip,
   ServiceCalendar,
   ServiceException,
   StationAreaMode,
 } from "./models.ts";
+import { TRANSFER_NEIGHBOR_RADIUS_METERS } from "./models.ts";
 import { addServiceDays, parseOffsetInstant, serviceDateAnchorEpochSeconds } from "./time.ts";
+import { buildAreaSpatialIndex, findAreasWithinRadius, haversineDistanceMeters } from "./spatial.ts";
 
 export interface GtfsFeedFiles {
   readonly [fileName: string]: string;
@@ -444,11 +447,11 @@ function createStationAreas(
   modesByArea: ReadonlyMap<string, ReadonlySet<StationAreaMode>>,
 ): ScheduledStationArea[] {
   const byId = new Map(stops.map((stop) => [stop.id, stop]));
-  const areas: ScheduledStationArea[] = [];
+  const baseAreas: ScheduledStationArea[] = [];
   for (const stop of stops) {
     if (stop.locationType === 1) {
       const mode = highestStationMode(modesByArea.get(stop.id));
-      areas.push({ id: stop.id, name: stop.name, coordinate: coordinateOf(stop), mode });
+      baseAreas.push({ id: stop.id, name: stop.name, coordinate: coordinateOf(stop), mode, transferNeighbors: [] });
     }
   }
   for (const stop of stops) {
@@ -459,10 +462,28 @@ function createStationAreas(
     }
     if (parent === null) {
       const mode = highestStationMode(modesByArea.get(stop.id));
-      areas.push({ id: stop.id, name: stop.name, coordinate: coordinateOf(stop), mode });
+      baseAreas.push({ id: stop.id, name: stop.name, coordinate: coordinateOf(stop), mode, transferNeighbors: [] });
     }
   }
-  return areas;
+  return attachTransferNeighbors(baseAreas);
+}
+
+/**
+ * Precompute, at compile time, the transfer-neighbor list for every station area
+ * within `TRANSFER_NEIGHBOR_RADIUS_METERS` (issue #76). The list is sorted by
+ * station-area id and always includes the area itself with `distanceMeters: 0`,
+ * matching the previous per-arrival spatial-query enumeration so routing results
+ * are identical for any runtime radius up to the precomputed radius.
+ */
+function attachTransferNeighbors(areas: ScheduledStationArea[]): ScheduledStationArea[] {
+  const index = buildAreaSpatialIndex(areas, TRANSFER_NEIGHBOR_RADIUS_METERS);
+  return areas.map((area) => {
+    const transferNeighbors: ScheduledTransferNeighbor[] = findAreasWithinRadius(index, area.coordinate, TRANSFER_NEIGHBOR_RADIUS_METERS).map((neighbor) => ({
+      stationAreaId: neighbor.id,
+      distanceMeters: haversineDistanceMeters(area.coordinate, neighbor.coordinate),
+    }));
+    return { ...area, transferNeighbors };
+  });
 }
 
 function parseTrips(table: CsvTable, routes: readonly ScheduledRoute[]): ScheduledTrip[] {

@@ -3,6 +3,7 @@ import "server-only";
 import {
   CHANGE_TIME_PRESETS,
   ROUTING_HORIZON_SECONDS,
+  TRANSFER_NEIGHBOR_RADIUS_METERS,
   WALKING_SECONDS_ROUNDING_RULE,
   type ScheduledAccessSeed,
   type ScheduledConnection,
@@ -18,6 +19,14 @@ import {
 import {
   compareScheduledConnections,
 } from "./gtfs.ts";
+import {
+  buildAreaSpatialIndex as buildSpatialIndex,
+  findAreasWithinRadius as querySpatialIndex,
+  haversineDistanceMeters,
+  type ScheduledSpatialIndex,
+} from "./spatial.ts";
+
+export { haversineDistanceMeters } from "./spatial.ts";
 import {
   addServiceDays,
   ceilToWholeMinuteSeconds,
@@ -41,12 +50,6 @@ export interface ScheduledMaterializedConnection {
   readonly previousContinuationKey: string | null;
 }
 
-export interface ScheduledSpatialIndex {
-  readonly bucketSizeDegrees: number;
-  readonly buckets: ReadonlyMap<string, readonly string[]>;
-  readonly areas: ReadonlyMap<string, ScheduledStationArea>;
-}
-
 interface ResolvedRoutingOptions {
   readonly walkingVelocityMetersPerSecond: number;
   readonly transferRadiusMeters: number;
@@ -63,7 +66,13 @@ export interface ScheduledRoutingWindow {
   readonly transferRadiusMeters: number;
   readonly changeTimeSeconds: number;
   readonly connections: readonly ScheduledMaterializedConnection[];
-  readonly spatialIndex: ScheduledSpatialIndex;
+  /**
+   * Geographic bucket index used only when the runtime `transferRadiusMeters`
+   * exceeds the precomputed `TRANSFER_NEIGHBOR_RADIUS_METERS`. When present, the
+   * scan falls back to a per-arrival spatial query; otherwise it uses the
+   * precomputed transfer-neighbor lists (issue #76).
+   */
+  readonly spatialIndex?: ScheduledSpatialIndex;
   readonly deadlineCheck?: ScheduledDeadlineCheck;
 }
 
@@ -166,6 +175,21 @@ function scanScheduledConnections(
     enqueueForArea?.(stationAreaId);
   };
 
+  const emitTransfer = (
+    transferArea: ScheduledStationArea,
+    distanceMeters: number,
+    arrivalArea: ScheduledStationArea,
+    arrivalEpochSeconds: number,
+  ): void => {
+    if (transferArea.id === arrivalArea.id) {
+      updateBoardingReadyMinimum(arrivalArea.id, arrivalEpochSeconds + resolvedOptions.changeTimeSeconds);
+    } else {
+      const walkArrival = arrivalEpochSeconds + walkingSecondsForDistance(distanceMeters, resolvedOptions.walkingVelocityMetersPerSecond);
+      if (updateArrivalMinimum(transferArea.id, walkArrival)) predecessorByArea[transferArea.id] = { kind: "walk", fromAreaId: arrivalArea.id, arrivalEpochSeconds: walkArrival };
+      updateBoardingReadyMinimum(transferArea.id, walkArrival);
+    }
+  };
+
   for (let seedIndex = 0; seedIndex < accessSeeds.length; seedIndex += 1) {
     const seed = accessSeeds[seedIndex];
     if (seed === undefined) continue;
@@ -232,13 +256,16 @@ function scanScheduledConnections(
       if (updateArrivalMinimum(connection.source.toStationAreaId, connection.arrivalEpochSeconds)) predecessorByArea[connection.source.toStationAreaId] = { kind: "connection", connection: buildConnectionRef(connection, tripHeadsignById) };
       const arrivalArea = stationById.get(connection.source.toStationAreaId);
       if (arrivalArea === undefined) throw new Error("Connection references a missing arrival station area.");
-      for (const transferArea of querySpatialIndex(window.spatialIndex, arrivalArea.coordinate, resolvedOptions.transferRadiusMeters)) {
-        if (transferArea.id === arrivalArea.id) {
-          updateBoardingReadyMinimum(arrivalArea.id, connection.arrivalEpochSeconds + resolvedOptions.changeTimeSeconds);
-        } else {
-          const walkArrival = connection.arrivalEpochSeconds + walkingSeconds(arrivalArea.coordinate, transferArea.coordinate, resolvedOptions.walkingVelocityMetersPerSecond);
-          if (updateArrivalMinimum(transferArea.id, walkArrival)) predecessorByArea[transferArea.id] = { kind: "walk", fromAreaId: arrivalArea.id, arrivalEpochSeconds: walkArrival };
-          updateBoardingReadyMinimum(transferArea.id, walkArrival);
+      if (window.spatialIndex !== undefined) {
+        for (const transferArea of querySpatialIndex(window.spatialIndex, arrivalArea.coordinate, resolvedOptions.transferRadiusMeters)) {
+          emitTransfer(transferArea, haversineDistanceMeters(arrivalArea.coordinate, transferArea.coordinate), arrivalArea, connection.arrivalEpochSeconds);
+        }
+      } else {
+        for (const neighbor of arrivalArea.transferNeighbors) {
+          if (neighbor.distanceMeters > resolvedOptions.transferRadiusMeters) continue;
+          const transferArea = stationById.get(neighbor.stationAreaId);
+          if (transferArea === undefined) continue;
+          emitTransfer(transferArea, neighbor.distanceMeters, arrivalArea, connection.arrivalEpochSeconds);
         }
       }
     }
@@ -299,7 +326,10 @@ export function createScheduledRoutingWindow(
   }
   const connections = materializeConnections(schedule, parsedStart.epochSeconds, horizonEndEpochSeconds, instrumentation, resolvedOptions.deadlineCheck);
   resolvedOptions.deadlineCheck?.("routing-window");
-  const spatialIndex = buildSpatialIndex(schedule.stationAreas, resolvedOptions.transferRadiusMeters);
+  // The precomputed transfer-neighbor lists cover up to TRANSFER_NEIGHBOR_RADIUS_METERS.
+  // Only build the geographic index when the runtime radius exceeds that, so the
+  // scan falls back to a per-arrival spatial query for larger radii (issue #76).
+  const spatialIndex = resolvedOptions.transferRadiusMeters > TRANSFER_NEIGHBOR_RADIUS_METERS ? buildSpatialIndex(schedule.stationAreas, resolvedOptions.transferRadiusMeters) : undefined;
   resolvedOptions.deadlineCheck?.("routing-window");
   const window: ScheduledRoutingWindow = Object.freeze({
     schedule,
@@ -335,10 +365,14 @@ export function walkingSeconds(
   to: { readonly latitude: number; readonly longitude: number },
   velocityMetersPerSecond: number,
 ): number {
+  return walkingSecondsForDistance(haversineDistanceMeters(from, to), velocityMetersPerSecond);
+}
+
+/** Walk time for an already-known centroid distance, avoiding a haversine recomputation. */
+export function walkingSecondsForDistance(distanceMeters: number, velocityMetersPerSecond: number): number {
   if (!Number.isFinite(velocityMetersPerSecond) || velocityMetersPerSecond <= 0) {
     throw new RangeError("Walking velocity must be a positive finite number.");
   }
-  const distanceMeters = haversineDistanceMeters(from, to);
   if (distanceMeters === 0) return 0;
   return ceilToWholeMinuteSeconds(distanceMeters / velocityMetersPerSecond);
 }
@@ -543,51 +577,6 @@ function activeServiceIdsForDate(schedule: ScheduledRoutingArtifact, serviceDate
   return activeServiceIds;
 }
 
-function buildSpatialIndex(areas: readonly ScheduledStationArea[], radiusMeters: number): ScheduledSpatialIndex {
-  const bucketSizeDegrees = Math.max(radiusMeters / 111_000, 0.00001);
-  const buckets = new Map<string, string[]>();
-  const areaMap = new Map<string, ScheduledStationArea>();
-  for (const area of areas) {
-    areaMap.set(area.id, area);
-    const key = bucketKey(area.coordinate, bucketSizeDegrees);
-    const current = buckets.get(key) ?? [];
-    current.push(area.id);
-    buckets.set(key, current);
-  }
-  return { bucketSizeDegrees, buckets, areas: areaMap };
-}
-
-function querySpatialIndex(
-  index: ScheduledSpatialIndex,
-  coordinate: { readonly latitude: number; readonly longitude: number },
-  radiusMeters: number,
-): ScheduledStationArea[] {
-  const latitudeRadius = radiusMeters / 111_000;
-  const longitudeRadius = latitudeRadius / Math.max(Math.cos((coordinate.latitude * Math.PI) / 180), 0.1);
-  const centerLatitudeBucket = Math.floor(coordinate.latitude / index.bucketSizeDegrees);
-  const centerLongitudeBucket = Math.floor(coordinate.longitude / index.bucketSizeDegrees);
-  const latitudeBuckets = Math.ceil(latitudeRadius / index.bucketSizeDegrees) + 1;
-  const longitudeBuckets = Math.ceil(longitudeRadius / index.bucketSizeDegrees) + 1;
-  const candidates: ScheduledStationArea[] = [];
-  const seen = new Set<string>();
-  for (let latitudeOffset = -latitudeBuckets; latitudeOffset <= latitudeBuckets; latitudeOffset += 1) {
-    for (let longitudeOffset = -longitudeBuckets; longitudeOffset <= longitudeBuckets; longitudeOffset += 1) {
-      const ids = index.buckets.get(`${centerLatitudeBucket + latitudeOffset}:${centerLongitudeBucket + longitudeOffset}`) ?? [];
-      for (const id of ids) {
-        if (seen.has(id)) continue;
-        seen.add(id);
-        const area = index.areas.get(id);
-        if (area !== undefined && haversineDistanceMeters(coordinate, area.coordinate) <= radiusMeters) candidates.push(area);
-      }
-    }
-  }
-  return candidates.sort((left, right) => left.id.localeCompare(right.id));
-}
-
-function bucketKey(coordinate: { readonly latitude: number; readonly longitude: number }, bucketSizeDegrees: number): string {
-  return `${Math.floor(coordinate.latitude / bucketSizeDegrees)}:${Math.floor(coordinate.longitude / bucketSizeDegrees)}`;
-}
-
 function compareMaterializedConnections(left: ScheduledMaterializedConnection, right: ScheduledMaterializedConnection): number {
   return left.departureEpochSeconds - right.departureEpochSeconds || compareScheduledConnections(left.source, right.source) || left.arrivalEpochSeconds - right.arrivalEpochSeconds || left.instanceId.localeCompare(right.instanceId);
 }
@@ -609,19 +598,6 @@ function validateTolerance(value: number): void {
 function formatEpochSeconds(epochSeconds: number): string {
   if (!Number.isSafeInteger(epochSeconds)) throw new RangeError("Scheduled arrival is outside the safe integer-second range.");
   return new Date(epochSeconds * 1_000).toISOString();
-}
-
-export function haversineDistanceMeters(
-  first: { readonly latitude: number; readonly longitude: number },
-  second: { readonly latitude: number; readonly longitude: number },
-): number {
-  const radiusMeters = 6_371_000;
-  const latitudeDelta = ((second.latitude - first.latitude) * Math.PI) / 180;
-  const longitudeDelta = ((second.longitude - first.longitude) * Math.PI) / 180;
-  const firstLatitude = (first.latitude * Math.PI) / 180;
-  const secondLatitude = (second.latitude * Math.PI) / 180;
-  const haversine = Math.sin(latitudeDelta / 2) ** 2 + Math.cos(firstLatitude) * Math.cos(secondLatitude) * Math.sin(longitudeDelta / 2) ** 2;
-  return radiusMeters * 2 * Math.asin(Math.sqrt(Math.min(1, haversine)));
 }
 
 // Keep the exported model rule tied to the implementation so it cannot drift.

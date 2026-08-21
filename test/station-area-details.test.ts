@@ -371,6 +371,7 @@ test("ok surfaces expose cached unclassified markers as explicit unavailable det
     name: "Fixture Unclassified",
     coordinate: { latitude: 48.15, longitude: 11.65 },
     mode: "bus",
+    transferNeighbors: [],
   } as const;
   const unreachableConnection = {
     ...FIXTURE_SCHEDULED_ARTIFACT.connections[0]!,
