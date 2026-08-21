@@ -105,6 +105,65 @@ const round = (n: number) => Math.round(n * ROUND) / ROUND;
 // is what the CI brand-icon drift check requires.
 const FP = 1e6;
 
+// --- Deterministic transcendental helpers ---------------------------------
+// V8's Math.sin/cos/acos/hypot can differ between macOS and Linux builds (the
+// CI brand-icon drift check failed because of exactly that). These replacements
+// use only IEEE-754 +,-,*,/ and the constant Math.PI / Math.SQRT2, so they are
+// bit-identical on every platform and Node version. Accuracy is far beyond what
+// icon geometry needs; the point is cross-platform determinism.
+const PI = Math.PI;
+const TWO_PI = 2 * Math.PI;
+const HALF_PI = Math.PI / 2;
+const TAN_PI_8 = Math.SQRT2 - 1; // tan(PI/8), exact enough and platform-stable
+
+function dsin(x: number): number {
+  let r = x % TWO_PI;
+  if (r > PI) r -= TWO_PI;
+  else if (r < -PI) r += TWO_PI;
+  const neg = r < 0;
+  let a = neg ? -r : r;
+  if (a > HALF_PI) a = PI - a; // sin is symmetric about PI/2
+  const a2 = a * a;
+  let term = a;
+  let sum = a;
+  for (let k = 1; k <= 8; k += 1) {
+    term = (term * a2) / ((2 * k) * (2 * k + 1));
+    sum += k % 2 === 1 ? -term : term;
+  }
+  return neg ? -sum : sum;
+}
+
+const dcos = (x: number): number => dsin(x + HALF_PI);
+
+function datanCore(z: number): number {
+  const z2 = z * z;
+  let term = z;
+  let sum = z;
+  for (let k = 1; k <= 10; k += 1) {
+    term = (term * z2 * (2 * k - 1)) / (2 * k + 1);
+    sum += k % 2 === 1 ? -term : term;
+  }
+  return sum;
+}
+
+function datan(z: number): number {
+  const neg = z < 0;
+  const t = neg ? -z : z;
+  let result: number;
+  if (t > 1) result = HALF_PI - datanCore(1 / t);
+  else if (t > TAN_PI_8) result = PI / 4 - datanCore((1 - t) / (1 + t));
+  else result = datanCore(t);
+  return neg ? -result : result;
+}
+
+function datan2(y: number, x: number): number {
+  if (x > 0) return datan(y / x);
+  if (x < 0) return y >= 0 ? datan(y / x) + PI : datan(y / x) - PI;
+  if (y > 0) return HALF_PI;
+  if (y < 0) return -HALF_PI;
+  return 0;
+}
+
 function flattenArc(
   x1: number,
   y1: number,
@@ -140,31 +199,24 @@ function flattenArc(
   const cyp = coef * (-(ry * x1p) / rx);
   const cx = cosPhi * cxp - sinPhi * cyp + (x1 + x2) / 2;
   const cy = sinPhi * cxp + cosPhi * cyp + (y1 + y2) / 2;
-  const angle = (ux: number, uy: number, vx: number, vy: number) => {
-    const dot = ux * vx + uy * vy;
-    const len = Math.hypot(ux, uy) * Math.hypot(vx, vy);
-    let theta = Math.acos(Math.max(-1, Math.min(1, dot / len)));
-    if (ux * vy - uy * vx < 0) theta = -theta;
-    return theta;
-  };
   const ux = (x1p - cxp) / rx;
   const uy = (y1p - cyp) / ry;
   const vx = (-x1p - cxp) / rx;
   const vy = (-y1p - cyp) / ry;
-  const theta1 = angle(1, 0, ux, uy);
-  let delta = angle(ux, uy, vx, vy);
+  const theta1 = datan2(uy, ux);
+  let delta = datan2(ux * vy - uy * vx, ux * vx + uy * vy);
   if (!sweep && delta > 0) delta -= 2 * Math.PI;
   else if (sweep && delta < 0) delta += 2 * Math.PI;
   const out: Point[] = [];
   for (let step = 1; step <= segments; step += 1) {
     const theta = theta1 + (delta * step) / segments;
     // Round to a fixed precision so the flattened geometry is bit-identical
-    // across platforms: Math.hypot/Math.acos can differ in the last ULP
-    // between glibc (Linux CI) and macOS libm, which would otherwise make the
-    // raster output non-deterministic and trip the CI drift check.
+    // across platforms. The angle/trig above use the deterministic dcos/dsin/
+    // datan2 helpers (not V8's Math.*), so this rounding is just a stability
+    // belt-and-suspenders and never the source of cross-platform drift.
     out.push([
-      round(cx + rx * Math.cos(theta)),
-      round(cy + ry * Math.sin(theta)),
+      round(cx + rx * dcos(theta)),
+      round(cy + ry * dsin(theta)),
     ]);
   }
   return out;
