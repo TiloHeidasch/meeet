@@ -99,13 +99,13 @@ export function routeScheduledEarliestArrivals(
     const epochSeconds = scan.earliestArrivalByArea.get(area.id);
     return {
       stationAreaId: area.id,
-      arrivalAt: epochSeconds === undefined ? null : formatEpochSeconds(epochSeconds),
+      arrivalEpochSeconds: epochSeconds === undefined ? null : epochSeconds,
       elapsedSeconds: epochSeconds === undefined ? null : epochSeconds - parsedStart.epochSeconds,
     };
   });
   return Object.freeze({
     stationArrivals: Object.freeze(stationArrivals),
-    reachableStationAreaCount: stationArrivals.filter((arrival) => arrival.arrivalAt !== null).length,
+    reachableStationAreaCount: stationArrivals.filter((arrival) => arrival.arrivalEpochSeconds !== null).length,
     searchStartAt: parsedStart.canonicalAt,
     searchStartEpochSeconds: parsedStart.epochSeconds,
     horizonEndEpochSeconds: window.horizonEndEpochSeconds,
@@ -504,9 +504,20 @@ function compareHeapEntries(left: ScheduledConnectionHeapEntry, right: Scheduled
   return compareMaterializedConnections(left.connection, right.connection) || left.streamIndex - right.streamIndex;
 }
 
+// Module-level cache of service IDs active on a given date, keyed by
+// `${compiledArtifactId}:${serviceDate}`. The returned `Set` is shared across
+// all callers for that key and MUST be treated as read-only; never mutate it.
+const serviceIdsByArtifactAndDate = new Map<string, Set<string>>();
+
 function activeServiceIdsForDate(schedule: ScheduledRoutingArtifact, serviceDate: string): Set<string> {
+  const cacheKey = `${schedule.provenance.compiledArtifactId}:${serviceDate}`;
+  const cached = serviceIdsByArtifactAndDate.get(cacheKey);
+  if (cached !== undefined) return cached;
   const activeServiceIds = new Set<string>();
-  if (serviceDate < schedule.serviceDateRange.firstDate || serviceDate > schedule.serviceDateRange.lastDate) return activeServiceIds;
+  if (serviceDate < schedule.serviceDateRange.firstDate || serviceDate > schedule.serviceDateRange.lastDate) {
+    serviceIdsByArtifactAndDate.set(cacheKey, activeServiceIds);
+    return activeServiceIds;
+  }
   const day = new Date(`${serviceDate}T00:00:00Z`).getUTCDay();
   const weekdayIndex = day === 0 ? 6 : day - 1;
   for (const calendar of schedule.calendars) {
@@ -517,6 +528,7 @@ function activeServiceIdsForDate(schedule: ScheduledRoutingArtifact, serviceDate
     if (exception.exceptionType === 1) activeServiceIds.add(exception.serviceId);
     else activeServiceIds.delete(exception.serviceId);
   }
+  serviceIdsByArtifactAndDate.set(cacheKey, activeServiceIds);
   return activeServiceIds;
 }
 
@@ -581,11 +593,6 @@ function validateWholeNonNegative(value: number, label: string): void {
 
 function validateTolerance(value: number): void {
   if (value !== 5 && value !== 10 && value !== 15) throw new RangeError("Selected tolerance must be 5, 10, or 15 percent.");
-}
-
-function formatEpochSeconds(epochSeconds: number): string {
-  if (!Number.isSafeInteger(epochSeconds)) throw new RangeError("Scheduled arrival is outside the safe integer-second range.");
-  return new Date(epochSeconds * 1_000).toISOString();
 }
 
 export function haversineDistanceMeters(

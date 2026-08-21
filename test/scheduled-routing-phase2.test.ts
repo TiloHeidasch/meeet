@@ -27,6 +27,7 @@ import {
 } from "../lib/fixtures/scheduled-routing.ts";
 import { currentDateRange, fixtureFeedFiles } from "../scripts/fixture-schedule-transform.ts";
 import { MvgScheduledAccessSeedProvider } from "../lib/providers/mvg-scheduled-access.ts";
+import { clearMvgNearbyCache } from "../lib/providers/mvg-nearby.ts";
 import { handleMeetingPost } from "../lib/domain/meeting-api.ts";
 import { fixtureProviders } from "../lib/fixtures/providers.ts";
 import type { MeetingProviders } from "../lib/domain/providers.ts";
@@ -942,6 +943,7 @@ test("scheduled HTTP path handles fixture success, no seeds, and unavailable art
 });
 
 test("scheduled HTTP uses only MVG nearby access through the real endpoint seam", async () => {
+  clearMvgNearbyCache();
   const calls: string[] = [];
   const scheduledAccess = new MvgScheduledAccessSeedProvider({
     fetchImplementation: async (input) => {

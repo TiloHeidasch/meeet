@@ -1,5 +1,6 @@
 import "server-only";
 
+import { freezeEnvelope } from "./freeze.ts";
 import { isWithinOfficialMunichBoundary } from "../boundary.ts";
 import {
   CHANGE_TIME_PRESETS,
@@ -92,7 +93,8 @@ export function calculateScheduledSurface(input: ScheduledSurfaceInput): Schedul
     stationAreas,
     metadata,
   };
-  return deepFreeze(result);
+  freezeEnvelope(result);
+  return result;
 }
 
 /** Alias that names the result by its later API-facing purpose. */
@@ -103,7 +105,7 @@ export function createParticipantSurface(
   schedule: ScheduledRoutingArtifact,
   route: ReturnType<typeof routeScheduledEarliestArrivals> | null | undefined,
 ): ScheduledParticipantSurface {
-  const stationArrivals = route?.stationArrivals ?? schedule.stationAreas.map((area) => ({ stationAreaId: area.id, arrivalAt: null, elapsedSeconds: null }));
+  const stationArrivals = route?.stationArrivals ?? schedule.stationAreas.map((area) => ({ stationAreaId: area.id, arrivalEpochSeconds: null, elapsedSeconds: null }));
   return { participantId, stationArrivals };
 }
 
@@ -226,7 +228,8 @@ export async function evaluateScheduledStationAreaCandidates(
           tolerancePercent,
         );
     candidates.push(candidate);
-    await onCandidate?.(candidate);
+    const hookResult = onCandidate?.(candidate);
+    if (hookResult !== undefined) await hookResult;
   }
   return candidates;
 }

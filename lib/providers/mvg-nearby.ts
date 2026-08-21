@@ -9,13 +9,27 @@ import { createHttpJsonClient, type FetchImplementation } from "./http.ts";
 import {
   MVG_NEARBY_CACHE_DECIMAL_PLACES,
   MVG_NEARBY_URL,
+  MVG_UPSTREAM_REVALIDATE_SECONDS,
 } from "./mvg-constants.ts";
+import { runMvgCacheFill } from "./mvg-limiter.ts";
 
 export const MVG_NEARBY_TIMEOUT_MS = DEFAULT_PROVIDER_TIMEOUT_MS;
 export const MVG_NEARBY_MAX_RESPONSE_BYTES = 512 * 1024;
 export const MVG_NEARBY_MAX_STATION_RESULTS = 100;
 export const MVG_NEARBY_MAX_RADIUS_METERS = 1_500;
 export const MVG_NEARBY_WALKING_METERS_PER_MINUTE = 75;
+
+interface NearbyCacheEntry {
+  readonly expiresAt: number;
+  readonly stations: readonly MvgNearbyStation[];
+}
+
+const nearbyCache = new Map<string, NearbyCacheEntry>();
+
+/** Drop all cached MVG nearby lookups (used by tests for deterministic fetches). */
+export function clearMvgNearbyCache(): void {
+  nearbyCache.clear();
+}
 
 export interface MvgNearbyStation {
   id: string;
@@ -35,8 +49,18 @@ export async function fetchMvgNearbyStations(
   const url = new URL(MVG_NEARBY_URL);
   url.searchParams.set("latitude", nearbyCacheCoordinate(coordinate.latitude));
   url.searchParams.set("longitude", nearbyCacheCoordinate(coordinate.longitude));
-  const client = createHttpJsonClient(url.toString(), config, null, fetchImplementation);
-  return parseStations(await client.getJson(url.toString(), signal, { cache: "no-store" }));
+  const cacheKey = url.toString();
+  const cached = nearbyCache.get(cacheKey);
+  if (cached !== undefined && cached.expiresAt > Date.now()) {
+    // The returned station array reference is shared and read-only; callers
+    // must not mutate it (use a copy if mutation is required).
+    return cached.stations;
+  }
+  const client = createHttpJsonClient(cacheKey, config, null, fetchImplementation);
+  const stations = parseStations(await runMvgCacheFill(() => client.getJson(cacheKey, signal, { cache: "no-store" }), signal));
+  const ttlMs = MVG_UPSTREAM_REVALIDATE_SECONDS * 1000;
+  nearbyCache.set(cacheKey, { expiresAt: Date.now() + ttlMs, stations });
+  return stations;
 }
 
 export function findNearestMvgStation(

@@ -407,8 +407,13 @@ test("midnight rollover is routable from the preceding local service date", () =
   assert.equal(midnightConnection?.serviceDate, "2026-08-09");
   assert.equal(midnightConnection === undefined ? null : midnightConnection.arrivalEpochSeconds - midnightConnection.departureEpochSeconds, 15 * 60);
   const result = routeScheduledEarliestArrivals(schedule, [{ stationAreaId: "station-a", accessSeconds: 0 }], midnightStart, { walkingVelocityMetersPerSecond: 10, transferRadiusMeters: 100 }, window);
-  assert.equal(result.stationArrivals.find((arrival) => arrival.stationAreaId === "station-b")?.elapsedSeconds, 20 * 60);
-  assert.match(result.stationArrivals.find((arrival) => arrival.stationAreaId === "station-b")?.arrivalAt ?? "", /2026-08-09T22:10/);
+  const stationBArrival = result.stationArrivals.find((arrival) => arrival.stationAreaId === "station-b");
+  assert.equal(stationBArrival?.elapsedSeconds, 20 * 60);
+  assert.ok(stationBArrival?.arrivalEpochSeconds !== null, "station-b arrival epoch must be present");
+  assert.match(
+    new Date((stationBArrival!.arrivalEpochSeconds as number) * 1000).toISOString(),
+    /2026-08-09T22:10/,
+  );
 });
 
 test("local coordinate interchange is available without an all-pairs transfer graph", () => {
