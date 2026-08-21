@@ -482,9 +482,13 @@ function isScheduledArtifactCore(value: unknown): value is ScheduledArtifactCore
 }
 
 function hasExactKeys(value: Record<string, unknown>, expected: readonly string[]): boolean {
-  const actual = Object.keys(value).sort();
-  const wanted = [...expected].sort();
-  return actual.length === wanted.length && actual.every((key, index) => key === wanted[index]);
+  let actualCount = 0;
+  for (const key in value) {
+    if (!Object.prototype.hasOwnProperty.call(value, key)) continue;
+    if (!expected.includes(key)) return false;
+    actualCount += 1;
+  }
+  return actualCount === expected.length;
 }
 
 function bundleSummary(core: ScheduledArtifactCore): ScheduledBundleSummary {

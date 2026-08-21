@@ -397,6 +397,26 @@ test("bundle manifest rejects unsafe payload paths and size-limit violations", a
   await rm(directory, { recursive: true, force: true });
 });
 
+test("bundle loader rejects persisted manifests with missing or unexpected enumerable keys", async () => {
+  const artifact = compileScheduledArtifact({ sourceUrl: SCHEDULED_MVV_FEED_URL, rawArchiveBytes: new TextEncoder().encode("manifest-key-tamper"), feedFiles: compilerFeedFiles(), retrievedAt: "2026-08-11T10:00:00Z" });
+  const directory = await mkdtemp(join(tmpdir(), "meeet-manifest-keys-"));
+  const validPath = join(directory, "valid-bundle.json");
+  writeScheduledArtifact(validPath, artifact);
+  const validManifest = JSON.parse(await readFile(validPath, "utf8")) as Record<string, unknown>;
+
+  const missingManifest = { ...validManifest };
+  delete missingManifest.payloadFile;
+  const missingPath = join(directory, "missing-key-bundle.json");
+  await writeFile(missingPath, JSON.stringify(missingManifest), "utf8");
+  assert.throws(() => loadScheduledArtifact(missingPath, { now: "2026-08-11T12:00:00Z" }), ScheduleArtifactUnavailableError);
+
+  const unexpectedPath = join(directory, "unexpected-key-bundle.json");
+  await writeFile(unexpectedPath, JSON.stringify({ ...validManifest, unexpectedKey: true }), "utf8");
+  assert.throws(() => loadScheduledArtifact(unexpectedPath, { now: "2026-08-11T12:00:00Z" }), ScheduleArtifactUnavailableError);
+
+  await rm(directory, { recursive: true, force: true });
+});
+
 test("compiler defaults retrieval provenance to a canonical UTC whole-second instant", () => {
   const artifact = compileScheduledArtifact({
     sourceUrl: SCHEDULED_MVV_FEED_URL,
