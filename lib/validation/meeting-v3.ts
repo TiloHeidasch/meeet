@@ -173,17 +173,10 @@ export function validateScheduledMeetingResponse(
     if (input.participants[0] && isRecord(input.participants[0]) && input.participants[0].color !== "red") issues.push(issue(["participants", 0, "color"], "invalid_value", "The first participant must be red."));
     if (input.participants[1] && isRecord(input.participants[1]) && input.participants[1].color !== "blue") issues.push(issue(["participants", 1, "color"], "invalid_value", "The second participant must be blue."));
   }
-  if (!Array.isArray(input.stationAreas)) {
-    issues.push(issue(["stationAreas"], "invalid_type", "Response stationAreas must be an array."));
-  } else {
-    input.stationAreas.forEach((candidate, index) => validateStationArea(candidate, index, issues));
-    const ids = input.stationAreas.map((candidate) => isRecord(candidate) && typeof candidate.stationAreaId === "string" ? candidate.stationAreaId : "");
-    if (new Set(ids).size !== ids.length || ids.some((id) => id === "")) issues.push(issue(["stationAreas"], "duplicate", "Response stationAreaIds must be unique and non-empty."));
-  }
+  validateStationAreasOnce(input, request, context.stationAreaCatalog, issues, context.deadlineCheck);
   if (!isRecord(input.metadata)) issues.push(issue(["metadata"], "invalid_type", "Response metadata must be an object."));
   else validateResponseMetadata(input.metadata, issues);
-  if (isRecord(input.metadata)) validateResponseInvariants(input, input.metadata, request, issues, context.deadlineCheck);
-  if (context.stationAreaCatalog !== undefined) validateStationAreaCatalog(input, context.stationAreaCatalog, issues, context.deadlineCheck);
+  if (isRecord(input.metadata)) validateResponseInvariants(input, input.metadata, request, issues);
   if (input.status === "ok" && input.reason !== null) issues.push(issue(["reason"], "invalid_value", "Successful responses must have a null no-result reason."));
   if (input.status === "no-result" && input.reason === null) issues.push(issue(["reason"], "required", "No-result responses must disclose a reason."));
   if (isRecord(input.metadata) && Array.isArray(input.stationAreas) && isRecord(input.metadata.stationAreas) && input.metadata.stationAreas.count !== input.stationAreas.length) issues.push(issue(["metadata", "stationAreas", "count"], "inconsistent", "Station-area count must equal serialized station-area count."));
@@ -261,7 +254,7 @@ function parseSearchStartAt(value: unknown, issues: ScheduledValidationIssue[]):
   }
 }
 
-function validateResponseInvariants(value: Record<string, unknown>, metadata: Record<string, unknown>, request: ScheduledMeetingRequest, issues: ScheduledValidationIssue[], deadlineCheck?: ScheduledDeadlineCheck): void {
+function validateResponseInvariants(value: Record<string, unknown>, metadata: Record<string, unknown>, request: ScheduledMeetingRequest, issues: ScheduledValidationIssue[]): void {
   if (Array.isArray(value.participants) && value.participants.length === 2) {
     const expectedParticipants = request.participants;
     value.participants.forEach((participant, index) => {
@@ -316,24 +309,39 @@ function validateResponseInvariants(value: Record<string, unknown>, metadata: Re
     if (value.reason === "no-access-seeds" && !hasEmptySeedSet) issues.push(issue(["reason"], "inconsistent", "no-access-seeds requires at least one empty serialized or metadata access-seed set."));
     if (value.reason === "no-reachable-stations" && hasEmptySeedSet) issues.push(issue(["reason"], "inconsistent", "no-reachable-stations requires two non-empty access-seed sets."));
   }
-
-  const tolerance = surface.selectedTolerancePercent;
-  if (!isSelectedTolerance(tolerance)) return;
-  if (Array.isArray(value.stationAreas)) value.stationAreas.forEach((candidate, index) => {
-    if (index % 32 === 0) deadlineCheck?.("meeting-result");
-    validateDerivedStationAreaInvariant(candidate, index, value.status, tolerance, issues);
-  });
 }
 
-function validateStationAreaCatalog(input: Record<string, unknown>, catalog: ScheduledStationAreaCatalog, issues: ScheduledValidationIssue[], deadlineCheck?: ScheduledDeadlineCheck): void {
-  if (!Array.isArray(input.stationAreas)) return;
-  if (input.stationAreas.length !== catalog.entries.length) {
+function validateStationAreasOnce(
+  input: Record<string, unknown>,
+  request: ScheduledMeetingRequest,
+  catalog: ScheduledStationAreaCatalog | undefined,
+  issues: ScheduledValidationIssue[],
+  deadlineCheck?: ScheduledDeadlineCheck,
+): void {
+  if (!Array.isArray(input.stationAreas)) {
+    issues.push(issue(["stationAreas"], "invalid_type", "Response stationAreas must be an array."));
+    return;
+  }
+  const stationAreas = input.stationAreas;
+  for (let index = 0; index < stationAreas.length; index += 1) {
+    if (index % 32 === 0) deadlineCheck?.("meeting-result");
+    const candidate = stationAreas[index];
+    validateStationArea(candidate, index, issues);
+    // The derived-invariant tolerance intentionally uses the request tolerance
+    // (which equals the surface tolerance for valid responses) rather than the
+    // serialized surface tolerance, so a future reader does not "revert" this.
+    validateDerivedStationAreaInvariant(candidate, index, input.status, request.tolerancePercent, issues);
+  }
+  const ids = stationAreas.map((candidate) => isRecord(candidate) && typeof candidate.stationAreaId === "string" ? candidate.stationAreaId : "");
+  if (new Set(ids).size !== ids.length || ids.some((id) => id === "")) issues.push(issue(["stationAreas"], "duplicate", "Response stationAreaIds must be unique and non-empty."));
+  if (catalog === undefined) return;
+  if (stationAreas.length !== catalog.entries.length) {
     issues.push(issue(["stationAreas"], "inconsistent", "Response stationAreas must contain exactly the eligible station-area catalog."));
     return;
   }
   for (let index = 0; index < catalog.entries.length; index += 1) {
     if (index % 32 === 0) deadlineCheck?.("meeting-result");
-    const candidate = input.stationAreas[index];
+    const candidate = stationAreas[index];
     const entry = catalog.entries[index];
     if (!isRecord(candidate) || entry === undefined) continue;
     const path = ["stationAreas", index];
@@ -548,10 +556,6 @@ function isNullableWholeSecond(value: unknown): value is number | null {
 /** The scheduled calculation is minute-aligned end to end: seconds must be a multiple of 60. */
 function isWholeSecond(value: unknown): value is number {
   return typeof value === "number" && Number.isSafeInteger(value) && value >= 0 && value % 60 === 0;
-}
-
-function isSelectedTolerance(value: unknown): value is 5 | 10 | 15 {
-  return value === 5 || value === 10 || value === 15;
 }
 
 function isToleranceSatisfied(firstElapsedSeconds: number, secondElapsedSeconds: number, tolerancePercent: 5 | 10 | 15): boolean {

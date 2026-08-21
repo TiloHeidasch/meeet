@@ -95,8 +95,8 @@ test("precomputed transfer-neighbor scan routes end-to-end and is monotonic acro
   const wide = routeScheduledEarliestArrivals(fixture, seeds, SEARCH_START, { walkingVelocityMetersPerSecond: 1.4, transferRadiusMeters: TRANSFER_NEIGHBOR_RADIUS_METERS });
   assert.ok(narrow.reachableStationAreaCount > 0, "narrow radius reaches at least one area via precomputed neighbors");
   assert.ok(wide.reachableStationAreaCount >= narrow.reachableStationAreaCount, "wider radius reaches at least as many areas");
-  const narrowReached = new Set(narrow.stationArrivals.filter((arrival) => arrival.arrivalAt !== null).map((arrival) => arrival.stationAreaId));
+  const narrowReached = new Set(narrow.stationArrivals.filter((arrival) => arrival.arrivalEpochSeconds !== null).map((arrival) => arrival.stationAreaId));
   for (const arrival of wide.stationArrivals) {
-    if (narrowReached.has(arrival.stationAreaId)) assert.ok(arrival.arrivalAt !== null, `area ${arrival.stationAreaId} reachable at narrow radius stays reachable when wider`);
+    if (narrowReached.has(arrival.stationAreaId)) assert.ok(arrival.arrivalEpochSeconds !== null, `area ${arrival.stationAreaId} reachable at narrow radius stays reachable when wider`);
   }
 });

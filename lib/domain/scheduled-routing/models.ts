@@ -190,7 +190,8 @@ export interface ScheduledAccessSeed {
 
 export interface StationArrivalField {
   readonly stationAreaId: string;
-  readonly arrivalAt: string | null;
+  /** Raw arrival epoch seconds (UTC); the ISO string is derived only where consumed. */
+  readonly arrivalEpochSeconds: number | null;
   readonly elapsedSeconds: number | null;
 }
 

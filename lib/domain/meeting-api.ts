@@ -7,7 +7,6 @@ import {
   type ScheduledCalculationBasis,
   type ScheduledMeetingCalculationHooks,
 } from "./scheduled-routing/meeting.ts";
-import { buildScheduledStationAreaCatalog } from "./scheduled-routing/surface.ts";
 import {
   parseScheduledMeetingRequest,
   validateScheduledMeetingResponse,
@@ -241,9 +240,7 @@ export async function runScheduledMeetingCalculation(
     }, deadline.signal, loggingHooks);
     const result = calculation.response;
     deadline.check();
-    const stationAreaCatalog = calculationProviders.scheduledArtifact === undefined
-      ? undefined
-      : buildScheduledStationAreaCatalog(calculationProviders.scheduledArtifact, deadline.check);
+    const stationAreaCatalog = calculation.stationAreaCatalog;
     logInfo(`calculation: phase validating-result (${Date.now() - startedAt}ms)`);
     await hooks.onPhase?.("validating-result");
     if (!validateScheduledMeetingResponse(result, parsed, { stationAreaCatalog, deadlineCheck: deadline.check }).success) {

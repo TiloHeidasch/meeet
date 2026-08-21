@@ -1,5 +1,6 @@
 import "server-only";
 
+import { freezeEnvelope } from "./freeze.ts";
 import { ProviderNotConfiguredError, ProviderUnavailableError, type ScheduledAccessSeedProvider, type ScheduledAccessSeedCandidate } from "../providers.ts";
 import {
   buildScheduledStationAreaCatalog,
@@ -19,6 +20,7 @@ import {
   type ScheduledRoutingArtifact,
   type ScheduledDeadlineCheck,
   type ScheduledParticipantSurface,
+  type ScheduledStationAreaCatalog,
   type ItineraryEdge,
 } from "./models.ts";
 import type { ScheduledMeetingRequest, ScheduledMeetingParticipantInput } from "../../validation/meeting-v3.ts";
@@ -106,6 +108,7 @@ export interface ScheduledCalculationBasis {
 export interface ScheduledMeetingCalculation {
   readonly response: ScheduledMeetingResponse;
   readonly basis: ScheduledCalculationBasis;
+  readonly stationAreaCatalog: ScheduledStationAreaCatalog;
 }
 
 export async function calculateScheduledMeeting(
@@ -192,7 +195,7 @@ export async function calculateScheduledMeetingWithBasis(
     noResult,
     request.tolerancePercent,
     providers.deadlineCheck,
-    async (candidate) => {
+    (candidate) => {
       const area: ScheduledMeetingStationAreaDto = {
         stationAreaId: candidate.stationAreaId,
         name: candidate.name,
@@ -205,7 +208,7 @@ export async function calculateScheduledMeetingWithBasis(
         withinSelectedTolerance: candidate.withinSelectedTolerance,
       };
       stationAreas.push(area);
-      await hooks?.onStationVerdict?.({
+      return hooks?.onStationVerdict?.({
         stationAreaId: candidate.stationAreaId,
         name: candidate.name,
         coordinate: candidate.coordinate,
@@ -216,7 +219,7 @@ export async function calculateScheduledMeetingWithBasis(
   );
   providers.deadlineCheck?.("meeting-result");
   await hooks?.onStage?.("response-build");
-  const response: ScheduledMeetingResponse = deepFreeze({
+  const response: ScheduledMeetingResponse = {
     contractVersion: "meeet-meeting/v3",
     status: noResult ? "no-result" : "ok",
     reason: noAccessSeeds ? "no-access-seeds" : firstReachable === 0 || secondReachable === 0 ? "no-reachable-stations" : null,
@@ -266,7 +269,8 @@ export async function calculateScheduledMeetingWithBasis(
       coverage: "munich-scheduled-station-area-meeting/v1",
       origins: { coverage: "globally-valid-origin/v1" },
     },
-  });
+  };
+  freezeEnvelope(response);
   const basis: ScheduledCalculationBasis = {
     canonicalRequest: cloneRequest(request),
     canonicalAccessSeeds: [
@@ -298,7 +302,9 @@ export async function calculateScheduledMeetingWithBasis(
     stationAreas: response.stationAreas.map((stationArea) => ({ ...stationArea })),
     itineraryGraph: [firstRoute?.predecessorByArea ?? {}, secondRoute?.predecessorByArea ?? {}],
   };
-  return deepFreeze({ response, basis });
+  const calculation: ScheduledMeetingCalculation = { response, basis, stationAreaCatalog };
+  freezeEnvelope(calculation);
+  return calculation;
 }
 
 function participantResponse(
