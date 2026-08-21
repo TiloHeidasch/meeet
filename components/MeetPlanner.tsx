@@ -3,7 +3,7 @@
 import { useEffect, useMemo, useRef, useState, type FormEvent, type KeyboardEvent } from "react";
 import dynamic from "next/dynamic";
 import { validateMeetingResponse, type MeetingRequest, type MeetingResponse, type MeetingStationArea, type StationAreaMode } from "@/lib/client/meeting-response";
-import { validateStationAreaDetails, type StationAreaDetail } from "@/lib/client/station-area-details";
+import { validateStationAreaDetails, type StationAreaDetail, type ItineraryLeg } from "@/lib/client/station-area-details";
 import { CALCULATION_PROGRESS_PHASES, readCalculationStream, CalculationStreamError, type CalculationProgressPhase, type StationVerdict } from "@/lib/client/calculation-stream";
 import { messages, useLocale, type Locale, type Messages } from "@/lib/client/i18n";
 import { BRAND_MARK_LETTER_D, BRAND_MARK_PLATE_D } from "@/lib/client/brand-mark";
@@ -25,6 +25,7 @@ function errorCode(value: unknown) { return isRecord(value) && isRecord(value.er
 export function nextStart(): string { return new Date(Math.ceil((Date.now() + 300_000) / 60_000) * 60_000).toISOString(); }
 function formatDate(locale: Locale, iso: string) { return messages[locale].time.formatDate(iso); }
 function formatSeconds(locale: Locale, value: number | null) { if (value === null) return messages[locale].time.noScheduledArrival; return messages[locale].time.formatSeconds(value); }
+function formatClock(locale: Locale, epochSeconds: number) { return new Date(epochSeconds * 1000).toLocaleTimeString(locale, { hour: "2-digit", minute: "2-digit" }); }
 type ChangeTimePreset = "quick" | "medium" | "long";
 function changeTimePresets(locale: Locale): readonly { readonly value: ChangeTimePreset; readonly label: string; readonly hint: string }[] { return [
   { value: "quick", label: messages[locale].changeTime.quick, hint: messages[locale].changeTime.quickHint },
@@ -217,8 +218,36 @@ function DetailPanel({ detail, area, loading, error, noResult, reason, expired, 
   else if (noResult && area) content = <><strong>{area.name}</strong><p>{t.detailPanel.noResult}</p><div className="participant-details"><article><h3>{t.detailPanel.participant(1)}</h3><p>{unavailableCopy(locale, reason)}</p></article><article><h3>{t.detailPanel.participant(2)}</h3><p>{unavailableCopy(locale, reason)}</p></article></div></>;
   else if (loading) content = <p>{t.detailPanel.loading(area?.name ?? t.detailPanel.thisStationArea)}</p>;
   else if (error) content = <p role="alert">{error}</p>;
-  else if (detail) content = <><strong>{detail.stationArea.name}</strong><p>{classificationLabel(locale, detail.stationArea.classification)} · {t.detailPanel.tolerance(detail.basis.selectedTolerancePercent)}</p><p>{t.detailPanel.classificationExplanation(detail.basis.selectedTolerancePercent)}</p><DetailProvenance basis={detail.basis}/><div className="participant-details">{detail.participants.map((participant) => <article key={participant.id}><h3>{t.detailPanel.participant(participant.color === "red" ? 1 : 2)}</h3>{participant.status === "available" ? <p><strong>{formatSeconds(locale, participant.terminal.totalSeconds)}</strong> {t.detailPanel.total} · {t.detailPanel.arriveAt} {formatDate(locale, participant.terminal.arrivalAt!)}</p> : <p>{unavailableCopy(locale, participant.unavailableReason)}</p>}</article>)}</div></>;
+  else if (detail) content = <><strong>{detail.stationArea.name}</strong><p>{classificationLabel(locale, detail.stationArea.classification)} · {t.detailPanel.tolerance(detail.basis.selectedTolerancePercent)}</p><p>{t.detailPanel.classificationExplanation(detail.basis.selectedTolerancePercent)}</p><DetailProvenance basis={detail.basis}/><div className="participant-details">{detail.participants.map((participant) => <article key={participant.id}><h3>{t.detailPanel.participant(participant.color === "red" ? 1 : 2)}</h3>{participant.status === "available" ? <><p><strong>{formatSeconds(locale, participant.terminal.totalSeconds)}</strong> {t.detailPanel.total} · {t.detailPanel.arriveAt} {formatDate(locale, participant.terminal.arrivalAt!)}</p>{participant.itinerary && participant.itinerary.length > 0 ? <ItineraryList legs={participant.itinerary} locale={locale} t={t.detailPanel} /> : null}</> : <p>{unavailableCopy(locale, participant.unavailableReason)}</p>}</article>)}</div></>;
   return <section className="station-detail-panel" aria-labelledby="station-detail-heading"><h2 id="station-detail-heading">{t.detailPanel.heading}</h2><div className="station-detail-live" aria-live="polite" aria-atomic="true">{content}</div></section>;
+}
+
+function ItineraryList({ legs, locale, t }: { legs: readonly ItineraryLeg[]; locale: Locale; t: Messages["detailPanel"] }) {
+  return (
+    <>
+      <h4 className="itinerary-heading">{t.itineraryHeading}</h4>
+      <ul className="itinerary-legs">
+        {legs.map((leg, index) => (
+          <li key={index} className="itinerary-leg">
+            {leg.kind === "walk" ? (
+              <>
+                <span className="leg-kind leg-walk">{t.walk}</span>
+                <span className="leg-duration">{formatSeconds(locale, leg.endEpochSeconds - leg.startEpochSeconds)}</span>
+                <span className="leg-route">{leg.fromAreaName !== null ? t.fromTo(leg.fromAreaName, leg.toAreaName) : t.legTo(leg.toAreaName)}</span>
+              </>
+            ) : (
+              <>
+                <span className="line-badge">{leg.line}</span>
+                <span className="leg-route">{t.fromTo(leg.fromAreaName, leg.toAreaName)}</span>
+                <span className="leg-times">{formatClock(locale, leg.startEpochSeconds)}–{formatClock(locale, leg.endEpochSeconds)}</span>
+                {leg.headsign ? <span className="leg-headsign">{leg.headsign}</span> : null}
+              </>
+            )}
+          </li>
+        ))}
+      </ul>
+    </>
+  );
 }
 
 export default function MeetPlanner({ capability }: { capability: PlannerCapability }) {
