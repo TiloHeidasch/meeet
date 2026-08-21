@@ -28,3 +28,5 @@ jobs:
         run: npx tsc --noEmit
       - name: Lint
         run: npm run lint
+      - name: Brand icon drift check
+        run: npm run icons:brand && npm run icons:check

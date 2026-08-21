@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+  <title>meeet</title>
+  <!-- Pin-headed plate: rounded square (r 13) with a 45-degree pin notch
+       cut into the bottom edge (tip at 32,46; feet at 20/44,58). -->
+  <path d="M 19 6 L 45 6 A 13 13 0 0 1 58 19 L 58 45 A 13 13 0 0 1 45 58 L 44 58 L 32 46 L 20 58 L 19 58 A 13 13 0 0 1 6 45 L 6 19 A 13 13 0 0 1 19 6 Z" fill="#202522"/>
+  <!-- Bold geometric M: 8-unit stems at x 11..19 and 45..53, counter V
+       from y 12 down to the apex at 32,40. -->
+  <path d="M 11 12 L 53 12 L 53 40 L 45 40 L 32 40 L 39 12 L 25 12 L 32 40 L 19 40 L 11 40 Z" fill="#f0ca43"/>
+</svg>
