@@ -41,6 +41,39 @@ test.describe("client UI localization", () => {
     }
   });
 
+  test("German current-location control has a participant-specific name and localized success", async ({ browser }) => {
+    const context = await browser.newContext({ baseURL: BASE_URL, locale: "de-DE" });
+    const page = await context.newPage();
+    try {
+      await page.addInitScript(() => {
+        Object.defineProperty(navigator, "geolocation", { configurable: true, value: { getCurrentPosition: (success: (position: unknown) => void) => success({ coords: { latitude: 48.137154, longitude: 11.576124 } }) } });
+      });
+      await setup(page, "ok"); await openPlannerGerman(page);
+      await expect(page.getByRole("button", { name: "Meinen aktuellen Standort verwenden · Teilnehmer 1" })).toBeVisible();
+      await expect(page.getByRole("button", { name: "Meinen aktuellen Standort verwenden · Teilnehmer 2" })).toBeVisible();
+      await page.getByRole("button", { name: "Meinen aktuellen Standort verwenden · Teilnehmer 1" }).click();
+      await expect(page.getByRole("combobox", { name: "Startpunkt von Teilnehmer 1" })).toHaveValue("Koordinaten 48.13715, 11.57612");
+      await expect(page.getByText("Aktueller Standort hinzugefügt", { exact: true })).toBeVisible();
+    } finally {
+      await context.close();
+    }
+  });
+
+  test("German current-location permission errors are localized", async ({ browser }) => {
+    const context = await browser.newContext({ baseURL: BASE_URL, locale: "de-DE" });
+    const page = await context.newPage();
+    try {
+      await page.addInitScript(() => {
+        Object.defineProperty(navigator, "geolocation", { configurable: true, value: { getCurrentPosition: (_success: unknown, failure: (error: unknown) => void) => failure({ code: 1 }) } });
+      });
+      await setup(page, "ok"); await openPlannerGerman(page);
+      await page.getByRole("button", { name: "Meinen aktuellen Standort verwenden · Teilnehmer 2" }).click();
+      await expect(page.locator("fieldset.origin-card").filter({ has: page.getByRole("combobox", { name: "Startpunkt von Teilnehmer 2" }) }).getByRole("alert")).toContainText("Der Standortzugriff wurde verweigert");
+    } finally {
+      await context.close();
+    }
+  });
+
   test("Non-German browser preferences fall back to English", async ({ browser }) => {
     const context = await browser.newContext({ baseURL: BASE_URL, locale: "fr-FR" });
     const page = await context.newPage();
@@ -91,7 +124,12 @@ test.describe("client UI localization", () => {
       await setup(page, "ok", false, true, 800);
       await openPlannerGerman(page);
       await page.getByRole("button", { name: "meeet!" }).click();
-      await expect(page.getByText("Wähle einen Startpunkt im MVV-Gebiet.", { exact: true })).toBeVisible();
+      const fieldErrors = page.locator(".origin-card .input-error-text");
+      await expect(fieldErrors).toHaveCount(2);
+      await expect(fieldErrors).toHaveText([
+        "Wähle einen Startpunkt im MVV-Gebiet.",
+        "Wähle einen Startpunkt im MVV-Gebiet.",
+      ]);
     } finally {
       await context.close();
     }
@@ -105,7 +143,12 @@ test.describe("client UI localization", () => {
       await page.goto("/");
       await expect(page.getByRole("heading", { name: /Find the middle/ })).toBeVisible();
       await page.getByRole("button", { name: "meeet!" }).click();
-      await expect(page.getByText("Choose a starting point in the MVV area.", { exact: true })).toBeVisible();
+      const fieldErrors = page.locator(".origin-card .input-error-text");
+      await expect(fieldErrors).toHaveCount(2);
+      await expect(fieldErrors).toHaveText([
+        "Choose a starting point in the MVV area.",
+        "Choose a starting point in the MVV area.",
+      ]);
     } finally {
       await context.close();
     }
