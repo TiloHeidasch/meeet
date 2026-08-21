@@ -709,7 +709,7 @@ test.describe("v3 Munich meeting surface", () => {
       expect(bounds.south).toBeLessThanOrEqual(lat);
       expect(bounds.north).toBeGreaterThanOrEqual(lat);
     }
-    // The red and blue areas remain rendered, but neither can expand the fit.
+    // The red and blue areas remain in the station-area source data, but neither can expand the fit.
     expect(bounds.west).toBeGreaterThan(11.555);
     expect(bounds.east).toBeLessThan(11.615);
     expect(bounds.east - bounds.west).toBeLessThan(0.2);
@@ -718,7 +718,16 @@ test.describe("v3 Munich meeting surface", () => {
   });
 
   test("fits no-result surfaces to origins and only the first ranked unclassified area", async ({ page }) => {
-    await setup(page, "no-access-seeds"); await openPlanner(page); await selectOrigin(page, 0, "Marienplatz"); await selectOrigin(page, 1, "Ostbahnhof");
+    await setup(page, "no-access-seeds");
+    await page.unroute("**/api/meeting/calculate/stream");
+    await page.route("**/api/meeting/calculate/stream", async (route) => {
+      const request = route.request().postDataJSON();
+      const fixture = v3Fixture(request, "no-access-seeds");
+      const northern = fixture.stationAreas.find((area) => area.stationAreaId === "area-unclassified");
+      if (northern) northern.coordinate = { latitude: 48.16, longitude: 11.59 };
+      await route.fulfill({ status: 200, contentType: "text/event-stream", body: `${progressStreamFrames(request, "no-access-seeds")}event: ref\ndata: {"calculationRef":"fixture-calculation-ref"}\n\nevent: result\ndata: ${JSON.stringify(fixture)}\n\n` });
+    });
+    await openPlanner(page); await selectOrigin(page, 0, "Marienplatz"); await selectOrigin(page, 1, "Ostbahnhof");
     await page.getByRole("button", { name: "meeet!" }).click();
     await expect(page.getByText("No result yet", { exact: true })).toBeVisible();
     await expect(page.locator('.map-frame[data-map-state="ready"]')).toHaveAttribute("data-station-markers-ready", "true");
@@ -729,8 +738,9 @@ test.describe("v3 Munich meeting surface", () => {
       expect(bounds.south).toBeLessThanOrEqual(lat);
       expect(bounds.north).toBeGreaterThanOrEqual(lat);
     }
-    // The remaining areas are selectable/rendered, but must not influence fitting.
+    // The remaining areas remain in the station-area source data, but must not influence fitting.
     expect(bounds.west).toBeGreaterThan(11.555);
+    expect(bounds.north).toBeLessThan(48.16);
     expect(bounds.east - bounds.west).toBeLessThan(0.2);
     expect(bounds.north - bounds.south).toBeLessThan(0.2);
     await expect(page.getByRole("button", { name: "Refocus map" })).toBeEnabled();
