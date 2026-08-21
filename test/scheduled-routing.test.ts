@@ -3,6 +3,8 @@ import test from "node:test";
 
 import {
   addServiceDays,
+  calculateScheduledCompiledArtifactId,
+  calculateScheduledContentHash,
   calculateScheduledSurface,
   compareScheduledConnections,
   importGtfsSchedule,
@@ -243,6 +245,26 @@ test("GTFS import validates station areas, IDs, coordinates, columns, and freeze
   assert.throws(() => importFixtureFiles(badCoordinate), /coordinate bounds/);
   const badParent = { ...FIXTURE_FILES, "stops.txt": FIXTURE_FILES["stops.txt"].replace("station-b\n", "missing-parent\n") };
   assert.throws(() => importFixtureFiles(badParent), /parent_station/);
+});
+
+test("batched canonical hashing preserves the pre-change fixture identity", () => {
+  const expectedContentHash = "eba14665b5b4b7ebe538a981b28dc3cd56a0a818d9fe2cb5b7d62515c12c9084";
+  const expectedCompiledArtifactId = "94c2776a25c095fdcebb85a47e26322dd95deaaf7c8952e5ef3b176923d0d51e";
+  const { provenance, ...core } = FIXTURE_SCHEDULED_ARTIFACT;
+  const { compiledArtifactId, ...identity } = provenance;
+
+  assert.equal(calculateScheduledContentHash(identity.feedId, identity.timeZone, identity.files), expectedContentHash);
+  assert.equal(identity.contentHash, expectedContentHash);
+  assert.equal(calculateScheduledCompiledArtifactId(core, identity), expectedCompiledArtifactId);
+  assert.equal(compiledArtifactId, expectedCompiledArtifactId);
+});
+
+test("batched canonical hashing preserves UTF-8 bytes across a chunk boundary", () => {
+  const files = [{ fileName: `${"x".repeat(65_470)}😀`, sha256: "b".repeat(64), byteLength: 123 }];
+  assert.equal(
+    calculateScheduledContentHash("batch-fixture", "Europe/Berlin", files),
+    "bc5ef0a390e1d974edcdf4d34e55bef64b033c51a65041b9c07ef7612446e26c",
+  );
 });
 
 test("GTFS importer accepts a BOM immediately before a quoted header and quoted CSV values", () => {
