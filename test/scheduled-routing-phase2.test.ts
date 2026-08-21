@@ -19,6 +19,7 @@ import {
 } from "../lib/validation/meeting-v3.ts";
 import {
   calculateScheduledMeeting,
+  calculateScheduledMeetingWithBasis,
   type ScheduledMeetingProviderBundle,
 } from "../lib/domain/scheduled-routing/meeting.ts";
 import {
@@ -33,7 +34,10 @@ import { fixtureProviders } from "../lib/fixtures/providers.ts";
 import type { MeetingProviders } from "../lib/domain/providers.ts";
 import { compareScheduledIds, importGtfsSchedule, type GtfsFeedFiles } from "../lib/domain/scheduled-routing/gtfs.ts";
 import type { ScheduledRoutingArtifact } from "../lib/domain/scheduled-routing/models.ts";
-import { buildScheduledStationAreaCatalog } from "../lib/domain/scheduled-routing/surface.ts";
+import {
+  buildScheduledStationAreaCatalog,
+  clearScheduledStationAreaCatalogCache,
+} from "../lib/domain/scheduled-routing/surface.ts";
 import { createMeetingProviders } from "../lib/providers/factory.ts";
 import { MVG_NEARBY_URL } from "../lib/providers/mvg-constants.ts";
 import { ScheduledCalculationDeadlineError } from "../lib/domain/scheduled-admission.ts";
@@ -718,6 +722,83 @@ test("v3 response validation derives exact station-area classification and rejec
   oneSidedArea.fasterParticipant = null;
   oneSidedArea.withinSelectedTolerance = false;
   assert.equal(validateScheduledMeetingResponse(oneSidedTamper, parsed.data).success, false);
+});
+
+test("station-area catalogs are cached by artifact object and shared by strict validation", async () => {
+  clearScheduledStationAreaCatalogCache();
+  const artifact = stationAreaMeetingArtifact();
+  const catalog = buildScheduledStationAreaCatalog(artifact);
+  assert.equal(Object.isFrozen(catalog), true);
+  assert.equal(Object.isFrozen(catalog.entries), true);
+  const catalogEntry = catalog.entries[0];
+  assert.ok(catalogEntry !== undefined);
+  assert.equal(Object.isFrozen(catalogEntry), true);
+  assert.equal(Object.isFrozen(catalogEntry.coordinate), true);
+  const originalEntryName = catalogEntry.name;
+  const originalLatitude = catalogEntry.coordinate.latitude;
+  assert.throws(() => {
+    (catalogEntry as unknown as { name: string }).name = "Tampered catalog name";
+  }, TypeError);
+  assert.throws(() => {
+    (catalogEntry.coordinate as unknown as { latitude: number }).latitude = 0;
+  }, TypeError);
+  assert.equal(catalogEntry.name, originalEntryName);
+  assert.equal(catalogEntry.coordinate.latitude, originalLatitude);
+  assert.strictEqual(buildScheduledStationAreaCatalog(artifact), catalog);
+
+  const replacementArtifact: ScheduledRoutingArtifact = { ...artifact };
+  const replacementCatalog = buildScheduledStationAreaCatalog(replacementArtifact);
+  assert.equal(replacementArtifact.provenance.compiledArtifactId, artifact.provenance.compiledArtifactId);
+  assert.deepEqual(replacementCatalog, catalog);
+  assert.notStrictEqual(replacementCatalog, catalog);
+
+  const parsed = parseScheduledMeetingRequest(V3_REQUEST);
+  assert.equal(parsed.success, true);
+  if (!parsed.success) return;
+  const firstCalculation = await calculateScheduledMeetingWithBasis(parsed.data, {
+    artifact,
+    access: stationAreaMeetingAccessProvider(),
+  });
+  const secondCalculation = await calculateScheduledMeetingWithBasis(parsed.data, {
+    artifact,
+    access: stationAreaMeetingAccessProvider(),
+  });
+  assert.strictEqual(firstCalculation.stationAreaCatalog, secondCalculation.stationAreaCatalog);
+  assert.equal(validateScheduledMeetingResponse(firstCalculation.response, parsed.data, {
+    stationAreaCatalog: firstCalculation.stationAreaCatalog,
+  }).success, true);
+  assert.equal(validateScheduledMeetingResponse(secondCalculation.response, parsed.data, {
+    stationAreaCatalog: secondCalculation.stationAreaCatalog,
+  }).success, true);
+});
+
+test("station-area catalog cache preserves its immediate deadline checkpoint and does not publish interrupted builds", () => {
+  clearScheduledStationAreaCatalogCache();
+  const artifact = stationAreaMeetingArtifact();
+  const baseCatalog = buildScheduledStationAreaCatalog(artifact);
+  let cacheHitCheckpoints = 0;
+  buildScheduledStationAreaCatalog(artifact, () => {
+    cacheHitCheckpoints += 1;
+  });
+  assert.equal(cacheHitCheckpoints, 1);
+
+  const expandedArtifact: ScheduledRoutingArtifact = {
+    ...artifact,
+    stationAreas: Array.from({ length: 33 }, (_, index) => artifact.stationAreas[index % artifact.stationAreas.length]!),
+  };
+  let interruptedCheckpoints = 0;
+  assert.throws(() => buildScheduledStationAreaCatalog(expandedArtifact, () => {
+    interruptedCheckpoints += 1;
+    if (interruptedCheckpoints === 2) throw new Error("deadline");
+  }), /deadline/);
+  assert.equal(interruptedCheckpoints, 2);
+  interruptedCheckpoints = 0;
+  const fullCatalog = buildScheduledStationAreaCatalog(expandedArtifact, () => {
+    interruptedCheckpoints += 1;
+  });
+  assert.equal(interruptedCheckpoints, 2);
+  const expectedEntryCount = expandedArtifact.stationAreas.filter((area) => baseCatalog.entries.some((entry) => entry.stationAreaId === area.id)).length;
+  assert.equal(fullCatalog.entries.length, expectedEntryCount);
 });
 
 test("v3 response validation rejects arrival and access seconds that are not minute-aligned", async () => {
