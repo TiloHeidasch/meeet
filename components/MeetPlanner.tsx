@@ -595,7 +595,7 @@ export default function MeetPlanner({ capability }: { capability: PlannerCapabil
           </section>
           <section className="map-column">
             <div className="map-viewport">
-              <MapLibreCanvas participants={mapParticipants} stationAreas={stationAreas} resultState={result ? (noResult ? "no-result" : "ok") : "initial"} selectedStationAreaId={selectedId} onStationAreaSelect={(id) => void selectStationArea(id)} />
+              <MapLibreCanvas participants={mapParticipants} stationAreas={stationAreas} fitStationArea={result ? sortedStationAreas[0] ?? null : null} resultState={result ? (noResult ? "no-result" : "ok") : "initial"} selectedStationAreaId={selectedId} onStationAreaSelect={(id) => void selectStationArea(id)} />
               {result && <Legend />}
             </div>
             {result && <StationAreaList areas={sortedStationAreas} selectedId={selectedId} resultState={noResult ? "no-result" : "ok"} detail={detail} detailLoading={detailLoading} detailError={detailError} reason={result.reason} expired={detailExpired} onSelect={(id) => void selectStationArea(id)} onRecalculate={() => void calculate()} />}

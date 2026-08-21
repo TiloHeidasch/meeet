@@ -9,7 +9,7 @@ import { STATION_ICON_PADDING, STATION_ICON_VISUAL_SIZES } from "@/lib/client/st
 import { messages, useLocale, type Locale } from "@/lib/client/i18n";
 
 export type MapParticipant = { id: string; number: number; label: string; latitude: number; longitude: number; color: "#e85d4a" | "#3d70c9" };
-type Props = { participants: readonly MapParticipant[]; stationAreas: readonly MeetingStationArea[]; resultState: "initial" | "ok" | "no-result"; selectedStationAreaId?: string | null; onStationAreaSelect?: (stationAreaId: string) => void };
+type Props = { participants: readonly MapParticipant[]; stationAreas: readonly MeetingStationArea[]; fitStationArea?: MeetingStationArea | null; resultState: "initial" | "ok" | "no-result"; selectedStationAreaId?: string | null; onStationAreaSelect?: (stationAreaId: string) => void };
 type Geometry = { type: "MultiPolygon"; coordinates: number[][][][] } | { type: "Point"; coordinates: [number, number] };
 type FeatureCollection = { type: "FeatureCollection"; features: Array<{ type: "Feature"; id: string; properties: Record<string, string>; geometry: Geometry }> };
 const MUNICH_CENTER: [number, number] = [11.576, 48.137];
@@ -243,12 +243,10 @@ function sortedOriginPoints(participants: readonly MapParticipant[]): Array<[num
     .sort((a, b) => a[0] - b[0] || a[1] - b[1]);
 }
 
-function renderedLocationPoints(participants: readonly MapParticipant[], stationAreas: readonly MeetingStationArea[]): Array<[number, number]> {
+function renderedLocationPoints(participants: readonly MapParticipant[], fitStationArea: MeetingStationArea | null | undefined): Array<[number, number]> {
   const points = sortedOriginPoints(participants);
-  if (stationAreas.length > 0) {
-    for (const area of stationAreas) {
-      if (Number.isFinite(area.coordinate.latitude) && Number.isFinite(area.coordinate.longitude)) points.push([area.coordinate.longitude, area.coordinate.latitude]);
-    }
+  if (fitStationArea && Number.isFinite(fitStationArea.coordinate.latitude) && Number.isFinite(fitStationArea.coordinate.longitude)) {
+    points.push([fitStationArea.coordinate.longitude, fitStationArea.coordinate.latitude]);
   }
   return points;
 }
@@ -273,7 +271,7 @@ function fitToPoints(map: Map, points: Array<[number, number]>) {
   map.fitBounds(bounds, { padding: REFOCUS_PADDING, maxZoom: REFOCUS_MAX_ZOOM, ...duration });
 }
 
-export default function MapLibreCanvas({ participants, stationAreas, resultState, selectedStationAreaId = null, onStationAreaSelect }: Props) {
+export default function MapLibreCanvas({ participants, stationAreas, fitStationArea = null, resultState, selectedStationAreaId = null, onStationAreaSelect }: Props) {
   const locale = useLocale(); const t = messages[locale];
   const containerRef = useRef<HTMLDivElement>(null);
   const mapRef = useRef<Map | null>(null);
@@ -285,6 +283,7 @@ export default function MapLibreCanvas({ participants, stationAreas, resultState
   const lastFitSignature = useRef("");
   const lastFitPoints = useRef<Array<[number, number]>>([]);
   const lastOriginSignature = useRef("");
+  const lastFitTargetSignature = useRef("");
   const inputs = useRef({ onStationAreaSelect });
   const [state, setState] = useState<"loading" | "ready" | "unavailable">("loading");
   const [markersReady, setMarkersReady] = useState(false);
@@ -428,6 +427,7 @@ export default function MapLibreCanvas({ participants, stationAreas, resultState
       lastFitSignature.current = "";
       lastFitPoints.current = [];
       lastOriginSignature.current = "";
+      lastFitTargetSignature.current = "";
       fitRef.current = () => {};
       mapRef.current = null;
     };
@@ -446,29 +446,36 @@ export default function MapLibreCanvas({ participants, stationAreas, resultState
     territorySource?.setData(generated);
     setTerritoryFeatureCount(generated.features.length);
 syncOrigins(map, participants, markersRef, locale);
-    const points = renderedLocationPoints(participants, stationAreas);
+    const points = renderedLocationPoints(participants, fitStationArea);
     refocusControlRef.current?.setDisabled(points.length === 0);
     const sorted = [...points].sort((a, b) => a[0] - b[0] || a[1] - b[1]);
-    const signature = JSON.stringify(sorted);
+    // Keep the ranked area's identity in the signature even when coordinates match.
+    const fitTargetSignature = JSON.stringify(fitStationArea ? [fitStationArea.stationAreaId, fitStationArea.coordinate.longitude, fitStationArea.coordinate.latitude] : null);
+    const signature = JSON.stringify({ points: sorted, fitTarget: fitTargetSignature });
     if (signature !== lastFitSignature.current) {
       const previous = lastFitPoints.current;
       const originSignature = JSON.stringify(sortedOriginPoints(participants));
       const originsChanged = originSignature !== lastOriginSignature.current;
       const grew = sorted.some((point) => !previous.some((prev) => prev[0] === point[0] && prev[1] === point[1]));
+      const fitTargetChanged = fitTargetSignature !== lastFitTargetSignature.current;
       lastFitSignature.current = signature;
       lastFitPoints.current = sorted;
       lastOriginSignature.current = originSignature;
+      lastFitTargetSignature.current = fitTargetSignature;
       fitRef.current = () => fitToPoints(map, points);
-      if (originsChanged || grew) fitToPoints(map, points);
+      if (originsChanged || grew || fitTargetChanged) fitToPoints(map, points);
     }
     const markReady = () => {
       if (!map || map !== mapRef.current) return;
-      const ready = stationAreas.length === 0 || stationAreas.every((area) => map.queryRenderedFeatures(map.project([area.coordinate.longitude, area.coordinate.latitude]), { layers: STATION_ICON_LAYERS }).some((feature) => feature.properties?.stationAreaId === area.stationAreaId));
+      // Source features remain available even when the focused viewport places a
+      // later station area outside the canvas.
+      const sourceStationIds = new Set(map.querySourceFeatures("meeet-station-areas").map((feature) => feature.properties?.stationAreaId));
+      const ready = stationAreas.length === 0 || stationAreas.every((area) => sourceStationIds.has(area.stationAreaId));
       if (ready) setMarkersReady(true);
     };
     map.once("idle", markReady);
     return () => { map.off("idle", markReady); };
-  }, [stationAreas, stations, participants, state, resultState, locale]);
+  }, [stationAreas, stations, participants, fitStationArea, state, resultState, locale]);
 
   useEffect(() => {
     const map = mapRef.current;
