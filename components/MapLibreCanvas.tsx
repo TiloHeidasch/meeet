@@ -243,7 +243,7 @@ function sortedOriginPoints(participants: readonly MapParticipant[]): Array<[num
     .sort((a, b) => a[0] - b[0] || a[1] - b[1]);
 }
 
-function renderedLocationPoints(participants: readonly MapParticipant[], fitStationArea: MeetingStationArea | null | undefined): Array<[number, number]> {
+function cameraFitPoints(participants: readonly MapParticipant[], fitStationArea: MeetingStationArea | null | undefined): Array<[number, number]> {
   const points = sortedOriginPoints(participants);
   if (fitStationArea && Number.isFinite(fitStationArea.coordinate.latitude) && Number.isFinite(fitStationArea.coordinate.longitude)) {
     points.push([fitStationArea.coordinate.longitude, fitStationArea.coordinate.latitude]);
@@ -446,7 +446,7 @@ export default function MapLibreCanvas({ participants, stationAreas, fitStationA
     territorySource?.setData(generated);
     setTerritoryFeatureCount(generated.features.length);
 syncOrigins(map, participants, markersRef, locale);
-    const points = renderedLocationPoints(participants, fitStationArea);
+    const points = cameraFitPoints(participants, fitStationArea);
     refocusControlRef.current?.setDisabled(points.length === 0);
     const sorted = [...points].sort((a, b) => a[0] - b[0] || a[1] - b[1]);
     // Keep the ranked area's identity in the signature even when coordinates match.
@@ -463,15 +463,14 @@ syncOrigins(map, participants, markersRef, locale);
       lastOriginSignature.current = originSignature;
       lastFitTargetSignature.current = fitTargetSignature;
       fitRef.current = () => fitToPoints(map, points);
-      if (originsChanged || grew || fitTargetChanged) fitToPoints(map, points);
+      if (originsChanged || grew || (fitStationArea !== null && fitTargetChanged)) fitToPoints(map, points);
     }
     const markReady = () => {
       if (!map || map !== mapRef.current) return;
-      // Source features remain available even when the focused viewport places a
-      // later station area outside the canvas.
-      const sourceStationIds = new Set(map.querySourceFeatures("meeet-station-areas").map((feature) => feature.properties?.stationAreaId));
-      const ready = stationAreas.length === 0 || stationAreas.every((area) => sourceStationIds.has(area.stationAreaId));
-      if (ready) setMarkersReady(true);
+      // `idle` means the style and the synchronous GeoJSON update have settled.
+      // Do not query rendered/source features here: symbols outside the camera
+      // (or outside a loaded tile) are valid rendered data, not a readiness failure.
+      if (map.isStyleLoaded() && map.getSource("meeet-station-areas")) setMarkersReady(true);
     };
     map.once("idle", markReady);
     return () => { map.off("idle", markReady); };
