@@ -1,22 +1,31 @@
-# Calculation profiling baseline (issue #72)
+# Calculation profiling baseline (issues #72 and #90)
 
-Status: baseline recorded 2026-08-20.
+Status: historical v1 baseline recorded 2026-08-20; the harness now emits v2.
 
 ## Purpose
 
-A reproducible way to measure a full scheduled meeting calculation end-to-end
-on the real MVV feed, and an evidence-based picture of where the time goes.
-Every later optimization ticket must land with measured before/after evidence
-(ADR 0003 requires profiling before and after). The performance goal is a full
-calculation below 15 s; the current baseline is ~33 s.
+A reproducible way to measure a full scheduled meeting calculation on the real
+MVV feed, and an evidence-based picture of where the time goes. Every later
+optimization ticket must land with measured before/after evidence (ADR 0003
+requires profiling before and after). The performance goal is a full
+calculation below 15 s; the historical v1 baseline is ~33 s.
 
 ## How to run
 
-The harness is `scripts/profile-scheduled-calculation.ts`. It runs one cold
-calculation per process: artifact load, access seeds (live MVG nearby),
-station-area catalog, routing-window materialization, both participant scans,
-participant surfaces, station-area evaluation, response build, validation, and
-serialization.
+The parent harness is `scripts/profile-scheduled-calculation.ts`, and its
+single-sample worker is
+`scripts/profile-scheduled-calculation-worker.ts`. The parent launches three
+sequential, fresh Node 24 child processes. Each child loads the same artifact
+path exactly once, records its `compiledArtifactId`, then measures one first
+request followed immediately by one warm request against that same immutable
+artifact object. Both requests are strictly validated with the catalog carried
+by their own `calculateScheduledMeetingWithBasis` result.
+
+Those three children are deliberately uninstrumented and are the only samples
+used for v2 timing, stage, and heap medians. If either diagnostic flag is
+requested, the parent launches one separate fourth child/pair after the timing
+children. That diagnostic pair is excluded from every timing/stage/heap
+aggregate and is reported only under `diagnostics`.
 
 Requirements:
 
@@ -32,43 +41,82 @@ Commands:
 
 ```sh
 npm run profile:calculation            # timing + heap deltas, JSON report
-npm run profile:calculation:cpu        # + profiles/cpu-calculation-*.cpuprofile
-npm run profile:calculation -- --heap-snapshots   # + per-stage heap snapshots
+npm run profile:calculation:cpu        # + one representative child/pair CPU profile
+npm run profile:calculation -- --heap-snapshots   # + one post-pair heap snapshot
 ```
 
-Output contract: the JSON report is written to
+Output contract: the aggregate JSON report is written to
 `profiles/report-<compiledArtifactId[:12]>-<timestamp>.json` and its path is
 printed to stdout; a ranked timing table goes to stderr. Exit codes:
-0 = success, 1 = calculation or validation failure, 2 = unsupported Node
-major. `profiles/` is gitignored.
+0 = success, 1 = calculation, validation, or child-process failure, 2 =
+unsupported Node major. `profiles/` is gitignored. The aggregate report uses
+`contractVersion: "meeet-calculation-profile/v2"` and
+`schema: "fresh-process-paired-first-warm/v1"`.
 
-The CPU profile covers the profiled window (profiler start just before artifact
-load through profiler stop just after serialization) via `node:inspector`, so
-tsx/loader startup is not included. It is approximately the measured window; the
-small difference is profiler start/stop overhead outside the measured stages.
-Heap snapshots are written at stage boundaries; snapshot write time is
-reported as separate `heap-snapshot:<stage>` rows so stage timings stay clean.
+The request timer starts after child startup, module loading, request parsing,
+and artifact loading. It ends after the calculation, strict validation, and
+response serialization. Child startup and artifact load are reported
+separately and are not included in first/warm request medians.
+
+`requestTimings.firstRequestMedianMs` is the median of three true
+fresh-process first requests; `warmRequestMedianMs` is the median of the three
+immediately subsequent requests in those same child processes. The report also
+contains the canonical parsed v3 `request`, the access-provider descriptor and
+per-child `accessProviderSamples`, process IDs, artifact IDs, artifact-load
+measurements, request-stage medians, validation results, and paired request
+summaries. The parent rejects any sample whose artifact path/identity, parsed
+request, or access-provider provenance differs from the others. The principal
+v2 fields are `request`, `accessProvider`, `accessProviderSamples`,
+`artifact.sampleCompiledArtifactIds`, `artifactLoad`, `requestTimings`,
+`stages.firstRequest`, `stages.warmRequest`, `validation.requests`, and
+`diagnostics`.
+
+The aggregate `accessProvider` is the stable descriptor identity; its volatile
+per-child provenance retrieval timestamp is represented as
+`<per-child-process>`. The raw descriptors observed by each child remain in
+`accessProviderSamples` for auditability.
+
+With `--inspector-cpu`, the separate fourth diagnostic child is CPU-profiled.
+That child starts `node:inspector` after artifact load and immediately before
+its first request, and stops it after the warm request timer ends; CPU-profile
+write I/O is outside both request measurements. The resulting profile covers
+one representative diagnostic first/warm pair, not child startup or any timing
+sample.
+
+With `--heap-snapshots`, the separate fourth diagnostic child writes one
+representative snapshot after its warm request has completed (and after
+CPU-profile stop, if enabled). No stage or request performs snapshot I/O, so
+snapshot writing cannot alter timing-sample medians.
 
 ## Before/after protocol
 
 For every optimization ticket:
 
 1. Check out the target commit, compile the real feed if the artifact is
-   missing or stale (`npm run schedule:compile:mvv`), and record the
-   `compiledArtifactId` from the report.
-2. Run the harness at least 3 times in fresh processes and take the median of
-   each stage. Use the same fixed request (see below) and the same artifact.
-3. Record the ranked stage table and the total in the ticket.
+   missing or stale (`npm run schedule:compile:mvv`), and record the shared
+   `compiledArtifactId` from the v2 report.
+2. Run the harness once. It creates three fresh Node 24 child processes and
+   takes first/warm medians from paired requests in those children. Use the
+   same fixed request (see below) and the same artifact path.
+3. Record the v2 first/warm medians and ranked first/warm stage tables in the
+   ticket.
 4. Implement the change, then repeat steps 1-3 on the same artifact identity.
-5. Attribute the win: report the per-stage delta, not just the total.
+5. Attribute the win: report the per-stage and first/warm deltas, not just a
+   single total.
 
-The fixed profile request is hard-coded in the harness: red
+The fixed profile request is hard-coded in the worker: red
 (48.1374, 11.5755) / blue (48.14, 11.57), tolerance 10%, change time medium,
 `searchStartAt = 2026-08-11T08:05:00+02:00` (a weekday morning inside the
 artifact's routable coverage). Changing the request invalidates the baseline
 comparison.
 
-## Current baseline (2026-08-20)
+## Historical v1 single-cold-request baseline (2026-08-20)
+
+The table below is the old v1 baseline and is retained for historical
+comparison. It is not a v2 first-request or warm-request result: v1 measured a
+single cold request per run in a fresh process. Do not compare its `Total`
+directly to either v2 request median without accounting for the protocol
+change.
 
 Artifact: `c904767465cb…` (feed `20260803`, service range 2026-08-01..
 2026-10-31, 9,313 station areas, 2,075,789 connections). Node 24.19.0.
@@ -194,14 +242,15 @@ is retained for the scan. Not a priority.
 Network-bound MVG nearby calls; not an optimization target (external
 dependency, and the guardrails forbid substituting seed resolution).
 
-## Profile artifacts
+## Historical v1 profile artifacts
 
-The 2026-08-20 baseline artifacts live in `profiles/` (gitignored):
+The 2026-08-20 v1 baseline artifacts live in `profiles/` (gitignored):
 
 - `cpu-calculation-2026-08-20T15-40-30.239Z.cpuprofile` — calculation-window
   CPU profile (34,921 samples).
-- `heap-<stage>.heapsnapshot` — one snapshot per pipeline stage boundary
-  (heap grows from ~1.2 GB after artifact load to ~1.5 GB during routing).
+- `heap-<stage>.heapsnapshot` — one snapshot per pipeline stage boundary in
+  the old v1 harness (heap grows from ~1.2 GB after artifact load to ~1.5 GB
+  during routing). The v2 harness writes at most one post-pair snapshot.
 
 Analyze the CPU profile with any DevTools/`node --prof-process`-compatible
 tool. Note that tsx compiles each module to a single line, so function
