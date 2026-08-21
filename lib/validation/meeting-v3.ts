@@ -91,6 +91,7 @@ export interface ScheduledMeetingMetadataDto {
   readonly stationAreas: ScheduledStationAreaMetadata;
   readonly accessProvider: ProviderDescriptor;
   readonly coverage: "munich-scheduled-station-area-meeting/v1";
+  readonly origins: { readonly coverage: "globally-valid-origin/v1" };
 }
 
 export interface ScheduledMeetingResponseDto {
@@ -220,8 +221,7 @@ function parseOrigin(value: unknown, path: Array<string | number>, issues: Sched
   if (typeof label !== "string" || label.trim() === "" || label.length > 120) issues.push(issue([...originPath, "label"], "invalid_value", "origin.label must be a non-empty string of at most 120 characters."));
   if (typeof latitude !== "number" || !Number.isFinite(latitude) || latitude < -90 || latitude > 90) issues.push(issue([...originPath, "latitude"], "invalid_value", "origin.latitude must be a finite latitude."));
   if (typeof longitude !== "number" || !Number.isFinite(longitude) || longitude < -180 || longitude > 180) issues.push(issue([...originPath, "longitude"], "invalid_value", "origin.longitude must be a finite longitude."));
-  if (typeof label !== "string" || label.trim() === "" || label.length > 120 || typeof latitude !== "number" || !Number.isFinite(latitude) || typeof longitude !== "number" || !Number.isFinite(longitude) || !isWithinOfficialMunichBoundary({ latitude, longitude })) {
-    if (typeof latitude === "number" && Number.isFinite(latitude) && typeof longitude === "number" && Number.isFinite(longitude) && !isWithinOfficialMunichBoundary({ latitude, longitude })) issues.push(issue(originPath, "outside_official_munich_boundary", "origin must be inside the official Munich application boundary."));
+  if (typeof label !== "string" || label.trim() === "" || label.length > 120 || typeof latitude !== "number" || !Number.isFinite(latitude) || typeof longitude !== "number" || !Number.isFinite(longitude)) {
     return undefined;
   }
   return { label: label.trim(), latitude, longitude };
@@ -432,7 +432,7 @@ function validateResponseParticipant(value: unknown, index: number, issues: Sche
 
 function validateResponseMetadata(value: Record<string, unknown>, issues: ScheduledValidationIssue[]): void {
   const path = ["metadata"];
-  addUnknownKeys(value, ["schedule", "surface", "stationAreas", "accessProvider", "coverage"], path, issues);
+  addUnknownKeys(value, ["schedule", "surface", "stationAreas", "accessProvider", "coverage", "origins"], path, issues);
   const schedule = value.schedule;
   if (isRecord(schedule)) addUnknownKeys(schedule, ["contractVersion", "feedId", "timeZone", "scheduleContentHash", "compiledArtifactId", "serviceDateRange", "acquisition"], [...path, "schedule"], issues);
   if (isRecord(schedule) && isRecord(schedule.serviceDateRange)) addUnknownKeys(schedule.serviceDateRange, ["firstDate", "lastDate"], [...path, "schedule", "serviceDateRange"], issues);
@@ -449,6 +449,13 @@ function validateResponseMetadata(value: Record<string, unknown>, issues: Schedu
     addUnknownKeys(value.accessProvider, ["name", "deployment", "dataKind", "liveData", "asOf", "notes", "provenance"], providerPath, issues);
     if (isRecord(value.accessProvider.provenance)) addUnknownKeys(value.accessProvider.provenance, ["role", "provider", "deployment", "dataKind", "liveData", "sourceUrl", "license", "attribution", "version", "retrievedAt", "notes", "feeds"], [...providerPath, "provenance"], issues);
     if (!isScheduledAccessProviderDescriptor(value.accessProvider)) issues.push(issue(providerPath, "invalid_value", "Access provider metadata must describe non-live nearby access, not scheduled routing."));
+  }
+  if (value.origins !== undefined && !isRecord(value.origins)) {
+    issues.push(issue([...path, "origins"], "invalid_type", "origins must be an object."));
+  } else if (isRecord(value.origins)) {
+    const originsPath = [...path, "origins"];
+    addUnknownKeys(value.origins, ["coverage"], originsPath, issues);
+    if (value.origins.coverage !== "globally-valid-origin/v1") issues.push(issue(originsPath, "invalid_value", "origins.coverage must be globally-valid-origin/v1."));
   }
 }
 
@@ -478,6 +485,7 @@ function isScheduledStationAreaDto(value: unknown): value is ScheduledMeetingSta
 function isScheduledMetadataDto(value: unknown): value is ScheduledMeetingMetadataDto {
   if (!isRecord(value) || !isRecord(value.schedule) || !isRecord(value.surface) || !isScheduledStationAreaMetadata(value.stationAreas) || !isScheduledAccessProviderDescriptor(value.accessProvider)) return false;
   return value.coverage === "munich-scheduled-station-area-meeting/v1" &&
+    isRecord(value.origins) && value.origins.coverage === "globally-valid-origin/v1" &&
     typeof value.schedule.contractVersion === "string" && typeof value.schedule.feedId === "string" && value.schedule.timeZone === MEETING_TIME_ZONE && typeof value.schedule.scheduleContentHash === "string" && typeof value.schedule.compiledArtifactId === "string" && isDateRange(value.schedule.serviceDateRange) && isAcquisition(value.schedule.acquisition) &&
     value.surface.classificationMethod === "scheduled-arrival-comparison-with-selected-tolerance/v1" && value.surface.classificationBasis === "scheduled-station-area-arrival/v1" && value.surface.representativePointBasis === "station-area-coordinate/v1" && value.surface.finalWalkingMethod === "scheduled-access-and-transfer-walking/v1" && isSurfaceMetadata(value.surface);
 }

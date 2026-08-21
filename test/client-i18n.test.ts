@@ -55,3 +55,21 @@ test("result action stays truthful when no fair meeting places exist", () => {
   assert.equal(messages.de.planner.resultAction(1), "Wähle einen fairen Treffpunkt aus, um die beiden geplanten Ankünfte zu vergleichen.");
   assert.equal(messages.de.planner.resultAction(0), "Wähle einen Treffpunkt aus, um die beiden geplanten Ankünfte zu vergleichen.");
 });
+
+test("MVV-area origin copy is present and verbatim in both locales", () => {
+  assert.equal(messages.en.planner.scopePill, "MVV area · Munich meeting surface");
+  assert.equal(messages.en.planner.chooseStartingPoint, "Choose a starting point in the MVV area.");
+  assert.equal(messages.en.location.startingPointLabel, "Starting point in the MVV area");
+  assert.equal(messages.en.location.searching, "Looking in the MVV area…");
+  assert.equal(messages.en.planner.footer, "Scheduled MVV surface • Munich meeting • MVV-area origins");
+  assert.equal(messages.en.disclosure.scopeTitle, "MVV-area origins / Munich meeting surface.");
+  assert.equal(messages.en.disclosure.scope, "This search uses the installed scheduled MVV feed for the MVV area and nearby MVG access data. Origins may be anywhere in the MVV area; the meeting surface is Munich-only. It is not a venue recommendation.");
+
+  assert.equal(messages.de.planner.scopePill, "MVV-Gebiet · Münchner Meeting-Fläche");
+  assert.equal(messages.de.planner.chooseStartingPoint, "Wähle einen Startpunkt im MVV-Gebiet.");
+  assert.equal(messages.de.location.startingPointLabel, "Startpunkt im MVV-Gebiet");
+  assert.equal(messages.de.location.searching, "Suche im MVV-Gebiet…");
+  assert.equal(messages.de.planner.footer, "Geplante MVV-Fläche • Meeting in München • Startpunkte im MVV-Gebiet");
+  assert.equal(messages.de.disclosure.scopeTitle, "Startpunkte im MVV-Gebiet / Meeting-Fläche in München.");
+  assert.equal(messages.de.disclosure.scope, "Diese Suche verwendet den installierten geplanten MVV-Fahrplan für das MVV-Gebiet und nahegelegene MVG-Zugangsdaten. Startpunkte können überall im MVV-Gebiet liegen; die Meeting-Fläche ist auf München beschränkt. Sie ist keine Empfehlung für einen Veranstaltungsort.");
+});

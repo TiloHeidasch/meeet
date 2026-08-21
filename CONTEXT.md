@@ -5,8 +5,10 @@ planned public-transport travel times.
 
 ## Product language
 
-**Meeting Search**: A calculation for exactly two Participants and two Munich
-Participant Origins.
+**Meeting Search**: A calculation for exactly two Participants and two
+Participant Origins. Origins are accepted anywhere in the MVV area
+(external-Munich), while the meeting destination, surface, station-area
+candidates, markers, and territories remain Munich-clipped.
 
 **Search Start Time**: The offset-aware planned instant at which both searches
 begin. It is represented by `searchStartAt`, accepts whole-second precision,
@@ -65,7 +67,12 @@ fields.
 
 ## Source and boundary guardrails
 
-- Munich is the only supported geographic application boundary.
+- Munich is the only supported geographic application boundary for destinations,
+  surfaces, station-area candidates, markers, and territories. Participant
+  origins are accepted anywhere in the MVV area (external-Munich) and are
+  globally valid; an external origin is usable only when MVG nearby resolves to
+  a compiled-MVV-artifact access seed, otherwise the calculation returns an
+  explicit no-result.
 - The `meeet-meeting/v3` scheduled contract is the only meeting-calculation
   contract accepted by the server.
 - MVV GTFS is the sole schedule and transit-routing source.
@@ -74,7 +81,9 @@ fields.
 - The calculation is planned and static: no realtime disruption data, POI
   discovery, or walk-navigation route is part of the surface claim.
 - Every response contains exactly two Participants, seed provenance, selected
-  tolerance, schedule provenance, and the Munich-clipped grid surface.
+  tolerance, schedule provenance, the Munich-clipped grid surface, and
+  `metadata.origins.coverage` (`globally-valid-origin/v1`) disclosing that
+  origins are accepted across the MVV area.
 - Production artifacts are compiled under the pinned Node 24 engine. The
   binary bundle, routing-window memory use, 90-second API budget, and request
   concurrency limit are deployment gates.

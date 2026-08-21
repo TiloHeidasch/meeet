@@ -807,6 +807,81 @@ test("v3 response uses the station-area coverage contract and rejects the retire
   assert.equal(validateScheduledMeetingResponse(legacyMarker, parsed.data).success, false);
 });
 
+test("v3 accepts MVV-area (external-Munich) origins and emits globally-valid-origin coverage", async () => {
+  const externalRequest = {
+    ...V3_REQUEST,
+    participants: [
+      { id: "red", origin: { label: "Garching Forschungszentrum", latitude: 48.2614, longitude: 11.6711 }, mode: "transit" },
+      { id: "blue", origin: { label: "Baldham", latitude: 48.1014, longitude: 11.7872 }, mode: "transit" },
+    ],
+  };
+  const parsed = parseScheduledMeetingRequest(externalRequest);
+  assert.equal(parsed.success, true);
+  if (!parsed.success) return;
+  const response = await calculateScheduledMeeting(parsed.data, {
+    artifact: FIXTURE_SCHEDULED_ARTIFACT,
+    access: FIXTURE_SCHEDULED_ACCESS_PROVIDER,
+  });
+  assert.equal(response.metadata.origins.coverage, "globally-valid-origin/v1");
+  assert.equal(validateScheduledMeetingResponse(response, parsed.data).success, true);
+
+  // Herrsching (another external-Munich origin) is also accepted.
+  const herrschingRequest = {
+    ...V3_REQUEST,
+    participants: [
+      { id: "red", origin: { label: "Herrsching", latitude: 48.0025, longitude: 11.1764 }, mode: "transit" },
+      { id: "blue", origin: { label: "Munich blue", latitude: 48.1400, longitude: 11.5700 }, mode: "transit" },
+    ],
+  };
+  const herrschingParsed = parseScheduledMeetingRequest(herrschingRequest);
+  assert.equal(herrschingParsed.success, true);
+  if (!herrschingParsed.success) return;
+  const herrschingResponse = await calculateScheduledMeeting(herrschingParsed.data, {
+    artifact: FIXTURE_SCHEDULED_ARTIFACT,
+    access: FIXTURE_SCHEDULED_ACCESS_PROVIDER,
+  });
+  assert.equal(herrschingResponse.metadata.origins.coverage, "globally-valid-origin/v1");
+  assert.equal(validateScheduledMeetingResponse(herrschingResponse, herrschingParsed.data).success, true);
+});
+
+test("v3 external origin with no access seeds yields an explicit no-result and still discloses origins coverage", async () => {
+  const externalRequest = {
+    ...V3_REQUEST,
+    participants: [
+      { id: "red", origin: { label: "Garching", latitude: 48.2614, longitude: 11.6711 }, mode: "transit" },
+      { id: "blue", origin: { label: "Herrsching", latitude: 48.0025, longitude: 11.1764 }, mode: "transit" },
+    ],
+  };
+  const parsed = parseScheduledMeetingRequest(externalRequest);
+  assert.equal(parsed.success, true);
+  if (!parsed.success) return;
+  const response = await calculateScheduledMeeting(parsed.data, {
+    artifact: FIXTURE_SCHEDULED_ARTIFACT,
+    access: { ...FIXTURE_SCHEDULED_ACCESS_PROVIDER, resolveAccessSeeds: async () => [] },
+  });
+  assert.equal(response.status, "no-result");
+  assert.equal(response.reason, "no-access-seeds");
+  assert.equal(response.metadata.origins.coverage, "globally-valid-origin/v1");
+  assert.equal(validateScheduledMeetingResponse(response, parsed.data).success, true);
+});
+
+test("v3 metadata.origins.coverage is bound and tampered values are rejected", async () => {
+  const parsed = parseScheduledMeetingRequest(V3_REQUEST);
+  assert.equal(parsed.success, true);
+  if (!parsed.success) return;
+  const response = await validScheduledResponse();
+  assert.equal(response.metadata.origins.coverage, "globally-valid-origin/v1");
+  assert.equal(validateScheduledMeetingResponse(response, parsed.data).success, true);
+
+  const tamper = mutableResponse(response);
+  (tamper.metadata as Record<string, unknown>).origins = { coverage: "tampered-coverage/v1" };
+  assert.equal(validateScheduledMeetingResponse(tamper, parsed.data).success, false);
+
+  const missing = mutableResponse(response);
+  delete (missing.metadata as Record<string, unknown>).origins;
+  assert.equal(validateScheduledMeetingResponse(missing, parsed.data).success, false);
+});
+
 test("v3 response rejects retired boarding-stop identity on access seeds", async () => {
   const parsed = parseScheduledMeetingRequest(V3_REQUEST);
   assert.equal(parsed.success, true);

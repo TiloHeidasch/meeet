@@ -256,6 +256,7 @@ export async function calculateScheduledMeetingWithBasis(
       },
       accessProvider: access.descriptor,
       coverage: "munich-scheduled-station-area-meeting/v1",
+      origins: { coverage: "globally-valid-origin/v1" },
     },
   });
   const basis: ScheduledCalculationBasis = {

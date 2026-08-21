@@ -21,7 +21,12 @@ import {
   type ScheduledRoutingArtifact,
 } from "../lib/domain/scheduled-routing/index.ts";
 import { ScheduledCalculationDeadlineError } from "../lib/domain/scheduled-admission.ts";
-import { FIXTURE_SCHEDULED_ARTIFACT } from "../lib/fixtures/scheduled-routing.ts";
+import { FIXTURE_SCHEDULED_ARTIFACT, FIXTURE_SCHEDULED_ACCESS_PROVIDER } from "../lib/fixtures/scheduled-routing.ts";
+import { calculateScheduledMeeting } from "../lib/domain/scheduled-routing/meeting.ts";
+import {
+  parseScheduledMeetingRequest,
+  validateScheduledMeetingResponse,
+} from "../lib/validation/meeting-v3.ts";
 
 const SEARCH_START = "2026-08-11T08:05:00+02:00";
 
@@ -1018,4 +1023,48 @@ test("station area modes are classified according to strict hierarchy: S-Bahn > 
   assert.equal(byId.get("tram-bus-station")?.mode, "tram");
   // Bus-Only has S-Bahn visit (bo-b on s-trip) -> S-Bahn
   assert.equal(byId.get("bus-only-station")?.mode, "sbahn");
+});
+
+test("v3 scheduled calculation accepts an external-Munich (MVV-area) origin", async () => {
+  const parsed = parseScheduledMeetingRequest({
+    contractVersion: "meeet-meeting/v3",
+    participants: [
+      { id: "red", origin: { label: "Garching Forschungszentrum", latitude: 48.2614, longitude: 11.6711 }, mode: "transit" },
+      { id: "blue", origin: { label: "Baldham", latitude: 48.1014, longitude: 11.7872 }, mode: "transit" },
+    ],
+    tolerancePercent: 10,
+    changeTimePreset: "medium",
+    searchStartAt: "2026-08-11T08:05:00+02:00",
+  });
+  assert.equal(parsed.success, true);
+  if (!parsed.success) return;
+  const response = await calculateScheduledMeeting(parsed.data, {
+    artifact: FIXTURE_SCHEDULED_ARTIFACT,
+    access: FIXTURE_SCHEDULED_ACCESS_PROVIDER,
+  });
+  assert.equal(response.metadata.origins.coverage, "globally-valid-origin/v1");
+  assert.equal(validateScheduledMeetingResponse(response, parsed.data).success, true);
+});
+
+test("v3 scheduled calculation yields an explicit no-result when external origins have no access seeds", async () => {
+  const parsed = parseScheduledMeetingRequest({
+    contractVersion: "meeet-meeting/v3",
+    participants: [
+      { id: "red", origin: { label: "Herrsching", latitude: 48.0025, longitude: 11.1764 }, mode: "transit" },
+      { id: "blue", origin: { label: "Garching", latitude: 48.2614, longitude: 11.6711 }, mode: "transit" },
+    ],
+    tolerancePercent: 10,
+    changeTimePreset: "medium",
+    searchStartAt: "2026-08-11T08:05:00+02:00",
+  });
+  assert.equal(parsed.success, true);
+  if (!parsed.success) return;
+  const response = await calculateScheduledMeeting(parsed.data, {
+    artifact: FIXTURE_SCHEDULED_ARTIFACT,
+    access: { ...FIXTURE_SCHEDULED_ACCESS_PROVIDER, resolveAccessSeeds: async () => [] },
+  });
+  assert.equal(response.status, "no-result");
+  assert.equal(response.reason, "no-access-seeds");
+  assert.equal(response.metadata.origins.coverage, "globally-valid-origin/v1");
+  assert.equal(validateScheduledMeetingResponse(response, parsed.data).success, true);
 });

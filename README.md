@@ -3,6 +3,9 @@
 Munich-only meeting coordination for exactly two Participants. The canonical
 server calculation compares planned public-transport arrivals from an
 immutable MVV GTFS schedule and returns a Munich-clipped fairness surface.
+Participant ORIGINS may be anywhere in the MVV area (external-Munich) and are
+accepted globally; destinations, surfaces, station-area candidates, markers,
+and territories remain Munich-clipped.
 
 ## Local development
 
@@ -80,9 +83,11 @@ instructions for the live Unraid profile.
 ## Application contract
 
 The server accepts only the `meeet-meeting/v3` calculation contract. A request
-contains two transit Participants, Munich origins, a whole-second
-`searchStartAt`, and a selected 5%, 10%, or 15% tolerance. Responses disclose
-access seeds, schedule provenance, and red/blue/fair/unclassified cells.
+contains two transit Participants, two origins (accepted anywhere in the MVV
+area, not just Munich), a whole-second `searchStartAt`, and a selected 5%, 10%,
+or 15% tolerance. Responses disclose access seeds, schedule provenance,
+red/blue/fair/unclassified cells, and `metadata.origins.coverage`
+(`globally-valid-origin/v1`).
 
 MVV GTFS is the only schedule/routing source. MVG is used for location search
 and nearby access seeds only. The calculation does not use realtime, POIs,
@@ -118,6 +123,8 @@ starts the built server in fixture provider mode against that artifact, and
 performs one functional calculation at now + 5 minutes
 (`scripts/e2e-calculation.mjs`).
 
-The application boundary is Munich. Map rendering and browser fixture work are
-owned by the visual/client migration; server code must preserve the v3
-contract and its provenance checks.
+The application boundary is Munich for destinations, surfaces, station-area
+candidates, markers, and territories; participant origins are accepted across
+the wider MVV area. Map rendering and browser fixture work are owned by the
+visual/client migration; server code must preserve the v3 contract and its
+provenance checks.
