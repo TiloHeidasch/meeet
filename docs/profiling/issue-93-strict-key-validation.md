@@ -15,8 +15,8 @@ cache cold; the OS file cache was not intentionally dropped.
 
 | Measurement | Before runs | Before median | After runs | After median | Delta |
 | --- | ---: | ---: | ---: | ---: | ---: |
-| artifact-load | 18,353 / 18,044 / 18,006 | 18,044 | 16,808 / 16,923 / 17,030 | 16,923 | −1,121 (−6.2%) |
-| Total | 24,326 / 23,829 / 23,768 | 23,829 | 22,749 / 22,585 / 22,557 | 22,585 | −1,244 (−5.2%) |
+| artifact-load | 18,353 / 18,044 / 18,006 | 18,044 | 16,753 / 16,712 / 17,045 | 16,753 | −1,291 (−7.2%) |
+| Total | 24,326 / 23,829 / 23,768 | 23,829 | 22,448 / 22,641 / 24,216 | 22,641 | −1,188 (−5.0%) |
 
 The total includes work outside strict key validation, so its reduction should not be
 attributed entirely to this change.
