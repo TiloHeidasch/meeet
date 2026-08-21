@@ -31,7 +31,8 @@ import {
 import {
   SCHEDULED_DETAIL_SELECTION_POLICY,
 } from "./scheduled-routing/router.ts";
-import { CHANGE_TIME_PRESETS } from "./scheduled-routing/models.ts";
+import { CHANGE_TIME_PRESETS, type ScheduledRoutingArtifact } from "./scheduled-routing/models.ts";
+import { buildItinerary } from "./scheduled-routing/itinerary.ts";
 import type {
   ScheduledMeetingRequest,
   ScheduledMeetingResponse,
@@ -455,8 +456,8 @@ async function handleStationAreaDetailsPostInner(
       return jsonError(409, "CALCULATION_REF_MISMATCH", "The calculation reference belongs to a different scheduled timetable artifact.");
     }
     const participants: [StationAreaDetailParticipantDto, StationAreaDetailParticipantDto] = [
-      detailParticipant("red", parsedScheduled.data.participants[0], marker, basis, parsedScheduled.data.searchStartAt),
-      detailParticipant("blue", parsedScheduled.data.participants[1], marker, basis, parsedScheduled.data.searchStartAt),
+      detailParticipant("red", 0, parsedScheduled.data.participants[0], marker, basis, artifact, parsedScheduled.data.searchStartAt),
+      detailParticipant("blue", 1, parsedScheduled.data.participants[1], marker, basis, artifact, parsedScheduled.data.searchStartAt),
     ];
     const detailBasis = makeDetailBasis(parsedScheduled.data, basis);
     const detail: StationAreaDetailsResponseDto = deepFreeze({
@@ -544,14 +545,17 @@ function unavailableDetailParticipant(
     status: "unavailable",
     unavailableReason,
     terminal: { totalSeconds: null, arrivalAt: null },
+    itinerary: null,
   };
 }
 
 function detailParticipant(
   color: "red" | "blue",
+  index: 0 | 1,
   participant: ScheduledMeetingRequest["participants"][number],
   marker: ScheduledMeetingStationAreaDto,
   basis: ScheduledCalculationBasis,
+  artifact: ScheduledRoutingArtifact,
   searchStartAt: string,
 ): StationAreaDetailParticipantDto {
   const selectedTotal = getMarkerArrivalSeconds(marker, color);
@@ -563,8 +567,11 @@ function detailParticipant(
       status: "unavailable",
       unavailableReason: basis.status === "no-result" ? basis.reason : marker.classification === "unclassified" ? "station-area-unclassified" : "station-area-unavailable-for-participant",
       terminal: { totalSeconds: null, arrivalAt: null },
+      itinerary: null,
     };
   }
+  const searchStartEpochSeconds = Date.parse(searchStartAt) / 1_000;
+  const itinerary = buildItinerary(basis.itineraryGraph[index], marker.stationAreaId, artifact, searchStartEpochSeconds, participant.origin.label, selectedTotal);
   return {
     id: participant.id,
     color,
@@ -572,6 +579,7 @@ function detailParticipant(
     status: "available",
     unavailableReason: null,
     terminal: { totalSeconds: selectedTotal, arrivalAt: arrivalAtSecondsAfter(searchStartAt, selectedTotal) },
+    itinerary,
   };
 }
 

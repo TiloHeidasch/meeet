@@ -21,6 +21,7 @@ import {
   type ScheduledDeadlineCheck,
   type ScheduledParticipantSurface,
   type ScheduledStationAreaCatalog,
+  type ItineraryEdge,
 } from "./models.ts";
 import type { ScheduledMeetingRequest, ScheduledMeetingParticipantInput } from "../../validation/meeting-v3.ts";
 import type {
@@ -95,6 +96,13 @@ export interface ScheduledCalculationBasis {
   readonly status: ScheduledMeetingResponseDto["status"];
   readonly reason: ScheduledMeetingResponseDto["reason"];
   readonly stationAreas: readonly ScheduledMeetingStationAreaDto[];
+  /**
+   * Certified per-participant arrival graph (predecessor edges keyed by
+   * station-area id), produced by the same scan that set the marker arrivals.
+   * Consumed at details time to rebuild itinerary legs without re-running
+   * routing. Index 0 = red participant, index 1 = blue participant.
+   */
+  readonly itineraryGraph: readonly [Readonly<Record<string, ItineraryEdge>>, Readonly<Record<string, ItineraryEdge>>];
 }
 
 export interface ScheduledMeetingCalculation {
@@ -292,6 +300,7 @@ export async function calculateScheduledMeetingWithBasis(
     status: response.status,
     reason: response.reason,
     stationAreas: response.stationAreas.map((stationArea) => ({ ...stationArea })),
+    itineraryGraph: [firstRoute?.predecessorByArea ?? {}, secondRoute?.predecessorByArea ?? {}],
   };
   const calculation: ScheduledMeetingCalculation = { response, basis, stationAreaCatalog };
   freezeEnvelope(calculation);

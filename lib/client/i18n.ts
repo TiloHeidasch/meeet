@@ -202,6 +202,11 @@ const en = {
     participant: (number: number) => `Participant ${number}`,
     total: "total",
     arriveAt: "Arrive at",
+    itineraryHeading: "Journey",
+    walk: "Walk",
+    fromTo: (from: string, to: string) => `from ${from} to ${to}`,
+    legFrom: (name: string) => `from ${name}`,
+    legTo: (name: string) => `to ${name}`,
     heading: "Meeting place details",
   },
   map: {
@@ -382,6 +387,11 @@ const de: Messages = {
     participant: (number: number) => `Teilnehmer ${number}`,
     total: "gesamt",
     arriveAt: "Ankunft um",
+    itineraryHeading: "Fahrtverlauf",
+    walk: "Fußweg",
+    fromTo: (from: string, to: string) => `von ${from} nach ${to}`,
+    legFrom: (name: string) => `von ${name}`,
+    legTo: (name: string) => `nach ${name}`,
     heading: "Treffpunktdetails",
   },
   map: {

@@ -933,7 +933,7 @@ test("agency timezone and unsupported GTFS extensions are fail-closed", () => {
 
 test("station-level collapse drops intra-area legs and deduplicates consecutive same-area visits", () => {
   const schedule = FIXTURE_SCHEDULED_ARTIFACT;
-  assert.ok(schedule.stationAreas.every((area) => Object.keys(area).sort().join(",") === "coordinate,id,mode,name"));
+  assert.ok(schedule.stationAreas.every((area) => Object.keys(area).sort().join(",") === "coordinate,id,mode,name,transferNeighbors"));
   assert.ok(schedule.connections.every((connection) => connection.fromStationAreaId !== connection.toStationAreaId));
   const collapse = schedule.connections.filter((connection) => connection.tripId === "fixture-collapse");
   assert.deepEqual(collapse.map((connection) => [connection.fromStationAreaId, connection.toStationAreaId]), [

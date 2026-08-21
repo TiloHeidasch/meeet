@@ -17,6 +17,14 @@ export const ROUTING_HORIZON_SECONDS = SECONDS_PER_DAY;
 export const WALKING_SECONDS_ROUNDING_RULE =
   "ceil(distanceMetres / velocityMetresPerSecond / 60) * 60, with zero distance taking zero seconds";
 
+/**
+ * Compile-time radius used to precompute static transfer-neighbor lists per
+ * station area (issue #76). The scan uses the precomputed list for any runtime
+ * `transferRadiusMeters` up to this value; larger radii fall back to the
+ * geographic spatial index so results stay identical for every input.
+ */
+export const TRANSFER_NEIGHBOR_RADIUS_METERS = 1_000;
+
 export type ScheduledDeadlinePhase =
   | "meeting-start"
   | "meeting-access"
@@ -43,12 +51,27 @@ export interface ScheduledRoute {
 
 export type StationAreaMode = "sbahn" | "ubahn" | "tram" | "bus";
 
+/** A precomputed transfer neighbor of a station area (issue #76). */
+export interface ScheduledTransferNeighbor {
+  /** The neighboring station area id within the precomputed transfer radius. */
+  readonly stationAreaId: string;
+  /** Precomputed haversine distance in meters between the two station-area centroids. */
+  readonly distanceMeters: number;
+}
+
 export interface ScheduledStationArea {
   /** Parent-station identity, or the boarding stop identity for a stand-alone stop. */
   readonly id: string;
   readonly name: string;
   readonly coordinate: ScheduledCoordinate;
   readonly mode: StationAreaMode;
+  /**
+   * Static transfer-neighbor list precomputed at compile time within
+   * `TRANSFER_NEIGHBOR_RADIUS_METERS`. Always includes the area itself with
+   * `distanceMeters: 0`. The scan consumes this instead of a per-arrival
+   * spatial query (issue #76).
+   */
+  readonly transferNeighbors: readonly ScheduledTransferNeighbor[];
 }
 
 /** Only regular boarding/alighting and explicit no-board/no-alight are routable. */
@@ -264,4 +287,33 @@ export interface ScheduledRoutingResult {
   readonly searchStartAt: string;
   readonly searchStartEpochSeconds: number;
   readonly horizonEndEpochSeconds: number;
+  /**
+   * Per-area predecessor edge produced by the certified scan. Used to rebuild a
+   * participant's itinerary legs from the certified scheduled result without
+   * re-running routing. Keyed by station-area id; only reached areas are present.
+   * Stored as a plain object (never a Map) so it survives JSON cache serialization.
+   */
+  readonly predecessorByArea: Readonly<Record<string, ItineraryEdge>>;
+}
+
+/**
+ * A single edge in the certified per-participant arrival graph. The graph is
+ * reconstructed from the same scan that produced the certified marker arrivals,
+ * so any itinerary derived from it is consistent with the cached marker.
+ */
+export type ItineraryEdge =
+  | { readonly kind: "seed"; readonly seedAreaId: string; readonly accessSeconds: number }
+  | { readonly kind: "connection"; readonly connection: ItineraryConnectionRef }
+  | { readonly kind: "walk"; readonly fromAreaId: string; readonly arrivalEpochSeconds: number };
+
+/** Compact, JSON-serializable reference to a transit connection for leg building. */
+export interface ItineraryConnectionRef {
+  readonly fromStationAreaId: string;
+  readonly toStationAreaId: string;
+  readonly departureEpochSeconds: number;
+  readonly arrivalEpochSeconds: number;
+  readonly tripId: string;
+  readonly lineShortName: string;
+  readonly routeType: number;
+  readonly headsign: string;
 }
