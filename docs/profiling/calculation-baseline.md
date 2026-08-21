@@ -255,3 +255,33 @@ The 2026-08-20 v1 baseline artifacts live in `profiles/` (gitignored):
 Analyze the CPU profile with any DevTools/`node --prof-process`-compatible
 tool. Note that tsx compiles each module to a single line, so function
 frames map to `file.ts:1`; aggregate by function name, not line.
+
+## Issue #91 schema-aware artifact freeze profile (2026-08-21)
+
+Three fresh Node 24.19.0 child processes ran the v2 harness after replacing
+generic artifact deep-freezing with schema-aware traversal. The successful
+command was:
+
+```sh
+NODE_OPTIONS=--conditions=react-server npm exec --yes --package=node@24 -- node --conditions=react-server node_modules/tsx/dist/cli.mjs scripts/profile-scheduled-calculation.ts
+```
+
+The same real artifact was used for every child:
+
+- path: `data/scheduled/mvv-scheduled-artifact.json`
+- `compiledArtifactId`: `88e0e6b01a3f92900c37fd6b2992601b8600551d207e78bd843396ead691512d`
+- payload: `808,821,104` bytes
+- counts: `9,313` station areas and `2,075,789` connections
+
+Raw cold-load measurements from
+`profiles/report-88e0e6b01a3f-2026-08-21T14-20-37.827Z.json`:
+
+| Sample | Child process | Artifact-load elapsed (ms) | Artifact-load heap delta (bytes) |
+| ---: | ---: | ---: | ---: |
+| 1 | 59992 | 13,441 | 1,107,522,968 |
+| 2 | 60034 | 13,369 | 1,065,253,712 |
+| 3 | 60122 | 12,048 | 1,068,943,728 |
+| **Median** | — | **13,369** | **1,068,943,728** |
+
+The aggregate report recorded Node `24.19.0`, successful strictly validated
+requests, and the same compiled artifact identity in all three children.
