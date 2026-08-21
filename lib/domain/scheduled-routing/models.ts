@@ -263,4 +263,33 @@ export interface ScheduledRoutingResult {
   readonly searchStartAt: string;
   readonly searchStartEpochSeconds: number;
   readonly horizonEndEpochSeconds: number;
+  /**
+   * Per-area predecessor edge produced by the certified scan. Used to rebuild a
+   * participant's itinerary legs from the certified scheduled result without
+   * re-running routing. Keyed by station-area id; only reached areas are present.
+   * Stored as a plain object (never a Map) so it survives JSON cache serialization.
+   */
+  readonly predecessorByArea: Readonly<Record<string, ItineraryEdge>>;
+}
+
+/**
+ * A single edge in the certified per-participant arrival graph. The graph is
+ * reconstructed from the same scan that produced the certified marker arrivals,
+ * so any itinerary derived from it is consistent with the cached marker.
+ */
+export type ItineraryEdge =
+  | { readonly kind: "seed"; readonly seedAreaId: string; readonly accessSeconds: number }
+  | { readonly kind: "connection"; readonly connection: ItineraryConnectionRef }
+  | { readonly kind: "walk"; readonly fromAreaId: string; readonly arrivalEpochSeconds: number };
+
+/** Compact, JSON-serializable reference to a transit connection for leg building. */
+export interface ItineraryConnectionRef {
+  readonly fromStationAreaId: string;
+  readonly toStationAreaId: string;
+  readonly departureEpochSeconds: number;
+  readonly arrivalEpochSeconds: number;
+  readonly tripId: string;
+  readonly lineShortName: string;
+  readonly routeType: number;
+  readonly headsign: string;
 }

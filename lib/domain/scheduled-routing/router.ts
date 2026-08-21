@@ -12,6 +12,8 @@ import {
   type ScheduledRoutingResult,
   type ScheduledStationArea,
   type StationArrivalField,
+  type ItineraryEdge,
+  type ItineraryConnectionRef,
 } from "./models.ts";
 import {
   compareScheduledConnections,
@@ -109,6 +111,7 @@ export function routeScheduledEarliestArrivals(
     searchStartAt: parsedStart.canonicalAt,
     searchStartEpochSeconds: parsedStart.epochSeconds,
     horizonEndEpochSeconds: window.horizonEndEpochSeconds,
+    predecessorByArea: scan.predecessorByArea,
   });
 }
 
@@ -116,6 +119,7 @@ interface ScheduledScanState {
   readonly earliestArrivalByArea: Map<string, number>;
   readonly window: ScheduledRoutingWindow;
   readonly parsedStartEpochSeconds: number;
+  readonly predecessorByArea: Record<string, ItineraryEdge>;
 }
 
 function scanScheduledConnections(
@@ -136,6 +140,8 @@ function scanScheduledConnections(
   const earliestBoardingReadyByArea = new Map<string, number>();
   const reachableConnectionKeys = new Set<string>();
   const continuationByPreviousKey = new Map<string, ScheduledMaterializedConnection>();
+  const predecessorByArea: Record<string, ItineraryEdge> = {};
+  const tripHeadsignById = new Map(schedule.trips.map((trip) => [trip.tripId, trip.headsign]));
   for (let connectionIndex = 0; connectionIndex < window.connections.length; connectionIndex += 1) {
     if (connectionIndex % ROUTING_CONNECTION_CHECKPOINT === 0) resolvedOptions.deadlineCheck?.("routing-scan");
     const connection = window.connections[connectionIndex];
@@ -144,11 +150,12 @@ function scanScheduledConnections(
   }
 
   let enqueueForArea: ((areaId: string) => void) | null = null;
-  const updateArrivalMinimum = (stationAreaId: string, arrivalEpochSeconds: number): void => {
-    if (arrivalEpochSeconds > window.horizonEndEpochSeconds) return;
+  const updateArrivalMinimum = (stationAreaId: string, arrivalEpochSeconds: number): boolean => {
+    if (arrivalEpochSeconds > window.horizonEndEpochSeconds) return false;
     const current = earliestArrivalByArea.get(stationAreaId);
-    if (current !== undefined && current <= arrivalEpochSeconds) return;
+    if (current !== undefined && current <= arrivalEpochSeconds) return false;
     earliestArrivalByArea.set(stationAreaId, arrivalEpochSeconds);
+    return true;
   };
 
   const updateBoardingReadyMinimum = (stationAreaId: string, readyEpochSeconds: number): void => {
@@ -169,7 +176,7 @@ function scanScheduledConnections(
     if (seed.accessSeconds > ROUTING_HORIZON_SECONDS) throw new RangeError("Access seed accessSeconds must not exceed the 24-hour routing horizon.");
     if (seed.accessSeconds % 60 !== 0) throw new RangeError("Access seed accessSeconds must be minute-aligned.");
     const seedArrival = window.searchStartEpochSeconds + seed.accessSeconds;
-    updateArrivalMinimum(area.id, seedArrival);
+    if (updateArrivalMinimum(area.id, seedArrival)) predecessorByArea[area.id] = { kind: "seed", seedAreaId: area.id, accessSeconds: seed.accessSeconds };
     updateBoardingReadyMinimum(area.id, seedArrival);
   }
 
@@ -222,7 +229,7 @@ function scanScheduledConnections(
       if (nextConnection !== undefined && nextConnection.departureEpochSeconds === departureEpochSeconds) enqueueConnection(nextConnection);
       if (connection.source.dropOffType !== 0) continue;
 
-      updateArrivalMinimum(connection.source.toStationAreaId, connection.arrivalEpochSeconds);
+      if (updateArrivalMinimum(connection.source.toStationAreaId, connection.arrivalEpochSeconds)) predecessorByArea[connection.source.toStationAreaId] = { kind: "connection", connection: buildConnectionRef(connection, tripHeadsignById) };
       const arrivalArea = stationById.get(connection.source.toStationAreaId);
       if (arrivalArea === undefined) throw new Error("Connection references a missing arrival station area.");
       for (const transferArea of querySpatialIndex(window.spatialIndex, arrivalArea.coordinate, resolvedOptions.transferRadiusMeters)) {
@@ -230,7 +237,7 @@ function scanScheduledConnections(
           updateBoardingReadyMinimum(arrivalArea.id, connection.arrivalEpochSeconds + resolvedOptions.changeTimeSeconds);
         } else {
           const walkArrival = connection.arrivalEpochSeconds + walkingSeconds(arrivalArea.coordinate, transferArea.coordinate, resolvedOptions.walkingVelocityMetersPerSecond);
-          updateArrivalMinimum(transferArea.id, walkArrival);
+          if (updateArrivalMinimum(transferArea.id, walkArrival)) predecessorByArea[transferArea.id] = { kind: "walk", fromAreaId: arrivalArea.id, arrivalEpochSeconds: walkArrival };
           updateBoardingReadyMinimum(transferArea.id, walkArrival);
         }
       }
@@ -238,7 +245,23 @@ function scanScheduledConnections(
     enqueueForArea = null;
     bucketStart = bucketEnd;
   }
-  return { earliestArrivalByArea, window, parsedStartEpochSeconds: window.searchStartEpochSeconds };
+  return { earliestArrivalByArea, window, parsedStartEpochSeconds: window.searchStartEpochSeconds, predecessorByArea };
+}
+
+function buildConnectionRef(
+  connection: ScheduledMaterializedConnection,
+  tripHeadsignById: ReadonlyMap<string, string>,
+): ItineraryConnectionRef {
+  return {
+    fromStationAreaId: connection.source.fromStationAreaId,
+    toStationAreaId: connection.source.toStationAreaId,
+    departureEpochSeconds: connection.departureEpochSeconds,
+    arrivalEpochSeconds: connection.arrivalEpochSeconds,
+    tripId: connection.source.tripId,
+    lineShortName: connection.source.line.shortName,
+    routeType: connection.source.line.routeType,
+    headsign: tripHeadsignById.get(connection.source.tripId) ?? "",
+  };
 }
 
 const routingWindowCache = new Map<string, ScheduledRoutingWindow>();
