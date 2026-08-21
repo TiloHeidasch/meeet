@@ -22,7 +22,7 @@ export function canSubmitMeetingCalculation(ui: PlannerUiState, status: Status) 
 function isRecord(value: unknown): value is Record<string, unknown> { return typeof value === "object" && value !== null && !Array.isArray(value); }
 function errorMessage(value: unknown) { return isRecord(value) && isRecord(value.error) && typeof value.error.message === "string" ? value.error.message : undefined; }
 function errorCode(value: unknown) { return isRecord(value) && isRecord(value.error) && typeof value.error.code === "string" ? value.error.code : undefined; }
-function nextStart(): string { return new Date(Math.ceil((Date.now() + 300_000) / 1000) * 1000).toISOString(); }
+export function nextStart(): string { return new Date(Math.ceil((Date.now() + 300_000) / 60_000) * 60_000).toISOString(); }
 function formatDate(locale: Locale, iso: string) { return messages[locale].time.formatDate(iso); }
 function formatSeconds(locale: Locale, value: number | null) { if (value === null) return messages[locale].time.noScheduledArrival; return messages[locale].time.formatSeconds(value); }
 type ChangeTimePreset = "quick" | "medium" | "long";
@@ -411,6 +411,7 @@ export default function MeetPlanner({ capability }: { capability: PlannerCapabil
   const stationAreas = result?.stationAreas ?? progressiveStationAreas;
   const mapParticipants = participants.flatMap((item, index) => item.location ? [{ id: item.id, number: index + 1, label: t.planner.participantLabel(index + 1), latitude: item.location.lat, longitude: item.location.lng, color: COLORS[index]! }] : []);
   const noResult = result?.status === "no-result";
+  const fairCount = result?.stationAreas.filter((area) => area.classification === "fair").length ?? 0;
   return (
     <main className="planner-shell">
       <div className="planner-inner">
@@ -485,8 +486,23 @@ export default function MeetPlanner({ capability }: { capability: PlannerCapabil
             {result && (
               <section className={`result-summary ${noResult ? "no-result" : ""}`}>
                 <span className="eyebrow">{noResult ? t.planner.noResultEyebrow : t.planner.resultEyebrow}</span>
-                <h2>{noResult ? t.planner.noResultHeading : t.planner.resultHeading}</h2>
-                <p>{noResult ? (result.reason === "no-access-seeds" ? t.planner.noResultAccessSeeds : t.planner.noResultNoStations) : t.planner.resultBody}</p>
+                {noResult ? (
+                  <>
+                    <h2>{t.planner.noResultHeading}</h2>
+                    <p>{result.reason === "no-access-seeds" ? t.planner.noResultAccessSeeds : t.planner.noResultNoStations}</p>
+                  </>
+                ) : (
+                  <>
+                    <h2>{t.planner.resultHeading(fairCount)}</h2>
+                    <p>{t.planner.resultTolerance(result.metadata.surface.selectedTolerancePercent)}</p>
+                    <div className="context-strip">
+                      <span className="context-item"><small>{t.contextStrip.plannedStart}</small><strong>{formatDate(locale, result.metadata.surface.searchStartAt)}</strong></span>
+                      <span className="context-item"><small>{t.contextStrip.tolerance}</small><strong>±{result.metadata.surface.selectedTolerancePercent}%</strong></span>
+                      <span className="context-item"><small>{t.contextStrip.basis}</small><strong>{t.contextStrip.basisValue}</strong></span>
+                    </div>
+                    <p className="result-action">{t.planner.resultAction(fairCount)}</p>
+                  </>
+                )}
                 <ScheduleDisclosure result={result} />
               </section>
             )}

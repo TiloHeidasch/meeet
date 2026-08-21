@@ -70,13 +70,13 @@ test.describe("client UI localization", () => {
       const progress = page.locator('[data-testid="calculation-progress"]');
       await expect(progress).toBeVisible();
       const phases = progress.locator(".progress-phases");
-      for (const label of ["Nahegelegene ÖPNV-Zugänge werden gesucht", "Geplante MVV-Verbindungen werden geprüft", "Stationsbereiche werden verglichen", "Die validierte Karte wird vorbereitet"]) {
+      for (const label of ["Nahegelegene ÖPNV-Zugänge werden gesucht", "Geplante MVV-Verbindungen werden geprüft", "Treffpunkte werden verglichen", "Die validierte Karte wird vorbereitet"]) {
         await expect(phases.getByText(label, { exact: true })).toBeVisible();
       }
-      await expect(page.getByText("Fläche bereit", { exact: true })).toBeVisible();
-      await expect(page.getByRole("heading", { name: "Ein fairer Ort zum Meeet." })).toBeVisible();
-      await expect(page.getByText("Rot ist schneller", { exact: false })).toBeVisible();
-      await expect(page.getByText("Surface ready", { exact: true })).toHaveCount(0);
+      await expect(page.getByText("Dein Ergebnis", { exact: true })).toBeVisible();
+      await expect(page.getByRole("heading", { name: "1 fairer Treffpunkt gefunden" })).toBeVisible();
+      await expect(page.getByText("Teilnehmer 1 kommt früher an", { exact: false })).toBeVisible();
+      await expect(page.getByText("Meeting result", { exact: true })).toHaveCount(0);
     } finally {
       await context.close();
     }
