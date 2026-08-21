@@ -258,30 +258,56 @@ frames map to `file.ts:1`; aggregate by function name, not line.
 
 ## Issue #91 schema-aware artifact freeze profile (2026-08-21)
 
-Three fresh Node 24.19.0 child processes ran the v2 harness after replacing
-generic artifact deep-freezing with schema-aware traversal. The successful
-command was:
+The controlled comparison used the v2 protocol with the same `package-lock.json`
+dependency resolution in two isolated temporary worktrees:
+
+- `origin/dev` baseline at merge-base `6d75b36b829993be9e50a2c47bbaab4cc1abc7ba`
+- current HEAD at `cce19f597de4e2bc2d38da4be286f75b176ef80d`
+
+Each worktree ran `npm ci --no-audit --no-fund`, then ran the identical profile
+command under Node 24.19.0:
 
 ```sh
 NODE_OPTIONS=--conditions=react-server npm exec --yes --package=node@24 -- node --conditions=react-server node_modules/tsx/dist/cli.mjs scripts/profile-scheduled-calculation.ts
 ```
 
-The same real artifact was used for every child:
+The real artifact source was
+`data/scheduled/mvv-scheduled-artifact.json`; byte-identical copies were used
+in both worktrees. Its identity and shape were:
 
-- path: `data/scheduled/mvv-scheduled-artifact.json`
 - `compiledArtifactId`: `88e0e6b01a3f92900c37fd6b2992601b8600551d207e78bd843396ead691512d`
 - payload: `808,821,104` bytes
 - counts: `9,313` station areas and `2,075,789` connections
 
-Raw cold-load measurements from
-`profiles/report-88e0e6b01a3f-2026-08-21T14-20-37.827Z.json`:
+The unchanged aggregate reports were preserved as ignored artifacts at:
+
+- baseline: `profiles/report-88e0e6b01a3f-2026-08-21T14-34-46.634Z.json`
+- current HEAD: `profiles/report-88e0e6b01a3f-2026-08-21T14-35-51.136Z.json`
+
+Both reports contain three fresh child-process samples, Node `24.19.0`, three
+matching `sampleCompiledArtifactIds`, and successful strict validation.
+
+Raw baseline cold-load measurements (`origin/dev`):
 
 | Sample | Child process | Artifact-load elapsed (ms) | Artifact-load heap delta (bytes) |
 | ---: | ---: | ---: | ---: |
-| 1 | 59992 | 13,441 | 1,107,522,968 |
-| 2 | 60034 | 13,369 | 1,065,253,712 |
-| 3 | 60122 | 12,048 | 1,068,943,728 |
-| **Median** | — | **13,369** | **1,068,943,728** |
+| 1 | 67003 | 12,076 | 1,061,983,872 |
+| 2 | 67050 | 11,922 | 1,115,183,608 |
+| 3 | 67069 | 11,839 | 1,115,042,784 |
+| **Median** | — | **11,922** | **1,115,042,784** |
 
-The aggregate report recorded Node `24.19.0`, successful strictly validated
-requests, and the same compiled artifact identity in all three children.
+Raw current-HEAD cold-load measurements:
+
+| Sample | Child process | Artifact-load elapsed (ms) | Artifact-load heap delta (bytes) |
+| ---: | ---: | ---: | ---: |
+| 1 | 67121 | 12,650 | 1,078,302,256 |
+| 2 | 67200 | 12,351 | 1,046,724,472 |
+| 3 | 67275 | 12,382 | 1,064,955,776 |
+| **Median** | — | **12,382** | **1,064,955,776** |
+
+After-minus-before median delta: **+460 ms** elapsed and
+**−50,087,008 bytes** heap delta. These are independent fresh-process median
+comparisons, not paired child measurements. Artifact-load elapsed time varied
+across the three samples (11,839–12,076 ms before; 12,351–12,650 ms after),
+and heap deltas are GC-dependent; the delta should therefore be read with that
+sample variance in mind.
