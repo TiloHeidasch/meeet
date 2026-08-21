@@ -1,5 +1,6 @@
 import "server-only";
 
+import { freezeEnvelope } from "./freeze.ts";
 import { ProviderNotConfiguredError, ProviderUnavailableError, type ScheduledAccessSeedProvider, type ScheduledAccessSeedCandidate } from "../providers.ts";
 import {
   buildScheduledStationAreaCatalog,
@@ -11,6 +12,7 @@ import {
   DEFAULT_WALKING_VELOCITY_METERS_PER_SECOND,
   createScheduledRoutingWindow,
   routeScheduledEarliestArrivals,
+  routeScheduledEarliestArrivalsPair,
 } from "./router.ts";
 import {
   CHANGE_TIME_PRESETS,
@@ -19,6 +21,8 @@ import {
   type ScheduledRoutingArtifact,
   type ScheduledDeadlineCheck,
   type ScheduledParticipantSurface,
+  type ScheduledStationAreaCatalog,
+  type ItineraryEdge,
 } from "./models.ts";
 import type { ScheduledMeetingRequest, ScheduledMeetingParticipantInput } from "../../validation/meeting-v3.ts";
 import type {
@@ -93,11 +97,19 @@ export interface ScheduledCalculationBasis {
   readonly status: ScheduledMeetingResponseDto["status"];
   readonly reason: ScheduledMeetingResponseDto["reason"];
   readonly stationAreas: readonly ScheduledMeetingStationAreaDto[];
+  /**
+   * Certified per-participant arrival graph (predecessor edges keyed by
+   * station-area id), produced by the same scan that set the marker arrivals.
+   * Consumed at details time to rebuild itinerary legs without re-running
+   * routing. Index 0 = red participant, index 1 = blue participant.
+   */
+  readonly itineraryGraph: readonly [Readonly<Record<string, ItineraryEdge>>, Readonly<Record<string, ItineraryEdge>>];
 }
 
 export interface ScheduledMeetingCalculation {
   readonly response: ScheduledMeetingResponse;
   readonly basis: ScheduledCalculationBasis;
+  readonly stationAreaCatalog: ScheduledStationAreaCatalog;
 }
 
 export async function calculateScheduledMeeting(
@@ -156,13 +168,27 @@ export async function calculateScheduledMeetingWithBasis(
     deadlineCheck: providers.deadlineCheck,
   });
   await hooks?.onStage?.("scan-red");
-  const firstRoute = scheduledSeedSets[0].length === 0
-    ? null
-    : routeScheduledEarliestArrivals(artifact, scheduledSeedSets[0], request.searchStartAt, { deadlineCheck: providers.deadlineCheck }, window);
   await hooks?.onStage?.("scan-blue");
-  const secondRoute = scheduledSeedSets[1].length === 0
-    ? null
-    : routeScheduledEarliestArrivals(artifact, scheduledSeedSets[1], request.searchStartAt, { deadlineCheck: providers.deadlineCheck }, window);
+  let firstRoute: ReturnType<typeof routeScheduledEarliestArrivals> | null = null;
+  let secondRoute: ReturnType<typeof routeScheduledEarliestArrivals> | null = null;
+  if (scheduledSeedSets[0].length > 0 && scheduledSeedSets[1].length > 0) {
+    const [pairedFirst, pairedSecond] = routeScheduledEarliestArrivalsPair(
+      artifact,
+      [scheduledSeedSets[0], scheduledSeedSets[1]],
+      request.searchStartAt,
+      { deadlineCheck: providers.deadlineCheck },
+      window,
+    );
+    firstRoute = pairedFirst;
+    secondRoute = pairedSecond;
+  } else {
+    if (scheduledSeedSets[0].length > 0) {
+      firstRoute = routeScheduledEarliestArrivals(artifact, scheduledSeedSets[0], request.searchStartAt, { deadlineCheck: providers.deadlineCheck }, window);
+    }
+    if (scheduledSeedSets[1].length > 0) {
+      secondRoute = routeScheduledEarliestArrivals(artifact, scheduledSeedSets[1], request.searchStartAt, { deadlineCheck: providers.deadlineCheck }, window);
+    }
+  }
   await hooks?.onStage?.("participant-surfaces");
   const participantSurfaces: [ScheduledParticipantSurface, ScheduledParticipantSurface] = [
     createParticipantSurface(request.participants[0].id, artifact, firstRoute),
@@ -184,7 +210,7 @@ export async function calculateScheduledMeetingWithBasis(
     noResult,
     request.tolerancePercent,
     providers.deadlineCheck,
-    async (candidate) => {
+    (candidate) => {
       const area: ScheduledMeetingStationAreaDto = {
         stationAreaId: candidate.stationAreaId,
         name: candidate.name,
@@ -197,7 +223,7 @@ export async function calculateScheduledMeetingWithBasis(
         withinSelectedTolerance: candidate.withinSelectedTolerance,
       };
       stationAreas.push(area);
-      await hooks?.onStationVerdict?.({
+      return hooks?.onStationVerdict?.({
         stationAreaId: candidate.stationAreaId,
         name: candidate.name,
         coordinate: candidate.coordinate,
@@ -208,7 +234,7 @@ export async function calculateScheduledMeetingWithBasis(
   );
   providers.deadlineCheck?.("meeting-result");
   await hooks?.onStage?.("response-build");
-  const response: ScheduledMeetingResponse = deepFreeze({
+  const response: ScheduledMeetingResponse = {
     contractVersion: "meeet-meeting/v3",
     status: noResult ? "no-result" : "ok",
     reason: noAccessSeeds ? "no-access-seeds" : firstReachable === 0 || secondReachable === 0 ? "no-reachable-stations" : null,
@@ -258,7 +284,8 @@ export async function calculateScheduledMeetingWithBasis(
       coverage: "munich-scheduled-station-area-meeting/v1",
       origins: { coverage: "globally-valid-origin/v1" },
     },
-  });
+  };
+  freezeEnvelope(response);
   const basis: ScheduledCalculationBasis = {
     canonicalRequest: cloneRequest(request),
     canonicalAccessSeeds: [
@@ -288,8 +315,11 @@ export async function calculateScheduledMeetingWithBasis(
     status: response.status,
     reason: response.reason,
     stationAreas: response.stationAreas.map((stationArea) => ({ ...stationArea })),
+    itineraryGraph: [firstRoute?.predecessorByArea ?? {}, secondRoute?.predecessorByArea ?? {}],
   };
-  return deepFreeze({ response, basis });
+  const calculation: ScheduledMeetingCalculation = { response, basis, stationAreaCatalog };
+  freezeEnvelope(calculation);
+  return calculation;
 }
 
 function participantResponse(

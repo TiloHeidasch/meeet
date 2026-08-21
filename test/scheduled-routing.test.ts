@@ -3,6 +3,8 @@ import test from "node:test";
 
 import {
   addServiceDays,
+  calculateScheduledCompiledArtifactId,
+  calculateScheduledContentHash,
   calculateScheduledSurface,
   compareScheduledConnections,
   importGtfsSchedule,
@@ -10,6 +12,7 @@ import {
   parseOffsetInstant,
   parseSearchStartInstant,
   routeScheduledEarliestArrivals,
+  routeScheduledEarliestArrivalsPair,
   createScheduledRoutingWindow,
   serviceDateRangeForSearch,
   serviceDateAnchorEpochSeconds,
@@ -234,6 +237,36 @@ test("GTFS import validates station areas, IDs, coordinates, columns, and freeze
   assert.notEqual(schedule.provenance.compiledArtifactId, ACQUISITION.rawArchiveSha256);
   assert.equal(Object.isFrozen(schedule), true);
   assert.equal(Object.isFrozen(schedule.connections), true);
+  assert.equal(Object.isFrozen(schedule.searchStartBounds), true);
+  assert.equal(Object.isFrozen(schedule.serviceDateRange), true);
+  assert.equal(Object.isFrozen(schedule.routes), true);
+  for (const route of schedule.routes) assert.equal(Object.isFrozen(route), true);
+  assert.equal(Object.isFrozen(schedule.trips), true);
+  for (const trip of schedule.trips) assert.equal(Object.isFrozen(trip), true);
+  assert.equal(Object.isFrozen(schedule.stationAreas), true);
+  for (const area of schedule.stationAreas) {
+    assert.equal(Object.isFrozen(area), true);
+    assert.equal(Object.isFrozen(area.coordinate), true);
+    assert.equal(Object.isFrozen(area.transferNeighbors), true);
+    for (const neighbor of area.transferNeighbors) assert.equal(Object.isFrozen(neighbor), true);
+  }
+  assert.equal(Object.isFrozen(schedule.calendars), true);
+  for (const calendar of schedule.calendars) {
+    assert.equal(Object.isFrozen(calendar), true);
+    assert.equal(Object.isFrozen(calendar.weekdays), true);
+  }
+  assert.equal(Object.isFrozen(schedule.exceptions), true);
+  for (const exception of schedule.exceptions) assert.equal(Object.isFrozen(exception), true);
+  for (const connection of schedule.connections) {
+    assert.equal(Object.isFrozen(connection), true);
+    assert.equal(Object.isFrozen(connection.line), true);
+  }
+  assert.equal(Object.isFrozen(schedule.provenance), true);
+  assert.equal(Object.isFrozen(schedule.provenance.files), true);
+  for (const file of schedule.provenance.files) assert.equal(Object.isFrozen(file), true);
+  assert.equal(Object.isFrozen(schedule.provenance.acquisition), true);
+  assert.equal(Object.isFrozen(schedule.provenance.acquisition.officialLicense), true);
+  assert.equal(Object.isFrozen(schedule.provenance.acquisition.officialProvenance), true);
   assert.throws(() => Reflect.apply(Array.prototype.push, schedule.connections, [schedule.connections[0]]), TypeError);
 
   const missingColumn = { ...FIXTURE_FILES, "routes.txt": "route_id\nred" };
@@ -242,6 +275,26 @@ test("GTFS import validates station areas, IDs, coordinates, columns, and freeze
   assert.throws(() => importFixtureFiles(badCoordinate), /coordinate bounds/);
   const badParent = { ...FIXTURE_FILES, "stops.txt": FIXTURE_FILES["stops.txt"].replace("station-b\n", "missing-parent\n") };
   assert.throws(() => importFixtureFiles(badParent), /parent_station/);
+});
+
+test("batched canonical hashing preserves the pre-change fixture identity", () => {
+  const expectedContentHash = "eba14665b5b4b7ebe538a981b28dc3cd56a0a818d9fe2cb5b7d62515c12c9084";
+  const expectedCompiledArtifactId = "94c2776a25c095fdcebb85a47e26322dd95deaaf7c8952e5ef3b176923d0d51e";
+  const { provenance, ...core } = FIXTURE_SCHEDULED_ARTIFACT;
+  const { compiledArtifactId, ...identity } = provenance;
+
+  assert.equal(calculateScheduledContentHash(identity.feedId, identity.timeZone, identity.files), expectedContentHash);
+  assert.equal(identity.contentHash, expectedContentHash);
+  assert.equal(calculateScheduledCompiledArtifactId(core, identity), expectedCompiledArtifactId);
+  assert.equal(compiledArtifactId, expectedCompiledArtifactId);
+});
+
+test("batched canonical hashing preserves UTF-8 bytes across a chunk boundary", () => {
+  const files = [{ fileName: `${"x".repeat(65_470)}😀`, sha256: "b".repeat(64), byteLength: 123 }];
+  assert.equal(
+    calculateScheduledContentHash("batch-fixture", "Europe/Berlin", files),
+    "bc5ef0a390e1d974edcdf4d34e55bef64b033c51a65041b9c07ef7612446e26c",
+  );
 });
 
 test("GTFS importer accepts a BOM immediately before a quoted header and quoted CSV values", () => {
@@ -280,6 +333,47 @@ test("router scans the persisted connection template without sorting a cloned fu
     Array.prototype.sort = originalSort;
   }
   assert.equal(templateSortAttempted, false);
+});
+
+test("routeScheduledEarliestArrivalsPair matches two sequential routeScheduledEarliestArrivals calls", () => {
+  const schedule = fixture();
+  const seedsA = [{ stationAreaId: "station-a", accessSeconds: 0 }];
+  const seedsB = [{ stationAreaId: "station-c", accessSeconds: 0 }];
+  const options = { walkingVelocityMetersPerSecond: 10, transferRadiusMeters: 100 };
+  const sequential = [
+    routeScheduledEarliestArrivals(schedule, seedsA, SEARCH_START, options),
+    routeScheduledEarliestArrivals(schedule, seedsB, SEARCH_START, options),
+  ];
+  const paired = routeScheduledEarliestArrivalsPair(
+    schedule,
+    [seedsA, seedsB],
+    SEARCH_START,
+    options,
+  );
+  assert.deepEqual(paired[0], sequential[0]);
+  assert.deepEqual(paired[1], sequential[1]);
+  assert.ok(paired[0].reachableStationAreaCount > 0);
+});
+
+test("routeScheduledEarliestArrivalsPair matches sequential scans with asymmetric reachability", () => {
+  const schedule = fixture();
+  const seedsA = [{ stationAreaId: "station-a", accessSeconds: 0 }];
+  const seedsB = [{ stationAreaId: "station-unreachable", accessSeconds: 0 }];
+  const options = { walkingVelocityMetersPerSecond: 10, transferRadiusMeters: 100 };
+  const sequential = [
+    routeScheduledEarliestArrivals(schedule, seedsA, SEARCH_START, options),
+    routeScheduledEarliestArrivals(schedule, seedsB, SEARCH_START, options),
+  ];
+  const paired = routeScheduledEarliestArrivalsPair(
+    schedule,
+    [seedsA, seedsB],
+    SEARCH_START,
+    options,
+  );
+  assert.deepEqual(paired[0], sequential[0]);
+  assert.deepEqual(paired[1], sequential[1]);
+  assert.ok(paired[0].reachableStationAreaCount > 0);
+  assert.equal(paired[1].reachableStationAreaCount, 1);
 });
 
 test("routing-window materialization calculates one anchor per candidate service date", () => {
@@ -407,8 +501,13 @@ test("midnight rollover is routable from the preceding local service date", () =
   assert.equal(midnightConnection?.serviceDate, "2026-08-09");
   assert.equal(midnightConnection === undefined ? null : midnightConnection.arrivalEpochSeconds - midnightConnection.departureEpochSeconds, 15 * 60);
   const result = routeScheduledEarliestArrivals(schedule, [{ stationAreaId: "station-a", accessSeconds: 0 }], midnightStart, { walkingVelocityMetersPerSecond: 10, transferRadiusMeters: 100 }, window);
-  assert.equal(result.stationArrivals.find((arrival) => arrival.stationAreaId === "station-b")?.elapsedSeconds, 20 * 60);
-  assert.match(result.stationArrivals.find((arrival) => arrival.stationAreaId === "station-b")?.arrivalAt ?? "", /2026-08-09T22:10/);
+  const stationBArrival = result.stationArrivals.find((arrival) => arrival.stationAreaId === "station-b");
+  assert.equal(stationBArrival?.elapsedSeconds, 20 * 60);
+  assert.ok(stationBArrival?.arrivalEpochSeconds !== null, "station-b arrival epoch must be present");
+  assert.match(
+    new Date((stationBArrival!.arrivalEpochSeconds as number) * 1000).toISOString(),
+    /2026-08-09T22:10/,
+  );
 });
 
 test("local coordinate interchange is available without an all-pairs transfer graph", () => {
@@ -928,7 +1027,7 @@ test("agency timezone and unsupported GTFS extensions are fail-closed", () => {
 
 test("station-level collapse drops intra-area legs and deduplicates consecutive same-area visits", () => {
   const schedule = FIXTURE_SCHEDULED_ARTIFACT;
-  assert.ok(schedule.stationAreas.every((area) => Object.keys(area).sort().join(",") === "coordinate,id,mode,name"));
+  assert.ok(schedule.stationAreas.every((area) => Object.keys(area).sort().join(",") === "coordinate,id,mode,name,transferNeighbors"));
   assert.ok(schedule.connections.every((connection) => connection.fromStationAreaId !== connection.toStationAreaId));
   const collapse = schedule.connections.filter((connection) => connection.tripId === "fixture-collapse");
   assert.deepEqual(collapse.map((connection) => [connection.fromStationAreaId, connection.toStationAreaId]), [

@@ -28,7 +28,7 @@ export type StationAreaDetailsValidationResult =
 const DETAIL_KEYS = ["contractVersion", "status", "reason", "stationArea", "participants", "basis"] as const;
 const MARKER_KEYS = ["stationAreaId", "name", "coordinate", "mode", "classification", "redArrivalSeconds", "blueArrivalSeconds", "fasterParticipant", "withinSelectedTolerance"] as const;
 const BASIS_KEYS = ["contractVersion", "searchStartAt", "selectedTolerancePercent", "changeTimeSeconds", "routingHorizonSeconds", "walkingVelocityMetersPerSecond", "walkingSecondsRoundingRule", "transferRadiusMeters", "deterministicSelectionPolicy", "schedule", "accessProvider"] as const;
-const PARTICIPANT_KEYS = ["id", "color", "origin", "status", "unavailableReason", "terminal"] as const;
+const PARTICIPANT_KEYS = ["id", "color", "origin", "status", "unavailableReason", "terminal", "itinerary"] as const;
 const TERMINAL_KEYS = ["totalSeconds", "arrivalAt"] as const;
 
 export function validateStationAreaDetailsResponse(
@@ -157,6 +157,21 @@ function validateParticipantBindings(
           issues.push(issue([...participantPath, "terminal", "arrivalAt"], "inconsistent", "Terminal arrivalAt must equal searchStartAt plus marker totalSeconds."));
         }
       }
+      if (value.itinerary === null || !Array.isArray(value.itinerary) || value.itinerary.length === 0) {
+        issues.push(issue([...participantPath, "itinerary"], "invalid_type", "Available detail participants require a non-empty itinerary."));
+      } else {
+        const searchStartEpochSeconds = context.request === undefined ? null : parseWholeInstant(context.request.searchStartAt);
+        if (searchStartEpochSeconds !== null) {
+          const first = value.itinerary[0];
+          const last = value.itinerary[value.itinerary.length - 1];
+          if (isRecord(first) && typeof first.startEpochSeconds === "number" && first.startEpochSeconds !== searchStartEpochSeconds) {
+            issues.push(issue([...participantPath, "itinerary", 0, "startEpochSeconds"], "inconsistent", "The first itinerary leg must start at the search start."));
+          }
+          if (isRecord(last) && typeof last.endEpochSeconds === "number" && Math.abs(last.endEpochSeconds - (searchStartEpochSeconds + selectedTotal)) > 60) {
+            issues.push(issue([...participantPath, "itinerary"], "inconsistent", "The itinerary final arrival must equal searchStart plus marker totalSeconds."));
+          }
+        }
+      }
     } else {
       if (value.status !== "unavailable") issues.push(issue([...participantPath, "status"], "inconsistent", "An unreachable marker requires an unavailable detail participant."));
       if (value.unavailableReason === null) issues.push(issue([...participantPath, "unavailableReason"], "inconsistent", "Unavailable detail participants must disclose an explicit reason."));
@@ -166,6 +181,7 @@ function validateParticipantBindings(
       if (value.unavailableReason !== expectedUnavailableReason) issues.push(issue([...participantPath, "unavailableReason"], "inconsistent", "Unavailable reason must match the cached detail status and marker."));
       if (terminal === undefined) issues.push(issue([...participantPath, "terminal"], "invalid_type", "Unavailable detail participants require a null terminal."));
       else if (terminal.totalSeconds !== null || terminal.arrivalAt !== null) issues.push(issue([...participantPath, "terminal"], "inconsistent", "Unavailable detail participants must have null terminal fields."));
+      if (value.itinerary !== null) issues.push(issue([...participantPath, "itinerary"], "inconsistent", "Unavailable detail participants must have a null itinerary."));
     }
     if (context.request !== undefined) {
       const expected = context.request.participants[index];
@@ -192,7 +208,51 @@ function validateParticipant(value: unknown, index: number, issues: ScheduledVal
     addUnknownKeys(value.terminal, TERMINAL_KEYS, [...path, "terminal"], issues);
     if (!isNullableWholeSecond(value.terminal.totalSeconds) || !isNullableString(value.terminal.arrivalAt)) issues.push(issue([...path, "terminal"], "invalid_value", "Detail terminal fields are invalid."));
   }
+  validateItinerary(value.itinerary, path, issues);
 }
+
+const ITINERARY_LEG_KEYS_WALK = ["kind", "fromAreaId", "toAreaId", "fromAreaName", "toAreaName", "startEpochSeconds", "endEpochSeconds"] as const;
+const ITINERARY_LEG_KEYS_TRANSIT = ["kind", "fromAreaId", "toAreaId", "fromAreaName", "toAreaName", "line", "routeType", "headsign", "tripId", "startEpochSeconds", "endEpochSeconds"] as const;
+
+function validateItinerary(value: unknown, path: Array<string | number>, issues: ScheduledValidationIssue[]): void {
+  if (value === null) return;
+  if (!Array.isArray(value)) {
+    issues.push(issue([...path, "itinerary"], "invalid_type", "Itinerary must be null or an array of legs."));
+    return;
+  }
+  value.forEach((leg, index) => {
+    const legPath = [...path, "itinerary", index];
+    if (!isRecord(leg)) {
+      issues.push(issue(legPath, "invalid_type", "Itinerary leg must be an object."));
+      return;
+    }
+    if (leg.kind === "walk") {
+      addUnknownKeys(leg, ITINERARY_LEG_KEYS_WALK, legPath, issues);
+      if (leg.fromAreaId !== null && !isNonEmptyString(leg.fromAreaId)) issues.push(issue([...legPath, "fromAreaId"], "invalid_value", "walk fromAreaId must be a string or null."));
+      if (!isNonEmptyString(leg.toAreaId)) issues.push(issue([...legPath, "toAreaId"], "invalid_value", "walk toAreaId must be a non-empty string."));
+      if (leg.fromAreaName !== null && typeof leg.fromAreaName !== "string") issues.push(issue([...legPath, "fromAreaName"], "invalid_value", "walk fromAreaName must be a string or null."));
+      if (typeof leg.toAreaName !== "string") issues.push(issue([...legPath, "toAreaName"], "invalid_value", "walk toAreaName must be a string."));
+      if (!isEpochSecond(leg.startEpochSeconds) || !isEpochSecond(leg.endEpochSeconds)) issues.push(issue(legPath, "invalid_value", "walk leg timestamps must be whole seconds."));
+      else if (leg.endEpochSeconds < leg.startEpochSeconds) issues.push(issue(legPath, "inconsistent", "walk leg end must not precede start."));
+    } else if (leg.kind === "transit") {
+      addUnknownKeys(leg, ITINERARY_LEG_KEYS_TRANSIT, legPath, issues);
+      if (!isNonEmptyString(leg.fromAreaId)) issues.push(issue([...legPath, "fromAreaId"], "invalid_value", "transit fromAreaId must be a non-empty string."));
+      if (!isNonEmptyString(leg.toAreaId)) issues.push(issue([...legPath, "toAreaId"], "invalid_value", "transit toAreaId must be a non-empty string."));
+      if (typeof leg.fromAreaName !== "string") issues.push(issue([...legPath, "fromAreaName"], "invalid_value", "transit fromAreaName must be a string."));
+      if (typeof leg.toAreaName !== "string") issues.push(issue([...legPath, "toAreaName"], "invalid_value", "transit toAreaName must be a string."));
+      if (typeof leg.line !== "string") issues.push(issue([...legPath, "line"], "invalid_value", "transit line must be a string."));
+      if (typeof leg.routeType !== "number" || !Number.isFinite(leg.routeType)) issues.push(issue([...legPath, "routeType"], "invalid_value", "transit routeType must be a number."));
+      if (typeof leg.headsign !== "string") issues.push(issue([...legPath, "headsign"], "invalid_value", "transit headsign must be a string."));
+      if (!isNonEmptyString(leg.tripId)) issues.push(issue([...legPath, "tripId"], "invalid_value", "transit tripId must be a non-empty string."));
+      if (!isEpochSecond(leg.startEpochSeconds) || !isEpochSecond(leg.endEpochSeconds)) issues.push(issue(legPath, "invalid_value", "transit leg timestamps must be whole seconds."));
+      else if (leg.endEpochSeconds < leg.startEpochSeconds) issues.push(issue(legPath, "inconsistent", "transit leg end must not precede start."));
+    } else {
+      issues.push(issue(legPath, "invalid_enum", "Itinerary leg kind must be walk or transit."));
+    }
+  });
+}
+
+function isEpochSecond(value: unknown): value is number { return typeof value === "number" && Number.isSafeInteger(value); }
 
 function validateBasis(value: Record<string, unknown>, issues: ScheduledValidationIssue[], context: StationAreaDetailsValidationContext): void {
   addUnknownKeys(value, BASIS_KEYS, ["basis"], issues);
