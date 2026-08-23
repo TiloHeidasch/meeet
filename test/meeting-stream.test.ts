@@ -310,6 +310,22 @@ test("provider factory throws one safe terminal SSE error event", async () => {
   release();
 });
 
+test("RangeError from provider factory stays a safe generic terminal SSE error", async () => {
+  const response = await handleMeetingStreamPost(streamRequest(), () => {
+    throw new RangeError("secret");
+  }, { admission: new ScheduledCalculationAdmission() });
+  assert.equal(response.status, 200);
+  assert.equal(response.headers.get("content-type"), "text/event-stream");
+  const frames = parseSseFrames(await response.text());
+  const terminal = frames.filter((frame) => frame.event === "result" || frame.event === "error");
+  assert.equal(terminal.length, 1);
+  assert.equal(terminal[0]?.event, "error");
+  const error = JSON.parse(terminal[0]?.data ?? "{}");
+  assert.equal(error.code, "CALCULATION_FAILED");
+  assert.equal(error.message, "The scheduled meeting calculation could not be completed.");
+  assert.equal(JSON.stringify(error).includes("secret"), false);
+});
+
 test("every successful stream ends with exactly one terminal event and a trailing blank line", async () => {
   const response = await handleMeetingStreamPost(streamRequest(), PROVIDERS, { admission: new ScheduledCalculationAdmission() });
   const body = await response.text();

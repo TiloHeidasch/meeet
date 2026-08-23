@@ -272,7 +272,7 @@ export async function handleMeetingStreamPost(
       if (error instanceof ProviderConfigurationError) throw error;
       // Generic factory failures retain the established stream contract: the
       // response starts as SSE and reports one safe terminal failure event.
-      providerFactoryFailure = { error };
+      providerFactoryFailure = { error: normalizeProviderFactoryFailure() };
     }
     acquired.deadline.check();
   } catch (error) {
@@ -617,6 +617,10 @@ function isTooLargeContentLength(value: string): boolean {
 
 function isCalculationReferenceSyntaxValid(value: string): boolean {
   return value.length <= 256 && /^[A-Za-z0-9._~-]+$/.test(value);
+}
+
+function normalizeProviderFactoryFailure(): Error {
+  return new Error("The scheduled meeting provider factory failed.");
 }
 
 type ParsedMeetingRequestResult =
