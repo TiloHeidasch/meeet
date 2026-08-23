@@ -291,17 +291,23 @@ test("heartbeat comments keep the stream alive during slow access", async () => 
   assert.ok(body.includes(": heartbeat"));
 });
 
-test("provider factory throws a terminal error event with a safe message", async () => {
+test("provider factory throws one safe terminal SSE error event", async () => {
+  const admission = new ScheduledCalculationAdmission();
   const response = await handleMeetingStreamPost(streamRequest(), () => {
     throw new Error("secret internal detail: token=abc123");
-  }, { admission: new ScheduledCalculationAdmission() });
-  const body = await response.text();
-  const frames = parseSseFrames(body);
-  const errorFrame = frames.find((frame) => frame.event === "error");
-  assert.ok(errorFrame?.data);
-  const error = JSON.parse(errorFrame.data);
+  }, { admission });
+  assert.equal(response.status, 200);
+  assert.equal(response.headers.get("content-type"), "text/event-stream");
+  const frames = parseSseFrames(await response.text());
+  const terminal = frames.filter((frame) => frame.event === "result" || frame.event === "error");
+  assert.equal(terminal.length, 1);
+  assert.equal(terminal[0]?.event, "error");
+  const error = JSON.parse(terminal[0]?.data ?? "{}");
   assert.equal(error.code, "CALCULATION_FAILED");
   assert.ok(!error.message.includes("secret internal detail"));
+  const release = admission.tryAcquire();
+  assert.ok(release, "generic factory failure must release admission");
+  release();
 });
 
 test("every successful stream ends with exactly one terminal event and a trailing blank line", async () => {
