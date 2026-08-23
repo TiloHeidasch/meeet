@@ -67,6 +67,13 @@ function compilerFeedFiles(): GtfsFeedFiles {
   };
 }
 
+function freezeCoverageFeedFiles(): GtfsFeedFiles {
+  return {
+    ...compilerFeedFiles(),
+    "calendar_dates.txt": "service_id,date,exception_type\nfixture-service,20260810,2",
+  };
+}
+
 function localeOrderingCompilerFeedFiles(): GtfsFeedFiles {
   return {
     ...compilerFeedFiles(),
@@ -261,6 +268,56 @@ test("scheduled artifact persists as a compact binary bundle and retains immutab
   assert.strictEqual(loadScheduledArtifact(manifestPath, { now: "2026-08-11T12:00:00Z" }), loaded);
   assert.equal(Object.isFrozen(loaded), true);
   assert.equal(Object.isFrozen(loaded.connections), true);
+  await rm(directory, { recursive: true, force: true });
+});
+
+test("schema-aware artifact loading freezes every persisted artifact branch", async () => {
+  const artifact = compileScheduledArtifact({
+    sourceUrl: SCHEDULED_MVV_FEED_URL,
+    rawArchiveBytes: new TextEncoder().encode("schema-aware-freeze-coverage"),
+    feedFiles: freezeCoverageFeedFiles(),
+    retrievedAt: "2026-08-11T10:00:00Z",
+  });
+  const directory = await mkdtemp(join(tmpdir(), "meeet-schema-aware-freeze-"));
+  const manifestPath = join(directory, "scheduled-bundle.json");
+  writeScheduledArtifact(manifestPath, artifact);
+  const loaded = loadScheduledArtifact(manifestPath, { now: "2026-08-11T12:00:00Z" });
+  const assertFrozen = (value: object): void => assert.equal(Object.isFrozen(value), true);
+
+  assertFrozen(loaded);
+  assertFrozen(loaded.searchStartBounds);
+  assertFrozen(loaded.serviceDateRange);
+  assertFrozen(loaded.routes);
+  for (const route of loaded.routes) assertFrozen(route);
+  assertFrozen(loaded.trips);
+  for (const trip of loaded.trips) assertFrozen(trip);
+  assertFrozen(loaded.stationAreas);
+  for (const area of loaded.stationAreas) {
+    assertFrozen(area);
+    assertFrozen(area.coordinate);
+    assertFrozen(area.transferNeighbors);
+    for (const neighbor of area.transferNeighbors) assertFrozen(neighbor);
+  }
+  assertFrozen(loaded.calendars);
+  for (const calendar of loaded.calendars) {
+    assertFrozen(calendar);
+    assertFrozen(calendar.weekdays);
+  }
+  assertFrozen(loaded.exceptions);
+  for (const exception of loaded.exceptions) assertFrozen(exception);
+  assertFrozen(loaded.connections);
+  for (const connection of loaded.connections) {
+    assertFrozen(connection);
+    assertFrozen(connection.line);
+  }
+  assertFrozen(loaded.provenance);
+  assertFrozen(loaded.provenance.files);
+  for (const file of loaded.provenance.files) assertFrozen(file);
+  assertFrozen(loaded.provenance.acquisition);
+  assertFrozen(loaded.provenance.acquisition.officialLicense);
+  assertFrozen(loaded.provenance.acquisition.officialProvenance);
+
+  assert.strictEqual(loadScheduledArtifact(manifestPath, { now: "2026-08-11T12:00:00Z" }), loaded);
   await rm(directory, { recursive: true, force: true });
 });
 

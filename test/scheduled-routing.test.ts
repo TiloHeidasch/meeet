@@ -237,6 +237,36 @@ test("GTFS import validates station areas, IDs, coordinates, columns, and freeze
   assert.notEqual(schedule.provenance.compiledArtifactId, ACQUISITION.rawArchiveSha256);
   assert.equal(Object.isFrozen(schedule), true);
   assert.equal(Object.isFrozen(schedule.connections), true);
+  assert.equal(Object.isFrozen(schedule.searchStartBounds), true);
+  assert.equal(Object.isFrozen(schedule.serviceDateRange), true);
+  assert.equal(Object.isFrozen(schedule.routes), true);
+  for (const route of schedule.routes) assert.equal(Object.isFrozen(route), true);
+  assert.equal(Object.isFrozen(schedule.trips), true);
+  for (const trip of schedule.trips) assert.equal(Object.isFrozen(trip), true);
+  assert.equal(Object.isFrozen(schedule.stationAreas), true);
+  for (const area of schedule.stationAreas) {
+    assert.equal(Object.isFrozen(area), true);
+    assert.equal(Object.isFrozen(area.coordinate), true);
+    assert.equal(Object.isFrozen(area.transferNeighbors), true);
+    for (const neighbor of area.transferNeighbors) assert.equal(Object.isFrozen(neighbor), true);
+  }
+  assert.equal(Object.isFrozen(schedule.calendars), true);
+  for (const calendar of schedule.calendars) {
+    assert.equal(Object.isFrozen(calendar), true);
+    assert.equal(Object.isFrozen(calendar.weekdays), true);
+  }
+  assert.equal(Object.isFrozen(schedule.exceptions), true);
+  for (const exception of schedule.exceptions) assert.equal(Object.isFrozen(exception), true);
+  for (const connection of schedule.connections) {
+    assert.equal(Object.isFrozen(connection), true);
+    assert.equal(Object.isFrozen(connection.line), true);
+  }
+  assert.equal(Object.isFrozen(schedule.provenance), true);
+  assert.equal(Object.isFrozen(schedule.provenance.files), true);
+  for (const file of schedule.provenance.files) assert.equal(Object.isFrozen(file), true);
+  assert.equal(Object.isFrozen(schedule.provenance.acquisition), true);
+  assert.equal(Object.isFrozen(schedule.provenance.acquisition.officialLicense), true);
+  assert.equal(Object.isFrozen(schedule.provenance.acquisition.officialProvenance), true);
   assert.throws(() => Reflect.apply(Array.prototype.push, schedule.connections, [schedule.connections[0]]), TypeError);
 
   const missingColumn = { ...FIXTURE_FILES, "routes.txt": "route_id\nred" };
