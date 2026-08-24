@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState, type FormEvent, type KeyboardEvent } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type FormEvent, type KeyboardEvent } from "react";
 import dynamic from "next/dynamic";
 import { validateMeetingResponse, type MeetingRequest, type MeetingResponse, type MeetingStationArea, type StationAreaMode } from "@/lib/client/meeting-response";
 import { validateStationAreaDetails, type StationAreaDetail, type ItineraryLeg } from "@/lib/client/station-area-details";
@@ -15,6 +15,8 @@ type Location = { label: string; lat: number; lng: number };
 type SearchResult = { label: string; latitude: number; longitude: number };
 type Participant = { id: "participant-1" | "participant-2"; location: Location | null };
 type Status = "idle" | "loading" | "success" | "error";
+type LocationStatus = "idle" | "loading" | "success" | "error";
+type GeolocationErrorKey = "permissionDenied" | "unavailable" | "timeout" | "insecure" | "unsupported" | "unknown";
 export type PlannerCapability = { scheduled: { configurationAvailable: boolean; unavailableReason: "schedule-artifact-not-configured" | null } };
 export type PlannerUiState = { calculationUnavailable: boolean; canCalculate: boolean; controlsDisabled: boolean; showModeSelector: false; unavailableMessage: string };
 export function getPlannerUiState(capability: PlannerCapability, locale: Locale): PlannerUiState { const unavailable = !capability.scheduled.configurationAvailable; return { calculationUnavailable: unavailable, canCalculate: !unavailable, controlsDisabled: unavailable, showModeSelector: false, unavailableMessage: unavailable ? messages[locale].planner.unavailableMessage : "" }; }
@@ -35,6 +37,12 @@ function changeTimePresets(locale: Locale): readonly { readonly value: ChangeTim
 function phaseLabel(locale: Locale, phase: CalculationProgressPhase) { return messages[locale].phases[PHASE_KEY[phase]]; }
 function classificationLabel(locale: Locale, value: MeetingStationArea["classification"]) { return messages[locale].classification.label[value]; }
 function classificationShort(locale: Locale, value: MeetingStationArea["classification"]) { return messages[locale].classification.short[value]; }
+export function geolocationErrorKey(error: Pick<GeolocationPositionError, "code">): GeolocationErrorKey {
+  if (error.code === 1) return "permissionDenied";
+  if (error.code === 2) return "unavailable";
+  if (error.code === 3) return "timeout";
+  return "unknown";
+}
 function MapLoading() { const locale = useLocale(); return <div className="map-surface grid min-h-[430px] place-items-center rounded-[1.75rem] text-sm text-[#526057]">{messages[locale].map.loading}</div>; }
 function Icon({ name }: { name: "pin" | "chevron" }) { return <svg aria-hidden="true" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className={name === "chevron" ? "station-chevron" : undefined}>{name === "pin" ? <><path d="M12 21s7-6.1 7-12A7 7 0 0 0 5 9c0 5.9 7 12 7 12Z"/><circle cx="12" cy="9" r="2"/></> : <path d="m6 9 6 6 6-6"/>}</svg>; }
 
@@ -81,13 +89,58 @@ function StationGlyph({ mode }: { mode: StationAreaMode }) {
   );
 }
 
-function LocationInput({ participant, index, error, disabled, onChange }: { participant: Participant; index: number; error?: string; disabled: boolean; onChange: (location: Location) => void }) {
+function LocationInput({ participant, index, error, disabled, onChange, onPendingChange }: { participant: Participant; index: number; error?: string; disabled: boolean; onChange: (location: Location) => void; onPendingChange: (index: number, pending: boolean) => void }) {
   const locale = useLocale(); const t = messages[locale];
-  const [query, setQuery] = useState(participant.location?.label ?? ""); const [results, setResults] = useState<SearchResult[]>([]); const [searching, setSearching] = useState(false); const request = useRef(0);
-  useEffect(() => { if (!query.trim() || disabled || query === participant.location?.label) return; const id = ++request.current; const timer = window.setTimeout(() => { setSearching(true); void fetch(`/api/locations/search?q=${encodeURIComponent(query)}`).then(async (response) => { const value: unknown = await response.json().catch(() => null); if (!response.ok || !isRecord(value) || !Array.isArray(value.locations)) throw new Error(); return value.locations.filter((item): item is SearchResult => isRecord(item) && typeof item.label === "string" && typeof item.latitude === "number" && typeof item.longitude === "number"); }).then((items) => { if (id === request.current) { setResults(items); setSearching(false); } }).catch(() => { if (id === request.current) { setResults([]); setSearching(false); } }); }, 220); return () => window.clearTimeout(timer); }, [query, disabled, participant.location?.label]);
-  function choose(result: SearchResult) { request.current += 1; setQuery(result.label); setResults([]); onChange({ label: result.label, lat: result.latitude, lng: result.longitude }); }
-  function keyDown(event: KeyboardEvent<HTMLInputElement>) { if (event.key === "Escape") setResults([]); if (event.key === "Enter" && results[0]) { event.preventDefault(); choose(results[0]); } }
-  const listboxId = `location-results-${index + 1}`; const inputId = `origin-input-${index + 1}`; return <fieldset className="origin-card"><legend className="sr-only">{t.location.participantOrigin(index + 1)}</legend><div className="origin-title"><span className="origin-number" style={{ backgroundColor: COLORS[index] }}>{index + 1}</span><span>{t.location.participant(index + 1)}</span><span className="origin-mode">{t.location.transit}</span></div><label htmlFor={inputId}><span className="field-label">{t.location.startingPointLabel}</span></label><span className="origin-input-wrap"><input id={inputId} value={query} disabled={disabled} onChange={(event) => { setQuery(event.target.value); setResults([]); }} onKeyDown={keyDown} role="combobox" aria-label={t.location.startingPointAria(index + 1)} aria-controls={listboxId} aria-expanded={results.length > 0} className={error ? "input-error" : ""} placeholder={t.location.placeholder} autoComplete="off" />{results.length > 0 && <ul id={listboxId} role="listbox" className="location-results">{results.map((result) => <li role="option" aria-selected="false" key={`${result.label}-${result.latitude}`}><button type="button" onClick={() => choose(result)}>{result.label}</button></li>)}</ul>}</span>{participant.location && <span className="selected-origin"><Icon name="pin"/> {participant.location.label}</span>}{searching && <span className="input-hint">{t.location.searching}</span>}{error && <span className="input-error-text">{error}</span>}</fieldset>;
+  const [query, setQuery] = useState(participant.location?.label ?? ""); const [results, setResults] = useState<SearchResult[]>([]); const [searching, setSearching] = useState(false); const operation = useRef(0);
+  const [locationStatus, setLocationStatus] = useState<LocationStatus>("idle");
+  const [locationError, setLocationError] = useState<GeolocationErrorKey | null>(null);
+  const pendingRef = useRef(false);
+  const updatePending = useCallback((pending: boolean) => { if (pendingRef.current === pending) return; pendingRef.current = pending; onPendingChange(index, pending); }, [index, onPendingChange]);
+  function invalidateOperation() { operation.current += 1; updatePending(false); }
+  useEffect(() => { const generation = ++operation.current; if (!query.trim() || disabled || query === participant.location?.label) return () => { operation.current += 1; }; const timer = window.setTimeout(() => { if (generation !== operation.current) return; setSearching(true); void fetch(`/api/locations/search?q=${encodeURIComponent(query)}`).then(async (response) => { const value: unknown = await response.json().catch(() => null); if (!response.ok || !isRecord(value) || !Array.isArray(value.locations)) throw new Error(); return value.locations.filter((item): item is SearchResult => isRecord(item) && typeof item.label === "string" && typeof item.latitude === "number" && typeof item.longitude === "number"); }).then((items) => { if (generation === operation.current) { setResults(items); setSearching(false); } }).catch(() => { if (generation === operation.current) { setResults([]); setSearching(false); } }); }, 220); return () => { window.clearTimeout(timer); operation.current += 1; }; }, [query, disabled, participant.location?.label]);
+  useLayoutEffect(() => () => { operation.current += 1; updatePending(false); }, [disabled, updatePending]);
+  function choose(result: SearchResult) { invalidateOperation(); setQuery(result.label); setResults([]); onChange({ label: result.label, lat: result.latitude, lng: result.longitude }); }
+  function useCurrentLocation() {
+    if (disabled) return;
+    invalidateOperation();
+    setResults([]); setSearching(false);
+    setLocationError(null);
+    const generation = operation.current;
+    if (typeof window === "undefined" || window.isSecureContext === false) {
+      setLocationStatus("error"); setLocationError("insecure"); return;
+    }
+    if (!navigator.geolocation) {
+      setLocationStatus("error"); setLocationError("unsupported"); return;
+    }
+    setLocationStatus("loading");
+    updatePending(true);
+    navigator.geolocation.getCurrentPosition(
+      (position) => {
+        if (generation !== operation.current) return;
+        updatePending(false);
+        const { latitude, longitude } = position.coords;
+        const label = t.location.coordinateLabel(latitude, longitude);
+        setQuery(label);
+        setLocationStatus("success");
+        onChange({ label, lat: latitude, lng: longitude });
+      },
+      (geoError) => {
+        if (generation !== operation.current) return;
+        updatePending(false);
+        setLocationStatus("error"); setLocationError(geolocationErrorKey(geoError));
+      },
+      { enableHighAccuracy: false, timeout: 10_000, maximumAge: 300_000 },
+    );
+  }
+  function locationFeedback() {
+    if (locationStatus === "loading") return <span className="location-feedback" role="status" aria-live="polite">{t.location.locating}</span>;
+    if (locationStatus === "success") return <span className="location-feedback location-success" role="status" aria-live="polite">{t.location.locationSet}</span>;
+    if (locationStatus !== "error" || !locationError) return null;
+    const copy = { permissionDenied: t.location.geolocationPermissionDenied, unavailable: t.location.geolocationUnavailable, timeout: t.location.geolocationTimeout, insecure: t.location.geolocationInsecure, unsupported: t.location.geolocationUnsupported, unknown: t.location.geolocationUnknown }[locationError];
+    return <span className="location-feedback location-error" role="alert">{copy}</span>;
+  }
+  function keyDown(event: KeyboardEvent<HTMLInputElement>) { if (event.key === "Escape") { invalidateOperation(); setResults([]); setSearching(false); setLocationStatus("idle"); setLocationError(null); } if (event.key === "Enter" && results[0]) { event.preventDefault(); choose(results[0]); } }
+  const listboxId = `location-results-${index + 1}`; const inputId = `origin-input-${index + 1}`; const locationButtonId = `current-location-${index + 1}`; return <fieldset className="origin-card"><legend className="sr-only">{t.location.participantOrigin(index + 1)}</legend><div className="origin-title"><span className="origin-number" style={{ backgroundColor: COLORS[index] }}>{index + 1}</span><span>{t.location.participant(index + 1)}</span><span className="origin-mode">{t.location.transit}</span></div><label htmlFor={inputId}><span className="field-label">{t.location.startingPointLabel}</span></label><span className="origin-input-wrap"><input id={inputId} value={query} disabled={disabled} onChange={(event) => { invalidateOperation(); setQuery(event.target.value); setResults([]); setSearching(false); setLocationStatus("idle"); setLocationError(null); }} onKeyDown={keyDown} role="combobox" aria-label={t.location.startingPointAria(index + 1)} aria-controls={listboxId} aria-expanded={results.length > 0} className={error ? "input-error" : ""} placeholder={t.location.placeholder} autoComplete="off" />{results.length > 0 && <ul id={listboxId} role="listbox" className="location-results">{results.map((result) => <li role="option" aria-selected="false" key={`${result.label}-${result.latitude}`}><button type="button" onClick={() => choose(result)}>{result.label}</button></li>)}</ul>}</span><button id={locationButtonId} type="button" className="current-location-button" onClick={useCurrentLocation} disabled={disabled || locationStatus === "loading"} aria-busy={locationStatus === "loading"} aria-label={t.location.currentLocationAria(index + 1, locationStatus === "loading")}><span aria-hidden="true">◎</span>{locationStatus === "loading" ? t.location.locating : t.location.useCurrentLocation}</button>{participant.location && <span className="selected-origin"><Icon name="pin"/> {participant.location.label}</span>}{searching && <span className="input-hint">{t.location.searching}</span>}{locationFeedback()}{error && <span className="input-error-text">{error}</span>}</fieldset>;
 }
 function Legend() { const locale = useLocale(); const t = messages[locale]; return <div className="map-legend" aria-label={t.legend.ariaLabel}><span><i className="legend-swatch red"/> {t.legend.red}</span><span><i className="legend-swatch blue"/> {t.legend.blue}</span><span><i className="legend-swatch fair"/> {t.legend.fair}</span><span><i className="legend-swatch neutral"/> {t.legend.unclassified}</span></div>; }
 function ScheduleDisclosure({ result }: { result: MeetingResponse }) { const locale = useLocale(); const t = messages[locale]; const schedule = result.metadata.schedule; const acquisition = schedule.acquisition; const surface = result.metadata.surface; return <details className="disclosure"><summary>{t.disclosure.summary}</summary><div className="disclosure-copy"><p><strong>{t.disclosure.scopeTitle}</strong> {t.disclosure.scope}</p><p><strong>{t.disclosure.plannedStart}</strong> {formatDate(locale, surface.searchStartAt)} · <strong>{t.disclosure.tolerance}</strong> ±{surface.selectedTolerancePercent}%</p><p><strong>{t.disclosure.schedule}</strong> {acquisition.feedVersion} · {t.disclosure.validRange(schedule.serviceDateRange.firstDate, schedule.serviceDateRange.lastDate)} · {schedule.timeZone}</p><p>{t.disclosure.territories}</p><p><strong>{t.disclosure.source}</strong> {acquisition.sourceUrl} · {t.disclosure.retrieved} {formatDate(locale, acquisition.retrievedAt)} · {acquisition.officialAttribution} · {acquisition.officialLicense.name}</p></div></details>; }
@@ -274,11 +327,14 @@ export default function MeetPlanner({ capability }: { capability: PlannerCapabil
   const requestRef = useRef(0);
   const [phase, setPhase] = useState<CalculationProgressPhase | null>(null);
   const streamAbort = useRef<AbortController | null>(null);
+  const locationPendingRef = useRef<[boolean, boolean]>([false, false]);
+  const [locationPending, setLocationPending] = useState<[boolean, boolean]>([false, false]);
 
   function clearDetails() { detailAbort.current?.abort(); detailAbort.current = null; detailCache.current.clear(); setCalculationRef(null); setSelectedId(null); setDetail(null); setDetailError(""); setDetailLoading(false); setDetailExpired(false); }
   function changed() { if (result || progressiveVerdicts.length > 0) { clearDetails(); setProgressiveVerdicts([]); setResult(null); setStatus("idle"); setMessage(t.planner.inputsChanged); } }
   function cancelCalculation() { streamAbort.current?.abort(); requestRef.current += 1; setProgressiveVerdicts([]); setStatus("idle"); setPhase(null); setMessage(t.planner.cancelled); }
   function updateOrigin(index: number, location: Location) { setParticipants((items) => items.map((item, itemIndex) => itemIndex === index ? { ...item, location } : item)); setErrors({}); changed(); }
+  const reportLocationPending = useCallback((index: number, pending: boolean) => { if (locationPendingRef.current[index] === pending) return; const next = [...locationPendingRef.current] as [boolean, boolean]; next[index] = pending; locationPendingRef.current = next; setLocationPending(next); }, []);
 
   async function selectStationArea(id: string) {
     const currentResult = result;
@@ -347,6 +403,7 @@ export default function MeetPlanner({ capability }: { capability: PlannerCapabil
   }
 
   async function calculate() {
+    if (locationPendingRef.current.some(Boolean)) return;
     if (!canSubmitMeetingCalculation(ui, status)) return;
     const missing = participants.filter((item) => !item.location);
     if (missing.length || !searchStartAt) {
@@ -424,7 +481,7 @@ export default function MeetPlanner({ capability }: { capability: PlannerCapabil
     }
   }
 
-  function submit(event: FormEvent) { event.preventDefault(); void calculate(); }
+  function submit(event: FormEvent) { event.preventDefault(); if (locationPendingRef.current.some(Boolean)) return; void calculate(); }
   const progressiveStationAreas = useMemo(() => progressiveVerdicts.map((verdict): MeetingStationArea => ({
     stationAreaId: verdict.stationAreaId,
     name: verdict.name,
@@ -456,8 +513,8 @@ export default function MeetPlanner({ capability }: { capability: PlannerCapabil
             {ui.calculationUnavailable && <div className="state-card" role="status"><strong>{t.planner.searchUnavailable}</strong><span>{ui.unavailableMessage}</span></div>}
             <form onSubmit={submit} noValidate>
               <div className="origin-stack">
-                <LocationInput participant={participants[0]!} index={0} error={errors["participant-1"]} disabled={ui.controlsDisabled || status === "loading"} onChange={(location) => updateOrigin(0, location)} />
-                <LocationInput participant={participants[1]!} index={1} error={errors["participant-2"]} disabled={ui.controlsDisabled || status === "loading"} onChange={(location) => updateOrigin(1, location)} />
+                <LocationInput participant={participants[0]!} index={0} error={errors["participant-1"]} disabled={ui.controlsDisabled || status === "loading"} onChange={(location) => updateOrigin(0, location)} onPendingChange={reportLocationPending} />
+                <LocationInput participant={participants[1]!} index={1} error={errors["participant-2"]} disabled={ui.controlsDisabled || status === "loading"} onChange={(location) => updateOrigin(1, location)} onPendingChange={reportLocationPending} />
               </div>
               <div className="search-options">
                 <label className="start-field">
@@ -489,7 +546,7 @@ export default function MeetPlanner({ capability }: { capability: PlannerCapabil
                 </fieldset>
               </div>
               <div className="search-actions">
-                <button className="search-button" type="submit" disabled={!canSubmitMeetingCalculation(ui, status)}>
+                <button className="search-button" type="submit" disabled={!canSubmitMeetingCalculation(ui, status) || locationPending.some(Boolean)}>
                   {status === "loading" && <span className="button-spinner" />}
                   {status === "loading" ? t.planner.calculating : "meeet!"}
                 </button>
@@ -538,7 +595,7 @@ export default function MeetPlanner({ capability }: { capability: PlannerCapabil
           </section>
           <section className="map-column">
             <div className="map-viewport">
-              <MapLibreCanvas participants={mapParticipants} stationAreas={stationAreas} resultState={result ? (noResult ? "no-result" : "ok") : "initial"} selectedStationAreaId={selectedId} onStationAreaSelect={(id) => void selectStationArea(id)} />
+              <MapLibreCanvas participants={mapParticipants} stationAreas={stationAreas} fitStationArea={result ? sortedStationAreas[0] ?? null : null} resultState={result ? (noResult ? "no-result" : "ok") : "initial"} selectedStationAreaId={selectedId} onStationAreaSelect={(id) => void selectStationArea(id)} />
               {result && <Legend />}
             </div>
             {result && <StationAreaList areas={sortedStationAreas} selectedId={selectedId} resultState={noResult ? "no-result" : "ok"} detail={detail} detailLoading={detailLoading} detailError={detailError} reason={result.reason} expired={detailExpired} onSelect={(id) => void selectStationArea(id)} onRecalculate={() => void calculate()} />}

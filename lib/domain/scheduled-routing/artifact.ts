@@ -18,6 +18,7 @@ import {
   type GtfsFeedFiles,
   type ScheduledArtifactCore,
 } from "./gtfs.ts";
+import { freezeScheduledArtifact } from "./freeze.ts";
 import { parseOffsetInstant } from "./time.ts";
 import type {
   GtfsAcquisitionRecord,
@@ -39,6 +40,26 @@ const SCHEDULED_BUNDLE_ENCODING = "node-v8-structured-clone/1" as const;
 const MAX_BUNDLE_MANIFEST_BYTES = 1 * 1024 * 1024;
 const MAX_BUNDLE_PAYLOAD_BYTES = 1 * 1024 * 1024 * 1024;
 const loadedScheduledArtifacts = new Map<string, ScheduledRoutingArtifact>();
+
+const BUNDLE_MANIFEST_KEYS = ["contractVersion", "encoding", "writerNodeMajor", "payloadFile", "payloadByteLength", "payloadSha256", "compiledArtifactId", "summary", "provenance", "compilerVersion"] as const;
+const LEGACY_BUNDLE_MANIFEST_KEYS = ["contractVersion", "encoding", "writerNodeMajor", "payloadFile", "payloadByteLength", "payloadSha256", "compiledArtifactId", "summary", "provenance"] as const;
+const BUNDLE_SUMMARY_KEYS = ["feedId", "timeZone", "serviceDateRange", "maximumServiceDayTimeSeconds", "searchStartBounds", "counts"] as const;
+const BUNDLE_COUNTS_KEYS = ["routes", "trips", "stationAreas", "calendars", "exceptions", "connections"] as const;
+const PROVENANCE_KEYS = ["hashAlgorithm", "contentHash", "feedId", "timeZone", "files", "acquisition", "compiledArtifactId"] as const;
+const FILE_PROVENANCE_KEYS = ["fileName", "sha256", "byteLength"] as const;
+const ACQUISITION_KEYS = ["sourceUrl", "retrievedAt", "rawArchiveByteSize", "rawArchiveSha256", "feedVersion", "feedValidFrom", "feedValidUntil", "attribution", "officialAttribution", "officialLicense", "officialProvenance"] as const;
+const LICENSE_KEYS = ["name", "url"] as const;
+const OFFICIAL_PROVENANCE_KEYS = ["source", "policyId"] as const;
+const DATE_RANGE_KEYS = ["firstDate", "lastDate"] as const;
+const SEARCH_START_BOUNDS_KEYS = ["earliestEpochSeconds", "latestEpochSeconds", "earliestAt", "latestAt", "maximumServiceDayTimeSeconds"] as const;
+const SCHEDULED_ARTIFACT_CORE_KEYS = ["contractVersion", "feedId", "timeZone", "maximumServiceDayTimeSeconds", "searchStartBounds", "serviceDateRange", "routes", "trips", "stationAreas", "calendars", "exceptions", "connections"] as const;
+const ROUTE_KEYS = ["routeId", "shortName", "longName", "routeType"] as const;
+const TRIP_KEYS = ["tripId", "routeId", "serviceId", "headsign"] as const;
+const STATION_AREA_KEYS = ["id", "name", "coordinate", "mode", "transferNeighbors"] as const;
+const CALENDAR_KEYS = ["serviceId", "startDate", "endDate", "weekdays"] as const;
+const EXCEPTION_KEYS = ["serviceId", "date", "exceptionType"] as const;
+const CONNECTION_KEYS = ["id", "tripId", "routeId", "serviceId", "fromStationAreaId", "toStationAreaId", "fromStopSequence", "toStopSequence", "departureTimeSeconds", "arrivalTimeSeconds", "pickupType", "dropOffType", "line"] as const;
+const TRANSFER_NEIGHBOR_KEYS = ["stationAreaId", "distanceMeters"] as const;
 
 interface ScheduledBundleCounts {
   readonly routes: number;
@@ -392,7 +413,7 @@ export function loadScheduledArtifact(
   validateBundleSummary(manifest.summary, core);
   validateRawArchive(parsed, options.rawArchiveBytes);
   validateFreshness(provenance.acquisition, options.now ?? defaultLoaderNow());
-  const frozen = deepFreeze(parsed);
+  const frozen = freezeScheduledArtifact(parsed);
   loadedScheduledArtifacts.set(absolutePath, frozen);
   const heapUsedAfter = process.memoryUsage().heapUsed;
   logInfo(
@@ -418,11 +439,11 @@ function readBundleManifest(path: string): ScheduledBundleManifest {
 
 function isBundleManifest(value: unknown): value is ScheduledBundleManifest {
   if (!isRecord(value) ||
-    (!hasExactKeys(value, ["contractVersion", "encoding", "writerNodeMajor", "payloadFile", "payloadByteLength", "payloadSha256", "compiledArtifactId", "summary", "provenance", "compilerVersion"]) &&
-      !hasExactKeys(value, ["contractVersion", "encoding", "writerNodeMajor", "payloadFile", "payloadByteLength", "payloadSha256", "compiledArtifactId", "summary", "provenance"])) ||
+    (!hasExactKeys(value, BUNDLE_MANIFEST_KEYS) &&
+      !hasExactKeys(value, LEGACY_BUNDLE_MANIFEST_KEYS)) ||
     (value.compilerVersion !== undefined && !isCompilerVersion(value.compilerVersion))) return false;
   const summary = value.summary;
-  if (!isRecord(summary) || !hasExactKeys(summary, ["feedId", "timeZone", "serviceDateRange", "maximumServiceDayTimeSeconds", "searchStartBounds", "counts"])) return false;
+  if (!isRecord(summary) || !hasExactKeys(summary, BUNDLE_SUMMARY_KEYS)) return false;
   const counts = summary.counts;
   return value.contractVersion === SCHEDULED_BUNDLE_CONTRACT_VERSION &&
     value.encoding === SCHEDULED_BUNDLE_ENCODING &&
@@ -432,7 +453,7 @@ function isBundleManifest(value: unknown): value is ScheduledBundleManifest {
     isSha256(value.payloadSha256) && isSha256(value.compiledArtifactId) && isStrictProvenance(value.provenance) &&
     isString(summary.feedId) && summary.timeZone === "Europe/Berlin" && isStrictDateRange(summary.serviceDateRange) &&
     isSafeInteger(summary.maximumServiceDayTimeSeconds) && isStrictSearchStartBounds(summary.searchStartBounds) &&
-    isRecord(counts) && hasExactKeys(counts, ["routes", "trips", "stationAreas", "calendars", "exceptions", "connections"]) &&
+    isRecord(counts) && hasExactKeys(counts, BUNDLE_COUNTS_KEYS) &&
     Object.values(counts).every((count) => isSafeInteger(count) && count >= 0);
 }
 
@@ -449,32 +470,32 @@ function isCompilerVersion(value: unknown): value is string {
 }
 
 function isStrictProvenance(value: unknown): value is ScheduledRoutingArtifact["provenance"] {
-  if (!isRecord(value) || !hasExactKeys(value, ["hashAlgorithm", "contentHash", "feedId", "timeZone", "files", "acquisition", "compiledArtifactId"]) ||
+  if (!isRecord(value) || !hasExactKeys(value, PROVENANCE_KEYS) ||
     value.hashAlgorithm !== "sha256" || !isSha256(value.contentHash) || !isString(value.feedId) || value.timeZone !== "Europe/Berlin" || !isSha256(value.compiledArtifactId) || !Array.isArray(value.files) ||
-    !value.files.every((file) => isRecord(file) && hasExactKeys(file, ["fileName", "sha256", "byteLength"]) && isString(file.fileName) && isSha256(file.sha256) && isSafeInteger(file.byteLength) && file.byteLength >= 0)) return false;
+    !value.files.every((file) => isRecord(file) && hasExactKeys(file, FILE_PROVENANCE_KEYS) && isString(file.fileName) && isSha256(file.sha256) && isSafeInteger(file.byteLength) && file.byteLength >= 0)) return false;
   const acquisition = value.acquisition;
-  if (!isRecord(acquisition) || !hasExactKeys(acquisition, ["sourceUrl", "retrievedAt", "rawArchiveByteSize", "rawArchiveSha256", "feedVersion", "feedValidFrom", "feedValidUntil", "attribution", "officialAttribution", "officialLicense", "officialProvenance"])) return false;
+  if (!isRecord(acquisition) || !hasExactKeys(acquisition, ACQUISITION_KEYS)) return false;
   const license = acquisition.officialLicense;
   const officialProvenance = acquisition.officialProvenance;
   return isString(acquisition.sourceUrl) && isString(acquisition.retrievedAt) && isSafeInteger(acquisition.rawArchiveByteSize) && acquisition.rawArchiveByteSize >= 0 &&
     isSha256(acquisition.rawArchiveSha256) && isString(acquisition.feedVersion) && isDateString(acquisition.feedValidFrom) && isDateString(acquisition.feedValidUntil) &&
-    isString(acquisition.attribution) && isString(acquisition.officialAttribution) && isRecord(license) && hasExactKeys(license, ["name", "url"]) && isString(license.name) && isString(license.url) &&
-    isRecord(officialProvenance) && hasExactKeys(officialProvenance, ["source", "policyId"]) &&
+    isString(acquisition.attribution) && isString(acquisition.officialAttribution) && isRecord(license) && hasExactKeys(license, LICENSE_KEYS) && isString(license.name) && isString(license.url) &&
+    isRecord(officialProvenance) && hasExactKeys(officialProvenance, OFFICIAL_PROVENANCE_KEYS) &&
     (officialProvenance.source === "feed" || officialProvenance.source === "meeet-policy") &&
     (officialProvenance.policyId === null || officialProvenance.policyId === "mvv-cc-by-4.0-fallback/v1");
 }
 
 function isStrictDateRange(value: unknown): value is { readonly firstDate: string; readonly lastDate: string } {
-  return isRecord(value) && hasExactKeys(value, ["firstDate", "lastDate"]) && isDateRange(value);
+  return isRecord(value) && hasExactKeys(value, DATE_RANGE_KEYS) && isDateRange(value);
 }
 
 function isStrictSearchStartBounds(value: unknown): boolean {
-  return isRecord(value) && hasExactKeys(value, ["earliestEpochSeconds", "latestEpochSeconds", "earliestAt", "latestAt", "maximumServiceDayTimeSeconds"]) && isSearchStartBounds(value);
+  return isRecord(value) && hasExactKeys(value, SEARCH_START_BOUNDS_KEYS) && isSearchStartBounds(value);
 }
 
 function isScheduledArtifactCore(value: unknown): value is ScheduledArtifactCore {
   return isRecord(value) &&
-    hasExactKeys(value, ["contractVersion", "feedId", "timeZone", "maximumServiceDayTimeSeconds", "searchStartBounds", "serviceDateRange", "routes", "trips", "stationAreas", "calendars", "exceptions", "connections"]) &&
+    hasExactKeys(value, SCHEDULED_ARTIFACT_CORE_KEYS) &&
     value.contractVersion === SCHEDULED_ROUTING_CONTRACT_VERSION &&
     isString(value.feedId) && value.timeZone === "Europe/Berlin" && isSafeInteger(value.maximumServiceDayTimeSeconds) &&
     isSearchStartBounds(value.searchStartBounds) && isDateRange(value.serviceDateRange) &&
@@ -482,9 +503,13 @@ function isScheduledArtifactCore(value: unknown): value is ScheduledArtifactCore
 }
 
 function hasExactKeys(value: Record<string, unknown>, expected: readonly string[]): boolean {
-  const actual = Object.keys(value).sort();
-  const wanted = [...expected].sort();
-  return actual.length === wanted.length && actual.every((key, index) => key === wanted[index]);
+  let actualCount = 0;
+  for (const key in value) {
+    if (!Object.prototype.hasOwnProperty.call(value, key)) continue;
+    if (!expected.includes(key)) return false;
+    actualCount += 1;
+  }
+  return actualCount === expected.length;
 }
 
 function bundleSummary(core: ScheduledArtifactCore): ScheduledBundleSummary {
@@ -776,12 +801,12 @@ function isScheduledRoutingArtifact(value: unknown): value is ScheduledRoutingAr
     !Array.isArray(value.routes) ||
     !Array.isArray(value.calendars) ||
     !Array.isArray(value.exceptions) ||
-    !isExactRecordArray(value.routes, ["routeId", "shortName", "longName", "routeType"]) ||
-    !isExactRecordArray(value.trips, ["tripId", "routeId", "serviceId", "headsign"]) ||
-    !isExactRecordArray(value.stationAreas, ["id", "name", "coordinate", "mode", "transferNeighbors"]) ||
-    !isExactRecordArray(value.calendars, ["serviceId", "startDate", "endDate", "weekdays"]) ||
-    !isExactRecordArray(value.exceptions, ["serviceId", "date", "exceptionType"]) ||
-    !isExactRecordArray(value.connections, ["id", "tripId", "routeId", "serviceId", "fromStationAreaId", "toStationAreaId", "fromStopSequence", "toStopSequence", "departureTimeSeconds", "arrivalTimeSeconds", "pickupType", "dropOffType", "line"]) ||
+    !isExactRecordArray(value.routes, ROUTE_KEYS) ||
+    !isExactRecordArray(value.trips, TRIP_KEYS) ||
+    !isExactRecordArray(value.stationAreas, STATION_AREA_KEYS) ||
+    !isExactRecordArray(value.calendars, CALENDAR_KEYS) ||
+    !isExactRecordArray(value.exceptions, EXCEPTION_KEYS) ||
+    !isExactRecordArray(value.connections, CONNECTION_KEYS) ||
     !isRecord(provenance)
   ) return false;
   const acquisition = provenance.acquisition;
@@ -790,7 +815,7 @@ function isScheduledRoutingArtifact(value: unknown): value is ScheduledRoutingAr
     isSha256(provenance.contentHash) &&
     isString(provenance.feedId) &&
     provenance.timeZone === "Europe/Berlin" &&
-    isExactRecordArray(provenance.files, ["fileName", "sha256", "byteLength"]) &&
+    isExactRecordArray(provenance.files, FILE_PROVENANCE_KEYS) &&
     isSha256(provenance.compiledArtifactId) &&
     isRecord(acquisition) &&
     acquisition.sourceUrl === SCHEDULED_MVV_FEED_URL &&
@@ -814,7 +839,7 @@ function isScheduledRoutingArtifact(value: unknown): value is ScheduledRoutingAr
 
 function validateArtifactStructure(artifact: ScheduledRoutingArtifact): void {
   if ("boardingStops" in artifact) throw invalidArtifact("boarding stops");
-  if (artifact.routes.some((route) => typeof route.routeId !== "string" || typeof route.shortName !== "string" || typeof route.longName !== "string") || artifact.trips.some((trip) => typeof trip.tripId !== "string" || typeof trip.routeId !== "string" || typeof trip.serviceId !== "string" || typeof trip.headsign !== "string") ||     artifact.stationAreas.some((area) => typeof area.id !== "string" || typeof area.name !== "string" || !isRecord(area.coordinate) || (area.mode !== "sbahn" && area.mode !== "ubahn" && area.mode !== "tram" && area.mode !== "bus") || "boardingStopIds" in area || "parentStationId" in area || !Array.isArray(area.transferNeighbors) || area.transferNeighbors.some((neighbor) => !isRecord(neighbor) || typeof neighbor.stationAreaId !== "string" || typeof neighbor.distanceMeters !== "number" || !Number.isFinite(neighbor.distanceMeters) || neighbor.distanceMeters < 0 || Object.keys(neighbor).length !== 2)) || artifact.calendars.some((calendar) => typeof calendar.serviceId !== "string" || !Array.isArray(calendar.weekdays)) || artifact.exceptions.some((exception) => typeof exception.serviceId !== "string" || typeof exception.date !== "string") || artifact.connections.some((connection) => typeof connection.id !== "string" || typeof connection.tripId !== "string" || typeof connection.routeId !== "string" || typeof connection.serviceId !== "string" || "fromStopId" in connection || "toStopId" in connection || typeof connection.fromStationAreaId !== "string" || typeof connection.toStationAreaId !== "string" || !isRecord(connection.line))) throw invalidArtifact("nested field type");
+  if (artifact.routes.some((route) => typeof route.routeId !== "string" || typeof route.shortName !== "string" || typeof route.longName !== "string") || artifact.trips.some((trip) => typeof trip.tripId !== "string" || typeof trip.routeId !== "string" || typeof trip.serviceId !== "string" || typeof trip.headsign !== "string") ||     artifact.stationAreas.some((area) => typeof area.id !== "string" || typeof area.name !== "string" || !isRecord(area.coordinate) || (area.mode !== "sbahn" && area.mode !== "ubahn" && area.mode !== "tram" && area.mode !== "bus") || "boardingStopIds" in area || "parentStationId" in area || !Array.isArray(area.transferNeighbors) || area.transferNeighbors.some((neighbor) => !isRecord(neighbor) || !hasExactKeys(neighbor, TRANSFER_NEIGHBOR_KEYS) || typeof neighbor.stationAreaId !== "string" || typeof neighbor.distanceMeters !== "number" || !Number.isFinite(neighbor.distanceMeters) || neighbor.distanceMeters < 0)) || artifact.calendars.some((calendar) => typeof calendar.serviceId !== "string" || !Array.isArray(calendar.weekdays)) || artifact.exceptions.some((exception) => typeof exception.serviceId !== "string" || typeof exception.date !== "string") || artifact.connections.some((connection) => typeof connection.id !== "string" || typeof connection.tripId !== "string" || typeof connection.routeId !== "string" || typeof connection.serviceId !== "string" || "fromStopId" in connection || "toStopId" in connection || typeof connection.fromStationAreaId !== "string" || typeof connection.toStationAreaId !== "string" || !isRecord(connection.line))) throw invalidArtifact("nested field type");
   const routeIds = uniqueSorted(artifact.routes.map((route) => route.routeId), "routes");
   uniqueSorted(artifact.trips.map((trip) => trip.tripId), "trips");
   const areaIds = uniqueSorted(artifact.stationAreas.map((area) => area.id), "stationAreas");
@@ -926,16 +951,4 @@ function isExactRecordArray(value: unknown, requiredKeys: readonly string[]): va
 
 function sha256Bytes(value: Uint8Array): string {
   return createHash("sha256").update(value).digest("hex");
-}
-
-function deepFreeze<T>(value: T): T {
-  if (value !== null && typeof value === "object" && !Object.isFrozen(value)) {
-    if (Array.isArray(value)) {
-      for (const child of value) deepFreeze(child);
-    } else {
-      for (const child of Object.values(value)) deepFreeze(child);
-    }
-    Object.freeze(value);
-  }
-  return value;
 }

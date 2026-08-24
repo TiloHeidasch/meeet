@@ -17,7 +17,6 @@ import {
   scheduledCalculationAdmission,
   SCHEDULED_CALCULATION_CONCURRENCY,
   SCHEDULED_CALCULATION_DEADLINE_MS,
-  type ScheduledCalculationAdmission,
   type ScheduledDeadlineOptions,
   type ScheduledCalculationDeadline,
 } from "./scheduled-admission.ts";
@@ -62,6 +61,7 @@ export type MeetingApiErrorCode =
   | "INVALID_REQUEST"
   | "REQUEST_TOO_LARGE"
   | "TEMPORARILY_UNAVAILABLE"
+  | "PROVIDER_CONFIGURATION_INVALID"
   | "PROVIDER_NOT_CONFIGURED"
   | "PROVIDER_UNAVAILABLE"
   | "CALCULATION_FAILED"
@@ -81,8 +81,12 @@ export interface MeetingApiErrorResponse {
 
 export type MeetingProvidersSource = MeetingProviders | (() => MeetingProviders);
 
+export interface ScheduledCalculationAdmissionLike {
+  tryAcquire(): (() => void) | null;
+}
+
 export interface HandleMeetingPostOptions {
-  readonly admission?: ScheduledCalculationAdmission;
+  readonly admission?: ScheduledCalculationAdmissionLike;
   readonly deadline?: ScheduledDeadlineOptions;
   /** Flat aliases keep the server test seam convenient without changing policy. */
   readonly deadlineMs?: number;
@@ -144,34 +148,8 @@ export async function acquireScheduledMeetingCalculation(
   options: HandleMeetingPostOptions = {},
 ): Promise<AcquireScheduledMeetingCalculationResult> {
   const startedAt = Date.now();
-  const declaredLength = request.headers.get("content-length");
-  if (declaredLength && isTooLargeContentLength(declaredLength)) {
-    return { kind: "error", ...errorOutcome(413, "REQUEST_TOO_LARGE", `Request body must not exceed ${MAX_MEETING_REQUEST_BODY_BYTES} bytes.`) };
-  }
-
-  let bodyText: string;
-  try {
-    bodyText = await request.text();
-  } catch {
-    return { kind: "error", ...errorOutcome(400, "MALFORMED_JSON", "Request body could not be read as JSON.") };
-  }
-
-  if (new TextEncoder().encode(bodyText).byteLength > MAX_MEETING_REQUEST_BODY_BYTES) {
-    return { kind: "error", ...errorOutcome(413, "REQUEST_TOO_LARGE", `Request body must not exceed ${MAX_MEETING_REQUEST_BODY_BYTES} bytes.`) };
-  }
-
-  let body: unknown;
-  try {
-    body = JSON.parse(bodyText) as unknown;
-  } catch {
-    return { kind: "error", ...errorOutcome(400, "MALFORMED_JSON", "Request body must contain valid JSON.") };
-  }
-
-  const parsedScheduled = parseScheduledMeetingRequest(body);
-  if (!parsedScheduled.success) {
-    return { kind: "error", ...errorOutcome(400, "INVALID_REQUEST", "Request body must use the meeet-meeting/v3 scheduled contract.", parsedScheduled.issues) };
-  }
-  logInfo(`calculation: request accepted (contract=${parsedScheduled.data.contractVersion}, participants=${parsedScheduled.data.participants.length}, tolerance=${parsedScheduled.data.tolerancePercent}%, changeTimePreset=${parsedScheduled.data.changeTimePreset}, searchStartAt=${parsedScheduled.data.searchStartAt})`);
+  const parsedScheduled = await parseMeetingRequestBody(request);
+  if (parsedScheduled.kind === "error") return parsedScheduled;
   const release = (options.admission ?? scheduledCalculationAdmission).tryAcquire();
   if (release === null) {
     logError(`calculation: rejected (concurrency limit reached, elapsed=${Date.now() - startedAt}ms)`);
@@ -206,7 +184,7 @@ export async function acquireScheduledMeetingCalculation(
   }
   return {
     kind: "acquired",
-    parsed: parsedScheduled.data,
+    parsed: parsedScheduled.parsed,
     release,
     deadline,
     basisCache: options.basisCache ?? stationAreaCalculationBasisCache,
@@ -284,6 +262,30 @@ export async function handleMeetingStreamPost(
   if (acquired.kind === "error") {
     return jsonError(acquired.status, acquired.code, acquired.message, acquired.issues);
   }
+  let providers: MeetingProviders | undefined;
+  let providerFactoryFailure: { readonly error: unknown } | null = null;
+  try {
+    acquired.deadline.check();
+    try {
+      providers = typeof providersSource === "function" ? providersSource() : providersSource;
+    } catch (error) {
+      if (error instanceof ProviderConfigurationError) throw error;
+      // Generic factory failures retain the established stream contract: the
+      // response starts as SSE and reports one safe terminal failure event.
+      providerFactoryFailure = { error: normalizeProviderFactoryFailure() };
+    }
+    acquired.deadline.check();
+  } catch (error) {
+    acquired.deadline.dispose();
+    acquired.release();
+    if (error instanceof ProviderConfigurationError) throw error;
+    if (acquired.deadline.isExpired()) {
+      return jsonError(503, "TEMPORARILY_UNAVAILABLE", "The scheduled meeting calculation exceeded its 90-second deadline. Please try again shortly.");
+    }
+    const outcome = scheduledErrorOutcome(error);
+    return jsonError(outcome.status, outcome.code, outcome.message, outcome.issues);
+  }
+  const resolvedProviders = providers;
   logInfo("calculation: stream started");
   const heartbeatMs = options.heartbeatMs ?? MEETING_STREAM_DEFAULT_HEARTBEAT_MS;
   const encoder = new TextEncoder();
@@ -339,7 +341,15 @@ export async function handleMeetingStreamPost(
       };
       void (async () => {
         try {
-          const run = await runScheduledMeetingCalculation(acquired, providersSource, hooks);
+          const run = providerFactoryFailure === null
+            ? resolvedProviders === undefined
+              ? await runScheduledMeetingCalculation(acquired, () => {
+                throw new Error("The scheduled meeting provider factory returned no providers.");
+              }, hooks)
+              : await runScheduledMeetingCalculation(acquired, resolvedProviders, hooks)
+            : await runScheduledMeetingCalculation(acquired, () => {
+              throw providerFactoryFailure.error;
+            }, hooks);
           if (run.kind === "error") {
             await write(`event: error\ndata: ${JSON.stringify({ code: run.code, message: run.message })}\n\n`);
           } else {
@@ -406,34 +416,20 @@ async function handleStationAreaDetailsPostInner(
   providersSource: MeetingProvidersSource,
   options: HandleMeetingPostOptions = {},
 ): Promise<Response> {
-  if (stationAreaId.trim() === "") return jsonError(400, "INVALID_REQUEST", "stationAreaId must be non-empty.");
-  const declaredLength = request.headers.get("content-length");
-  if (declaredLength && isTooLargeContentLength(declaredLength)) return jsonError(413, "REQUEST_TOO_LARGE", `Request body must not exceed ${MAX_MEETING_REQUEST_BODY_BYTES} bytes.`);
-  let bodyText: string;
-  try {
-    bodyText = await request.text();
-  } catch {
-    return jsonError(400, "MALFORMED_JSON", "Request body could not be read as JSON.");
-  }
-  if (new TextEncoder().encode(bodyText).byteLength > MAX_MEETING_REQUEST_BODY_BYTES) return jsonError(413, "REQUEST_TOO_LARGE", `Request body must not exceed ${MAX_MEETING_REQUEST_BODY_BYTES} bytes.`);
-  let body: unknown;
-  try {
-    body = JSON.parse(bodyText) as unknown;
-  } catch {
-    return jsonError(400, "MALFORMED_JSON", "Request body must contain valid JSON.");
-  }
-  const parsedScheduled = parseScheduledMeetingRequest(body);
-  if (!parsedScheduled.success) return jsonError(400, "INVALID_REQUEST", "Request body must use the meeet-meeting/v3 scheduled contract.", parsedScheduled.issues);
+  if (typeof stationAreaId !== "string" || stationAreaId.trim() === "") return jsonError(400, "INVALID_REQUEST", "stationAreaId must be non-empty.");
+  const parsedScheduled = await parseMeetingRequestBody(request, { logAccepted: false });
+  if (parsedScheduled.kind === "error") return jsonError(parsedScheduled.status, parsedScheduled.code, parsedScheduled.message, parsedScheduled.issues);
   const reference = request.headers.get(STATION_AREA_CALCULATION_REF_HEADER);
   if (reference === null || reference.trim() === "") return jsonError(400, "INVALID_CALCULATION_REF", `The ${STATION_AREA_CALCULATION_REF_HEADER} header is required.`);
+  if (!isCalculationReferenceSyntaxValid(reference)) return jsonError(400, "INVALID_CALCULATION_REF", `The ${STATION_AREA_CALCULATION_REF_HEADER} header is malformed.`);
   const basisCache = options.basisCache ?? stationAreaCalculationBasisCache;
   const basis = basisCache.get(reference);
   if (basis === undefined) return jsonError(410, "CALCULATION_REF_EXPIRED", "The calculation reference is missing or has expired. Recalculate the meeting surface.");
-  if (!sameScheduledRequest(basis.canonicalRequest, parsedScheduled.data)) return jsonError(409, "CALCULATION_REF_MISMATCH", "The calculation reference does not match the supplied meeet-meeting/v3 request.");
+  if (!sameScheduledRequest(basis.canonicalRequest, parsedScheduled.parsed)) return jsonError(409, "CALCULATION_REF_MISMATCH", "The calculation reference does not match the supplied meeet-meeting/v3 request.");
   const marker = basis.stationAreas.find((candidate) => candidate.stationAreaId === stationAreaId);
   if (marker === undefined) return jsonError(404, "STATION_AREA_NOT_FOUND", "The requested station area is not in the cached calculation surface.");
   if (basis.status === "no-result" || marker.classification === "unclassified") {
-    return unavailableStationAreaDetailsResponse(parsedScheduled.data, basis, marker);
+    return unavailableStationAreaDetailsResponse(parsedScheduled.parsed, basis, marker);
   }
 
   const release = (options.admission ?? scheduledCalculationAdmission).tryAcquire();
@@ -456,10 +452,10 @@ async function handleStationAreaDetailsPostInner(
       return jsonError(409, "CALCULATION_REF_MISMATCH", "The calculation reference belongs to a different scheduled timetable artifact.");
     }
     const participants: [StationAreaDetailParticipantDto, StationAreaDetailParticipantDto] = [
-      detailParticipant("red", 0, parsedScheduled.data.participants[0], marker, basis, artifact, parsedScheduled.data.searchStartAt),
-      detailParticipant("blue", 1, parsedScheduled.data.participants[1], marker, basis, artifact, parsedScheduled.data.searchStartAt),
+      detailParticipant("red", 0, parsedScheduled.parsed.participants[0], marker, basis, artifact, parsedScheduled.parsed.searchStartAt),
+      detailParticipant("blue", 1, parsedScheduled.parsed.participants[1], marker, basis, artifact, parsedScheduled.parsed.searchStartAt),
     ];
-    const detailBasis = makeDetailBasis(parsedScheduled.data, basis);
+    const detailBasis = makeDetailBasis(parsedScheduled.parsed, basis);
     const detail: StationAreaDetailsResponseDto = deepFreeze({
       contractVersion: STATION_AREA_DETAILS_CONTRACT_VERSION,
       status: basis.status,
@@ -469,7 +465,7 @@ async function handleStationAreaDetailsPostInner(
       basis: detailBasis,
     });
     deadline.check();
-    const validation = validateStationAreaDetailsResponse(detail, { request: parsedScheduled.data, selectedMarker: marker, artifactIdentity: basis.artifactIdentity });
+    const validation = validateStationAreaDetailsResponse(detail, { request: parsedScheduled.parsed, selectedMarker: marker, artifactIdentity: basis.artifactIdentity });
     if (!validation.success) return jsonError(500, "DETAIL_FAILED", "The station-area detail response failed strict validation.");
     return Response.json(detail, { status: 200 });
   } catch (error) {
@@ -617,6 +613,59 @@ function withDeadlineCheckedAccess(
 
 function isTooLargeContentLength(value: string): boolean {
   return /^\d+$/.test(value) && Number(value) > MAX_MEETING_REQUEST_BODY_BYTES;
+}
+
+function isCalculationReferenceSyntaxValid(value: string): boolean {
+  return value.length <= 256 && /^[A-Za-z0-9._~-]+$/.test(value);
+}
+
+function normalizeProviderFactoryFailure(): Error {
+  return new Error("The scheduled meeting provider factory failed.");
+}
+
+type ParsedMeetingRequestResult =
+  | { readonly kind: "parsed"; readonly parsed: ScheduledMeetingRequest }
+  | ({ readonly kind: "error" } & ScheduledCalculationErrorOutcome);
+
+async function parseMeetingRequestBody(
+  request: Request,
+  options: { readonly logAccepted?: boolean } = {},
+): Promise<ParsedMeetingRequestResult> {
+  const declaredLength = request.headers.get("content-length");
+  if (declaredLength && isTooLargeContentLength(declaredLength)) {
+    return { kind: "error", ...errorOutcome(413, "REQUEST_TOO_LARGE", `Request body must not exceed ${MAX_MEETING_REQUEST_BODY_BYTES} bytes.`) };
+  }
+
+  let bodyText: string;
+  try {
+    bodyText = await request.text();
+  } catch {
+    return { kind: "error", ...errorOutcome(400, "MALFORMED_JSON", "Request body could not be read as JSON.") };
+  }
+
+  if (new TextEncoder().encode(bodyText).byteLength > MAX_MEETING_REQUEST_BODY_BYTES) {
+    return { kind: "error", ...errorOutcome(413, "REQUEST_TOO_LARGE", `Request body must not exceed ${MAX_MEETING_REQUEST_BODY_BYTES} bytes.`) };
+  }
+
+  let body: unknown;
+  try {
+    body = JSON.parse(bodyText) as unknown;
+  } catch {
+    return { kind: "error", ...errorOutcome(400, "MALFORMED_JSON", "Request body must contain valid JSON.") };
+  }
+
+  const parsedScheduled = parseScheduledMeetingRequest(body);
+  if (!parsedScheduled.success) {
+    return { kind: "error", ...errorOutcome(400, "INVALID_REQUEST", "Request body must use the meeet-meeting/v3 scheduled contract.", parsedScheduled.issues) };
+  }
+  if (options.logAccepted !== false) {
+    logInfo(`calculation: request accepted (contract=${parsedScheduled.data.contractVersion}, participants=${parsedScheduled.data.participants.length}, tolerance=${parsedScheduled.data.tolerancePercent}%, changeTimePreset=${parsedScheduled.data.changeTimePreset}, searchStartAt=${parsedScheduled.data.searchStartAt})`);
+  }
+  return { kind: "parsed", parsed: parsedScheduled.data };
+}
+
+export function providerConfigurationErrorResponse(): Response {
+  return jsonError(503, "PROVIDER_CONFIGURATION_INVALID", "Server provider configuration is invalid.");
 }
 
 function jsonError(

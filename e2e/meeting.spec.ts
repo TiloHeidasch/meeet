@@ -27,6 +27,148 @@ async function createStreamingTestServer(
 }
 
 test.describe("v3 Munich meeting surface", () => {
+  test("sets only the chosen participant from the browser location", async ({ page }) => {
+    await page.addInitScript(() => {
+      Object.defineProperty(navigator, "geolocation", { configurable: true, value: { getCurrentPosition: (success: (position: unknown) => void) => success({ coords: { latitude: 48.137154, longitude: 11.576124 } }) } });
+    });
+    await setup(page); await openPlanner(page);
+    await page.getByRole("button", { name: "Use my current location · Participant 1" }).click();
+    await expect(page.getByRole("combobox", { name: "Participant 1 starting point" })).toHaveValue("Coordinates 48.13715, 11.57612");
+    await expect(page.getByRole("combobox", { name: "Participant 2 starting point" })).toHaveValue("");
+    await expect(page.getByText("Current location added", { exact: true })).toBeVisible();
+  });
+
+  test("sets only participant 2 from the second browser location control", async ({ page }) => {
+    await page.addInitScript(() => {
+      Object.defineProperty(navigator, "geolocation", { configurable: true, value: { getCurrentPosition: (success: (position: unknown) => void) => success({ coords: { latitude: 48.137154, longitude: 11.576124 } }) } });
+    });
+    await setup(page); await openPlanner(page);
+    await selectOrigin(page, 0, "Marienplatz");
+    await page.getByRole("button", { name: "Use my current location · Participant 2" }).click();
+    await expect(page.getByRole("combobox", { name: "Participant 1 starting point" })).toHaveValue("Marienplatz");
+    await expect(page.getByRole("combobox", { name: "Participant 2 starting point" })).toHaveValue("Coordinates 48.13715, 11.57612");
+  });
+
+  test("does not replace a manual edit with a deferred browser location", async ({ page }) => {
+    await page.addInitScript(() => {
+      let resolvePosition: ((position: unknown) => void) | null = null;
+      Object.defineProperty(navigator, "geolocation", { configurable: true, value: { getCurrentPosition: (success: (position: unknown) => void) => { resolvePosition = success; } } });
+      Object.defineProperty(window, "__resolveMeeetPosition", { configurable: true, value: () => resolvePosition?.({ coords: { latitude: 48.137154, longitude: 11.576124 } }) });
+    });
+    await setup(page); await openPlanner(page);
+    const input = page.getByRole("combobox", { name: "Participant 1 starting point" });
+    const locationButton = page.getByRole("button", { name: "Use my current location · Participant 1" });
+    const loadingLocationButton = page.getByRole("button", { name: "Finding your current location… · Participant 1" });
+    await locationButton.click();
+    await expect(loadingLocationButton).toBeDisabled();
+    await expect(page.getByText("Finding your current location…", { exact: true })).toBeVisible();
+    await input.fill("Manual edit");
+    await page.evaluate(() => { const resolve = (window as unknown as { __resolveMeeetPosition?: () => void }).__resolveMeeetPosition; if (!resolve) throw new Error("Deferred geolocation callback is unavailable"); resolve(); });
+    await expect(input).toHaveValue("Manual edit");
+    await expect(page.getByText("Current location added", { exact: true })).toHaveCount(0);
+  });
+
+  test("Escape cancels a deferred browser location and ignores its stale callback", async ({ page }) => {
+    await page.addInitScript(() => {
+      let resolvePosition: ((position: unknown) => void) | null = null;
+      Object.defineProperty(navigator, "geolocation", { configurable: true, value: { getCurrentPosition: (success: (position: unknown) => void) => { resolvePosition = success; } } });
+      Object.defineProperty(window, "__resolveMeeetPosition", { configurable: true, value: () => resolvePosition?.({ coords: { latitude: 48.137154, longitude: 11.576124 } }) });
+    });
+    await setup(page); await openPlanner(page);
+    const input = page.getByRole("combobox", { name: "Participant 1 starting point" });
+    const locationButton = page.getByRole("button", { name: "Use my current location · Participant 1" });
+    const loadingLocationButton = page.getByRole("button", { name: "Finding your current location… · Participant 1" });
+    const submit = page.getByRole("button", { name: "meeet!" });
+    await locationButton.click();
+    await expect(loadingLocationButton).toBeDisabled();
+    await expect(submit).toBeDisabled();
+    await expect(page.getByText("Finding your current location…", { exact: true })).toBeVisible();
+    await input.press("Escape");
+    await expect(locationButton).toBeEnabled();
+    await expect(submit).toBeEnabled();
+    await expect(page.locator(".location-feedback")).toHaveCount(0);
+    await page.evaluate(() => { const resolve = (window as unknown as { __resolveMeeetPosition?: () => void }).__resolveMeeetPosition; if (!resolve) throw new Error("Deferred geolocation callback is unavailable"); resolve(); });
+    await expect(input).toHaveValue("");
+    await expect(page.getByText("Current location added", { exact: true })).toHaveCount(0);
+  });
+
+  test("disables meeting submission while browser location is pending", async ({ page }) => {
+    let calculationCalls = 0;
+    page.on("request", (request) => { if (request.url().endsWith("/api/meeting/calculate/stream")) calculationCalls += 1; });
+    await page.addInitScript(() => {
+      let resolvePosition: ((position: unknown) => void) | null = null;
+      Object.defineProperty(navigator, "geolocation", { configurable: true, value: { getCurrentPosition: (success: (position: unknown) => void) => { resolvePosition = success; } } });
+      Object.defineProperty(window, "__resolveMeeetPosition", { configurable: true, value: () => resolvePosition?.({ coords: { latitude: 48.137154, longitude: 11.576124 } }) });
+    });
+    await setup(page); await openPlanner(page);
+    const submit = page.getByRole("button", { name: "meeet!" });
+    await page.getByRole("button", { name: "Use my current location · Participant 1" }).click();
+    await expect(submit).toBeDisabled();
+    await page.evaluate(() => { const form = document.querySelector("form"); if (!form) throw new Error("Planner form missing"); form.requestSubmit(); });
+    await expect.poll(() => calculationCalls).toBe(0);
+    await page.evaluate(() => { const resolve = (window as unknown as { __resolveMeeetPosition?: () => void }).__resolveMeeetPosition; if (!resolve) throw new Error("Deferred geolocation callback is unavailable"); resolve(); });
+    await expect(submit).toBeEnabled();
+  });
+
+  test("does not restore stale autocomplete results after current location begins", async ({ page }) => {
+    await page.addInitScript(() => {
+      Object.defineProperty(navigator, "geolocation", { configurable: true, value: { getCurrentPosition: (success: (position: unknown) => void) => success({ coords: { latitude: 48.137154, longitude: 11.576124 } }) } });
+    });
+    await setup(page); await page.unroute("**/api/locations/search**");
+    let releaseSearch: (() => void) | undefined;
+    await page.route("**/api/locations/search**", async (route) => {
+      await new Promise<void>((resolve) => { releaseSearch = resolve; });
+      await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ locations: [{ label: "Stale result", latitude: 48.1374, longitude: 11.5755 }] }) });
+    });
+    await openPlanner(page);
+    const input = page.getByRole("combobox", { name: "Participant 1 starting point" });
+    await input.fill("Stale query");
+    await expect.poll(() => releaseSearch !== undefined).toBe(true);
+    await page.getByRole("button", { name: "Use my current location · Participant 1" }).click();
+    await expect(input).toHaveValue("Coordinates 48.13715, 11.57612");
+    const searchResponse = page.waitForResponse((response) => response.url().includes("/api/locations/search"));
+    releaseSearch!();
+    await searchResponse;
+    await expect(page.getByRole("button", { name: "Stale result", exact: true })).toHaveCount(0);
+  });
+
+  test("explains a denied browser location permission without a lookup", async ({ page }) => {
+    await page.addInitScript(() => {
+      Object.defineProperty(navigator, "geolocation", { configurable: true, value: { getCurrentPosition: (_success: unknown, failure: (error: unknown) => void) => failure({ code: 1 }) } });
+    });
+    await setup(page); await openPlanner(page);
+    await page.getByRole("button", { name: "Use my current location · Participant 1" }).click();
+    await expect(page.locator("fieldset.origin-card").filter({ has: page.getByRole("combobox", { name: "Participant 1 starting point" }) }).getByRole("alert")).toContainText("Location access was denied");
+    await expect(page.getByRole("combobox", { name: "Participant 1 starting point" })).toHaveValue("");
+  });
+
+  for (const locationError of [
+    { code: 2, message: "Your current location is unavailable right now. Search for a starting point instead." },
+    { code: 3, message: "Finding your current location took too long. Try again or search for a starting point." },
+  ]) {
+    test(`renders the localized browser location error for code ${locationError.code} without changing the field`, async ({ page }) => {
+      await page.addInitScript((code) => {
+        Object.defineProperty(navigator, "geolocation", { configurable: true, value: { getCurrentPosition: (_success: unknown, failure: (error: unknown) => void) => failure({ code }) } });
+      }, locationError.code);
+      await setup(page); await openPlanner(page);
+      await selectOrigin(page, 1, "Ostbahnhof");
+      await page.getByRole("button", { name: "Use my current location · Participant 2" }).click();
+      await expect(page.locator("fieldset.origin-card").filter({ has: page.getByRole("combobox", { name: "Participant 2 starting point" }) }).getByRole("alert")).toHaveText(locationError.message);
+      await expect(page.getByRole("combobox", { name: "Participant 2 starting point" })).toHaveValue("Ostbahnhof");
+    });
+  }
+
+  test("renders the localized insecure-context error without changing the field", async ({ page }) => {
+    await page.addInitScript(() => {
+      Object.defineProperty(window, "isSecureContext", { configurable: true, value: false });
+    });
+    await setup(page); await openPlanner(page);
+    await selectOrigin(page, 1, "Ostbahnhof");
+    await page.getByRole("button", { name: "Use my current location · Participant 2" }).click();
+    await expect(page.locator("fieldset.origin-card").filter({ has: page.getByRole("combobox", { name: "Participant 2 starting point" }) }).getByRole("alert")).toHaveText("Current location requires a secure connection. Search for a starting point instead.");
+    await expect(page.getByRole("combobox", { name: "Participant 2 starting point" })).toHaveValue("Ostbahnhof");
+  });
+
   test("renders the real configured OpenFreeMap style", async ({ page }, testInfo) => {
     const mapErrors: string[] = [];
     page.on("console", (message) => { if (message.type() === "error" || message.text().includes("style")) mapErrors.push(message.text()); });
@@ -125,7 +267,10 @@ test.describe("v3 Munich meeting surface", () => {
     await expect(panel).toContainText("U3");
     await expect(panel).toContainText("Fair area");
     await expect(panel.locator(".line-badge").first()).toBeVisible();
-    await expect(panel.locator(".itinerary-legs")).toBeVisible();
+    const itineraries = panel.locator(".itinerary-legs");
+    await expect(itineraries).toHaveCount(2);
+    await expect(itineraries.nth(0)).toBeVisible();
+    await expect(itineraries.nth(1)).toBeVisible();
   });
   test("uses the native chooser when the map is unavailable", async ({ page }) => { await setup(page, "ok", true); await openPlanner(page); await selectOrigin(page, 0, "Marienplatz"); await selectOrigin(page, 1, "Ostbahnhof"); await page.getByRole("button", { name: "meeet!" }).click(); await expect(page.locator(".map-frame")).toHaveAttribute("data-map-state", "unavailable"); const fair = page.locator('[data-station-area-id="area-fair"]'); await fair.click(); await expect(fair).toHaveAttribute("aria-pressed", "true"); await expect(page.getByRole("heading", { name: "Meeting place details" })).toBeVisible(); });
   test("shows an explicit expired calculation reference and requires a manual recalculation", async ({ page }) => { let calculateCalls = 0; page.on("request", (request) => { if (request.url().includes("/api/meeting/calculate/stream")) calculateCalls += 1; }); await setup(page); await openPlanner(page); await selectOrigin(page, 0, "Marienplatz"); await selectOrigin(page, 1, "Ostbahnhof"); await page.getByRole("button", { name: "meeet!" }).click(); await expect(page.locator(".station-area-panel")).toBeVisible(); await page.unroute("**/api/meeting/station-areas/*/details"); await page.route("**/api/meeting/station-areas/*/details", (route) => route.fulfill({ status: 410, contentType: "application/json", body: JSON.stringify({ error: { code: "CALCULATION_REF_EXPIRED", message: "The calculation reference is missing or has expired. Recalculate the meeting surface." } }) })); const fair = page.locator('[data-station-area-id="area-fair"]'); await fair.click(); await expect(page.getByText(/calculation has expired/)).toBeVisible(); await expect(page.getByRole("button", { name: "Recalculate meeting places" })).toBeVisible(); await expect(page.locator(".station-detail-panel").getByText("30 min", { exact: false })).toHaveCount(0); await page.waitForTimeout(400); expect(calculateCalls).toBe(1); const recalculated = page.waitForResponse((response) => response.url().includes("/api/meeting/calculate/stream")); await page.getByRole("button", { name: "Recalculate meeting places" }).click(); await recalculated; await expect(page.locator(".station-area-panel")).toBeVisible(); expect(calculateCalls).toBe(2); });
@@ -552,38 +697,94 @@ test.describe("v3 Munich meeting surface", () => {
     await expect.poll(async () => { const v = await page.evaluate(() => { const map = (window as unknown as { __meeetMap?: { getCenter: () => { lat: number; lng: number }; getZoom: () => number; getBounds: () => { getWest: () => number; getEast: () => number; getSouth: () => number; getNorth: () => number } } }).__meeetMap; if (!map) throw new Error("Map instance unavailable"); const center = map.getCenter(); const b = map.getBounds(); return { lng: center.lng, lat: center.lat, zoom: map.getZoom(), west: b.getWest(), east: b.getEast(), south: b.getSouth(), north: b.getNorth() }; }); return Math.abs(v.lng - 11.5755) < 1e-4 && Math.abs(v.lat - 48.1374) < 1e-4 && Math.abs(v.zoom - 15) < 0.01 && v.west <= v.east && v.south <= v.north; }).toBe(true);
   });
 
-  test("refocuses the map onto rendered origins and station areas when results appear", async ({ page }) => {
+  test("fits successful results to origins and only the best-ranked station area", async ({ page }) => {
     await setup(page); await openPlanner(page); await selectOrigin(page, 0, "Marienplatz"); await selectOrigin(page, 1, "Ostbahnhof");
     await page.getByRole("button", { name: "meeet!" }).click();
     await expect(page.getByText("Meeting result", { exact: true })).toBeVisible();
     await expect(page.locator('.map-frame[data-map-state="ready"]')).toHaveAttribute("data-station-markers-ready", "true");
     const bounds = await page.evaluate(() => { const map = (window as unknown as { __meeetMap?: { getBounds: () => { getWest: () => number; getEast: () => number; getSouth: () => number; getNorth: () => number } } }).__meeetMap; if (!map) throw new Error("Map instance unavailable"); const b = map.getBounds(); return { west: b.getWest(), east: b.getEast(), south: b.getSouth(), north: b.getNorth() }; });
-    for (const [lng, lat] of [[11.5755, 48.1374], [11.605, 48.1257], [11.555, 48.132], [11.585, 48.132], [11.615, 48.132], [11.59, 48.14]] as const) {
+    for (const [lng, lat] of [[11.5755, 48.1374], [11.605, 48.1257], [11.585, 48.132]] as const) {
       expect(bounds.west).toBeLessThanOrEqual(lng);
       expect(bounds.east).toBeGreaterThanOrEqual(lng);
       expect(bounds.south).toBeLessThanOrEqual(lat);
       expect(bounds.north).toBeGreaterThanOrEqual(lat);
     }
+    // The red and blue areas remain in the station-area source data, but neither can expand the fit.
+    expect(bounds.west).toBeGreaterThan(11.555);
+    expect(bounds.east).toBeLessThan(11.615);
     expect(bounds.east - bounds.west).toBeLessThan(0.2);
     expect(bounds.north - bounds.south).toBeLessThan(0.2);
     await expect(page.getByRole("button", { name: "Refocus map" })).toBeEnabled();
   });
 
-  test("refocuses the map onto rendered origins and unclassified station areas for a no-result surface", async ({ page }) => {
-    await setup(page, "no-access-seeds"); await openPlanner(page); await selectOrigin(page, 0, "Marienplatz"); await selectOrigin(page, 1, "Ostbahnhof");
+  test("fits no-result surfaces to origins and only the first ranked unclassified area", async ({ page }) => {
+    await setup(page, "no-access-seeds");
+    await page.unroute("**/api/meeting/calculate/stream");
+    await page.route("**/api/meeting/calculate/stream", async (route) => {
+      const request = route.request().postDataJSON();
+      const fixture = v3Fixture(request, "no-access-seeds");
+      const northern = fixture.stationAreas.find((area) => area.stationAreaId === "area-unclassified");
+      if (northern) northern.coordinate = { latitude: 48.16, longitude: 11.59 };
+      await route.fulfill({ status: 200, contentType: "text/event-stream", body: `${progressStreamFrames(request, "no-access-seeds")}event: ref\ndata: {"calculationRef":"fixture-calculation-ref"}\n\nevent: result\ndata: ${JSON.stringify(fixture)}\n\n` });
+    });
+    await openPlanner(page); await selectOrigin(page, 0, "Marienplatz"); await selectOrigin(page, 1, "Ostbahnhof");
     await page.getByRole("button", { name: "meeet!" }).click();
     await expect(page.getByText("No result yet", { exact: true })).toBeVisible();
     await expect(page.locator('.map-frame[data-map-state="ready"]')).toHaveAttribute("data-station-markers-ready", "true");
     const bounds = await page.evaluate(() => { const map = (window as unknown as { __meeetMap?: { getBounds: () => { getWest: () => number; getEast: () => number; getSouth: () => number; getNorth: () => number } } }).__meeetMap; if (!map) throw new Error("Map instance unavailable"); const b = map.getBounds(); return { west: b.getWest(), east: b.getEast(), south: b.getSouth(), north: b.getNorth() }; });
-    for (const [lng, lat] of [[11.5755, 48.1374], [11.605, 48.1257], [11.555, 48.132], [11.585, 48.132], [11.615, 48.132], [11.59, 48.14]] as const) {
+    for (const [lng, lat] of [[11.5755, 48.1374], [11.605, 48.1257], [11.615, 48.132]] as const) {
       expect(bounds.west).toBeLessThanOrEqual(lng);
       expect(bounds.east).toBeGreaterThanOrEqual(lng);
       expect(bounds.south).toBeLessThanOrEqual(lat);
       expect(bounds.north).toBeGreaterThanOrEqual(lat);
     }
+    // The remaining areas remain in the station-area source data, but must not influence fitting.
+    expect(bounds.west).toBeGreaterThan(11.555);
+    expect(bounds.north).toBeLessThan(48.16);
     expect(bounds.east - bounds.west).toBeLessThan(0.2);
     expect(bounds.north - bounds.south).toBeLessThan(0.2);
     await expect(page.getByRole("button", { name: "Refocus map" })).toBeEnabled();
+  });
+
+  test("refits and refocuses on a new top-ranked area after recalculation", async ({ page }) => {
+    let calculationCalls = 0;
+    await setup(page); await openPlanner(page); await selectOrigin(page, 0, "Marienplatz"); await selectOrigin(page, 1, "Ostbahnhof");
+    await page.unroute("**/api/meeting/calculate/stream");
+    await page.route("**/api/meeting/calculate/stream", async (route) => {
+      calculationCalls += 1;
+      const request = route.request().postDataJSON();
+      if (calculationCalls === 1) { await route.fulfill({ status: 200, contentType: "text/event-stream", body: okStreamBody(request) }); return; }
+      const changed = JSON.parse(JSON.stringify(v3Fixture(request))) as ReturnType<typeof v3Fixture>;
+      const blue = changed.stationAreas.find((area) => area.stationAreaId === "area-blue");
+      if (blue) Object.assign(blue, { redArrivalSeconds: 900, blueArrivalSeconds: 960, fasterParticipant: "red", withinSelectedTolerance: true, classification: "fair" });
+      await route.fulfill({ status: 200, contentType: "text/event-stream", body: `${progressStreamFrames(request)}${sseFrame("ref", { calculationRef: "fixture-calculation-ref" })}${sseFrame("result", changed)}` });
+    });
+    await page.getByRole("button", { name: "meeet!" }).click();
+    await expect(page.getByText("Meeting result", { exact: true })).toBeVisible();
+    const viewport = () => page.evaluate(() => { const map = (window as unknown as { __meeetMap?: { getCenter: () => { lat: number; lng: number }; getZoom: () => number; getBounds: () => { getWest: () => number; getEast: () => number } } }).__meeetMap; if (!map) throw new Error("Map instance unavailable"); const center = map.getCenter(); const bounds = map.getBounds(); return { lng: center.lng, lat: center.lat, zoom: map.getZoom(), west: bounds.getWest(), east: bounds.getEast() }; });
+    const initial = await viewport();
+    expect(initial.east).toBeLessThan(11.615);
+
+    await page.unroute("**/api/meeting/station-areas/*/details");
+    await page.route("**/api/meeting/station-areas/*/details", (route) => route.fulfill({ status: 410, contentType: "application/json", body: JSON.stringify({ error: { code: "CALCULATION_REF_EXPIRED", message: "The calculation reference is missing or has expired. Recalculate the meeting surface." } }) }));
+    await page.locator('[data-station-area-id="area-fair"]').click();
+    await expect(page.getByRole("button", { name: "Recalculate meeting places" })).toBeVisible();
+    await page.getByRole("button", { name: "Recalculate meeting places" }).click();
+    await expect.poll(() => calculationCalls).toBe(2);
+    await expect(page.getByText("Meeting result", { exact: true })).toBeVisible();
+    await expect.poll(async () => (await viewport()).east >= 11.615).toBe(true);
+    await page.evaluate(() => new Promise<void>((resolve) => { const map = (window as unknown as { __meeetMap?: { isMoving: () => boolean; once: (event: string, callback: () => void) => void } }).__meeetMap; if (!map || !map.isMoving()) { resolve(); return; } map.once("moveend", () => resolve()); }));
+    const changed = await viewport();
+    expect(changed.east).toBeGreaterThanOrEqual(11.615);
+    expect(changed.west).toBeGreaterThan(11.555);
+
+    const refocus = page.getByRole("button", { name: "Refocus map" });
+    const canvas = page.locator(".maplibregl-canvas"); await canvas.scrollIntoViewIfNeeded();
+    const rect = await canvas.boundingBox(); if (!rect) throw new Error("Map canvas was not painted");
+    await page.mouse.move(rect.x + rect.width / 2, rect.y + rect.height / 2); await page.mouse.down(); await page.mouse.move(rect.x + rect.width / 2 + 120, rect.y + rect.height / 2, { steps: 6 }); await page.mouse.up();
+    await page.evaluate(() => new Promise<void>((resolve) => { const map = (window as unknown as { __meeetMap?: { isMoving: () => boolean; once: (event: string, callback: () => void) => void } }).__meeetMap; if (!map || !map.isMoving()) { resolve(); return; } map.once("moveend", () => resolve()); }));
+    await refocus.focus(); await page.keyboard.press("Enter");
+    await expect.poll(async () => { const current = await viewport(); return Math.abs(current.lng - changed.lng) < 1e-4 && Math.abs(current.lat - changed.lat) < 1e-4 && Math.abs(current.zoom - changed.zoom) < 0.01; }).toBe(true);
   });
 
   test("refocus control restores the fitted viewport after manual pan", async ({ page }) => {
