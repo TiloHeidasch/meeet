@@ -16,7 +16,31 @@ export type DetailParticipant = {
   readonly status: "available" | "unavailable";
   readonly unavailableReason: "no-access-seeds" | "no-reachable-stations" | "station-area-unclassified" | "station-area-unavailable-for-participant" | null;
   readonly terminal: { readonly totalSeconds: number | null; readonly arrivalAt: string | null };
+  readonly itinerary: readonly ItineraryLeg[] | null;
 };
+export type ItineraryLeg =
+  | {
+      readonly kind: "walk";
+      readonly fromAreaId: string | null;
+      readonly toAreaId: string;
+      readonly fromAreaName: string | null;
+      readonly toAreaName: string;
+      readonly startEpochSeconds: number;
+      readonly endEpochSeconds: number;
+    }
+  | {
+      readonly kind: "transit";
+      readonly fromAreaId: string;
+      readonly toAreaId: string;
+      readonly fromAreaName: string;
+      readonly toAreaName: string;
+      readonly line: string;
+      readonly routeType: number;
+      readonly headsign: string;
+      readonly tripId: string;
+      readonly startEpochSeconds: number;
+      readonly endEpochSeconds: number;
+    };
 export type Coordinate = { readonly latitude: number; readonly longitude: number };
 export type DetailBasis = { readonly contractVersion: "meeet-meeting/v3"; readonly searchStartAt: string; readonly selectedTolerancePercent: 5 | 10 | 15; readonly routingHorizonSeconds: 86400; readonly walkingVelocityMetersPerSecond: number; readonly walkingSecondsRoundingRule: string; readonly transferRadiusMeters: number; readonly changeTimeSeconds: 180 | 300 | 600; readonly deterministicSelectionPolicy: "earliest-arrival/canonical-scan-first/v1"; readonly schedule: Record<string, unknown>; readonly accessProvider: Record<string, unknown> };
 type Result = { success: true; data: StationAreaDetail } | { success: false; message: string };
@@ -37,11 +61,38 @@ function sameOrigin(value: unknown, expected: MeetingRequest["participants"][num
 function canonical(value: unknown): unknown { if (Array.isArray(value)) return value.map(canonical); if (isRecord(value)) return Object.fromEntries(Object.keys(value).sort().map((key) => [key, canonical(value[key])])); return value; }
 function sameValue(first: unknown, second: unknown): boolean { return JSON.stringify(canonical(first)) === JSON.stringify(canonical(second)); }
 function isParticipantAvailable(marker: MeetingStationArea, index: 0 | 1): boolean { const arrival = index === 0 ? marker.redArrivalSeconds : marker.blueArrivalSeconds; return arrival !== null; }
-function validParticipant(value: unknown): value is DetailParticipant { return isRecord(value) && exact(value, ["id", "color", "origin", "status", "unavailableReason", "terminal"]) && string(value.id) && (value.color === "red" || value.color === "blue") && isRecord(value.origin) && exact(value.origin, ["label", "latitude", "longitude"]) && string(value.origin.label) && typeof value.origin.latitude === "number" && Number.isFinite(value.origin.latitude) && typeof value.origin.longitude === "number" && Number.isFinite(value.origin.longitude) && (value.status === "available" || value.status === "unavailable") && (value.unavailableReason === null || ["no-access-seeds", "no-reachable-stations", "station-area-unclassified", "station-area-unavailable-for-participant"].includes(String(value.unavailableReason))) && isRecord(value.terminal) && exact(value.terminal, ["totalSeconds", "arrivalAt"]) && (value.terminal.totalSeconds === null || wholeMinuteSeconds(value.terminal.totalSeconds)) && (value.terminal.arrivalAt === null || instant(value.terminal.arrivalAt)); }
+function validParticipant(value: unknown): value is DetailParticipant { return isRecord(value) && exact(value, ["id", "color", "origin", "status", "unavailableReason", "terminal", "itinerary"]) && string(value.id) && (value.color === "red" || value.color === "blue") && isRecord(value.origin) && exact(value.origin, ["label", "latitude", "longitude"]) && string(value.origin.label) && typeof value.origin.latitude === "number" && Number.isFinite(value.origin.latitude) && typeof value.origin.longitude === "number" && Number.isFinite(value.origin.longitude) && (value.status === "available" || value.status === "unavailable") && (value.unavailableReason === null || ["no-access-seeds", "no-reachable-stations", "station-area-unclassified", "station-area-unavailable-for-participant"].includes(String(value.unavailableReason))) && isRecord(value.terminal) && exact(value.terminal, ["totalSeconds", "arrivalAt"]) && (value.terminal.totalSeconds === null || wholeMinuteSeconds(value.terminal.totalSeconds)) && (value.terminal.arrivalAt === null || instant(value.terminal.arrivalAt)) && (value.itinerary === undefined || value.itinerary === null || validItinerary(value.itinerary)); }
 function validSchedule(value: unknown): value is Record<string, unknown> { if (!isRecord(value) || !exact(value, ["contractVersion", "feedId", "timeZone", "scheduleContentHash", "compiledArtifactId", "serviceDateRange", "acquisition"]) || value.contractVersion !== "meeet-scheduled-routing/v1" || !string(value.feedId) || !string(value.timeZone) || !string(value.scheduleContentHash) || !string(value.compiledArtifactId) || !isRecord(value.serviceDateRange) || !exact(value.serviceDateRange, ["firstDate", "lastDate"]) || !date(value.serviceDateRange.firstDate) || !date(value.serviceDateRange.lastDate) || !isRecord(value.acquisition)) return false; return exact(value.acquisition, ["sourceUrl", "retrievedAt", "rawArchiveByteSize", "rawArchiveSha256", "feedVersion", "feedValidFrom", "feedValidUntil", "attribution", "officialAttribution", "officialLicense", "officialProvenance"]) && string(value.acquisition.sourceUrl) && instant(value.acquisition.retrievedAt) && whole(value.acquisition.rawArchiveByteSize) && string(value.acquisition.rawArchiveSha256) && string(value.acquisition.feedVersion) && date(value.acquisition.feedValidFrom) && date(value.acquisition.feedValidUntil) && string(value.acquisition.attribution) && string(value.acquisition.officialAttribution) && isRecord(value.acquisition.officialLicense) && exact(value.acquisition.officialLicense, ["name", "url"]) && string(value.acquisition.officialLicense.name) && string(value.acquisition.officialLicense.url) && isRecord(value.acquisition.officialProvenance) && exact(value.acquisition.officialProvenance, ["source", "policyId"]) && ["feed", "meeet-policy"].includes(String(value.acquisition.officialProvenance.source)) && (value.acquisition.officialProvenance.policyId === null || value.acquisition.officialProvenance.policyId === "mvv-cc-by-4.0-fallback/v1"); }
 function validAccess(value: unknown): value is Record<string, unknown> { if (!isRecord(value) || !exact(value, ["name", "deployment", "dataKind", "liveData", "asOf", "notes", "provenance"]) || !string(value.name) || !["fixture", "self-hosted", "managed", "unknown"].includes(String(value.deployment)) || !["access", "demo-static"].includes(String(value.dataKind)) || value.liveData !== false || !string(value.asOf) || !string(value.notes) || !isRecord(value.provenance)) return false; const p = value.provenance; return exact(p, ["role", "provider", "deployment", "dataKind", "liveData", "sourceUrl", "license", "attribution", "version", "retrievedAt", "notes", "feeds"]) && p.role === "access" && p.liveData === false && p.deployment === value.deployment && p.dataKind === value.dataKind && string(p.provider) && string(p.version) && p.version === value.asOf && p.feeds === null; }
 function expectedArrival(start: string, seconds: number): string { return new Date(Date.parse(start) + seconds * 1000).toISOString(); }
 function validTerminal(participant: DetailParticipant, request: MeetingRequest): boolean { if (participant.status === "unavailable") return participant.unavailableReason !== null && participant.terminal.totalSeconds === null && participant.terminal.arrivalAt === null; if (participant.unavailableReason !== null || participant.terminal.totalSeconds === null || participant.terminal.arrivalAt === null) return false; return participant.terminal.arrivalAt === expectedArrival(canonicalSearchStartMinute(request.searchStartAt), participant.terminal.totalSeconds); }
+function validItinerary(value: unknown): value is readonly ItineraryLeg[] {
+  if (!Array.isArray(value) || value.length === 0) return false;
+  for (const leg of value) {
+    if (!isRecord(leg)) return false;
+    if (leg.kind === "walk") {
+      if (!exact(leg, ["kind", "fromAreaId", "toAreaId", "fromAreaName", "toAreaName", "startEpochSeconds", "endEpochSeconds"])) return false;
+      if (!(leg.fromAreaId === null || typeof leg.fromAreaId === "string")) return false;
+      if (typeof leg.toAreaId !== "string") return false;
+      if (!(leg.fromAreaName === null || typeof leg.fromAreaName === "string")) return false;
+      if (typeof leg.toAreaName !== "string") return false;
+    } else if (leg.kind === "transit") {
+      if (!exact(leg, ["kind", "fromAreaId", "toAreaId", "fromAreaName", "toAreaName", "line", "routeType", "headsign", "tripId", "startEpochSeconds", "endEpochSeconds"])) return false;
+      if (typeof leg.fromAreaId !== "string" || leg.fromAreaId === "") return false;
+      if (typeof leg.toAreaId !== "string" || leg.toAreaId === "") return false;
+      if (typeof leg.fromAreaName !== "string" || leg.fromAreaName === "") return false;
+      if (typeof leg.toAreaName !== "string" || leg.toAreaName === "") return false;
+      if (typeof leg.line !== "string" || leg.line === "") return false;
+      if (typeof leg.routeType !== "number" || !Number.isFinite(leg.routeType)) return false;
+      if (typeof leg.headsign !== "string") return false;
+      if (typeof leg.tripId !== "string" || leg.tripId === "") return false;
+    } else return false;
+    if (typeof leg.startEpochSeconds !== "number" || !Number.isFinite(leg.startEpochSeconds) || leg.startEpochSeconds < 0) return false;
+    if (typeof leg.endEpochSeconds !== "number" || !Number.isFinite(leg.endEpochSeconds) || leg.endEpochSeconds < 0) return false;
+    if (leg.endEpochSeconds < leg.startEpochSeconds) return false;
+  }
+  return true;
+}
 
 export function validateStationAreaDetails(value: unknown, response: MeetingResponse, request: MeetingRequest, calculationRef: string, selectedId: string): Result {
   if (!isRecord(value) || !exact(value, ["contractVersion", "status", "reason", "stationArea", "participants", "basis"]) || value.contractVersion !== "meeet-station-area-details/v1" || (value.status !== "ok" && value.status !== "no-result") || (value.reason !== null && value.reason !== "no-access-seeds" && value.reason !== "no-reachable-stations") || !Array.isArray(value.participants) || value.participants.length !== 2 || !isRecord(value.basis)) return { success: false, message: "The station-area details could not be verified." };
@@ -51,5 +102,18 @@ export function validateStationAreaDetails(value: unknown, response: MeetingResp
   const participants = [value.participants[0], value.participants[1]] as const; const expectedUnavailable = (index: 0 | 1) => isParticipantAvailable(marker, index) ? null : value.status === "no-result" ? value.reason : marker.classification === "unclassified" ? "station-area-unclassified" : "station-area-unavailable-for-participant"; if (participants[0].color !== "red" || participants[1].color !== "blue" || participants[0].id !== request.participants[0].id || participants[1].id !== request.participants[1].id || !sameOrigin(participants[0].origin, request.participants[0].origin) || !sameOrigin(participants[1].origin, request.participants[1].origin) || participants[0].terminal.totalSeconds !== marker.redArrivalSeconds || participants[1].terminal.totalSeconds !== marker.blueArrivalSeconds || (participants[0].status === "available") !== (expectedUnavailable(0) === null) || (participants[1].status === "available") !== (expectedUnavailable(1) === null) || participants[0].unavailableReason !== expectedUnavailable(0) || participants[1].unavailableReason !== expectedUnavailable(1) || !validTerminal(participants[0], request) || !validTerminal(participants[1], request)) return { success: false, message: "The station-area evidence timeline could not be verified." };
   const expectedClassification = marker.redArrivalSeconds === null && marker.blueArrivalSeconds === null ? "unclassified" : marker.redArrivalSeconds === null ? "blue" : marker.blueArrivalSeconds === null ? "red" : Math.abs(marker.redArrivalSeconds - marker.blueArrivalSeconds) * 100 <= (marker.redArrivalSeconds + marker.blueArrivalSeconds) * Number(basis.selectedTolerancePercent) ? "fair" : marker.redArrivalSeconds < marker.blueArrivalSeconds ? "red" : "blue";
   if (marker.classification !== expectedClassification || (value.status === "no-result" && (value.reason === null || marker.classification !== "unclassified"))) return { success: false, message: "The station-area classification could not be reconciled." };
+  for (const participant of participants) {
+    const itinerary = participant.itinerary ?? null;
+    if (participant.status === "unavailable") {
+      if (itinerary !== null) return { success: false, message: "The station-area itinerary could not be verified." };
+    } else if (itinerary !== null) {
+      const total = participant.terminal.totalSeconds;
+      if (total === null) return { success: false, message: "The station-area itinerary could not be verified." };
+      const startEpoch = Date.parse(canonicalSearchStartMinute(request.searchStartAt)) / 1000;
+      let lastEnd = -Infinity;
+      for (const leg of itinerary) { lastEnd = Math.max(lastEnd, leg.endEpochSeconds); }
+      if (Math.abs(lastEnd - (startEpoch + total)) > 60) return { success: false, message: "The station-area itinerary could not be verified." };
+    }
+  }
   return { success: true, data: { contractVersion: "meeet-station-area-details/v1", status: value.status, reason: value.reason, stationArea: marker, participants, basis: basis as DetailBasis, calculationRef } };
 }

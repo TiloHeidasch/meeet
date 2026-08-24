@@ -1,5 +1,7 @@
 import "server-only";
 
+import { getOrCreateProcessValue } from "../process-registry.ts";
+import { freezeEnvelope } from "./freeze.ts";
 import { isWithinOfficialMunichBoundary } from "../boundary.ts";
 import {
   CHANGE_TIME_PRESETS,
@@ -28,6 +30,21 @@ import {
 import { compareScheduledIds } from "./gtfs.ts";
 
 const STATION_AREA_CHECKPOINT = 32;
+
+interface ScheduledStationAreaCatalogCache {
+  catalogs: WeakMap<ScheduledRoutingArtifact, ScheduledStationAreaCatalog>;
+}
+
+const scheduledStationAreaCatalogCache = getOrCreateProcessValue(
+  Symbol.for("meeet.scheduled-station-area-catalog-cache/v1"),
+  () => ({ catalogs: new WeakMap<ScheduledRoutingArtifact, ScheduledStationAreaCatalog>() }),
+  isScheduledStationAreaCatalogCache,
+);
+
+/** Clear the process-wide catalog cache for deterministic cold-path measurements. */
+export function clearScheduledStationAreaCatalogCache(): void {
+  scheduledStationAreaCatalogCache.catalogs = new WeakMap<ScheduledRoutingArtifact, ScheduledStationAreaCatalog>();
+}
 
 /** Calculate a two-participant scheduled arrival surface from station seeds. */
 export function calculateScheduledSurface(input: ScheduledSurfaceInput): ScheduledSurfaceResult {
@@ -92,7 +109,8 @@ export function calculateScheduledSurface(input: ScheduledSurfaceInput): Schedul
     stationAreas,
     metadata,
   };
-  return deepFreeze(result);
+  freezeEnvelope(result);
+  return result;
 }
 
 /** Alias that names the result by its later API-facing purpose. */
@@ -103,7 +121,7 @@ export function createParticipantSurface(
   schedule: ScheduledRoutingArtifact,
   route: ReturnType<typeof routeScheduledEarliestArrivals> | null | undefined,
 ): ScheduledParticipantSurface {
-  const stationArrivals = route?.stationArrivals ?? schedule.stationAreas.map((area) => ({ stationAreaId: area.id, arrivalAt: null, elapsedSeconds: null }));
+  const stationArrivals = route?.stationArrivals ?? schedule.stationAreas.map((area) => ({ stationAreaId: area.id, arrivalEpochSeconds: null, elapsedSeconds: null }));
   return { participantId, stationArrivals };
 }
 
@@ -111,6 +129,13 @@ export function buildScheduledStationAreaCatalog(
   schedule: ScheduledRoutingArtifact,
   deadlineCheck?: ScheduledDeadlineCheck,
 ): ScheduledStationAreaCatalog {
+  const cached = scheduledStationAreaCatalogCache.catalogs.get(schedule);
+  if (cached !== undefined) {
+    // Keep the first non-empty artifact iteration's immediate checkpoint on a
+    // cache hit so deadline behavior is unchanged by the optimization.
+    if (schedule.stationAreas.length > 0) deadlineCheck?.("station-areas");
+    return cached;
+  }
   const entries: ScheduledStationAreaCatalogEntry[] = [];
   const areas = [...schedule.stationAreas].sort((left, right) => compareScheduledIds(left.id, right.id));
   for (let index = 0; index < areas.length; index += 1) {
@@ -119,7 +144,9 @@ export function buildScheduledStationAreaCatalog(
     if (area === undefined || !isWithinOfficialMunichBoundary(area.coordinate)) continue;
     entries.push({ stationAreaId: area.id, name: area.name, coordinate: area.coordinate, mode: area.mode });
   }
-  return deepFreeze({ entries });
+  const catalog = deepFreeze({ entries });
+  scheduledStationAreaCatalogCache.catalogs.set(schedule, catalog);
+  return catalog;
 }
 
 export function createStationAreaCandidates(
@@ -226,7 +253,8 @@ export async function evaluateScheduledStationAreaCandidates(
           tolerancePercent,
         );
     candidates.push(candidate);
-    await onCandidate?.(candidate);
+    const hookResult = onCandidate?.(candidate);
+    if (hookResult !== undefined) await hookResult;
   }
   return candidates;
 }
@@ -288,4 +316,9 @@ function deepFreeze<T>(value: T): T {
     Object.freeze(value);
   }
   return value;
+}
+
+function isScheduledStationAreaCatalogCache(value: unknown): value is ScheduledStationAreaCatalogCache {
+  return typeof value === "object" && value !== null &&
+    (value as { catalogs?: unknown }).catalogs instanceof WeakMap;
 }
