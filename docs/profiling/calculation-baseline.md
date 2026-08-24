@@ -31,10 +31,15 @@ Requirements:
 Commands:
 
 ```sh
-npm run profile:calculation            # timing + heap deltas, JSON report
+npm run profile:calculation            # timing + memory snapshots, JSON report
 npm run profile:calculation:cpu        # + profiles/cpu-calculation-*.cpuprofile
 npm run profile:calculation -- --heap-snapshots   # + per-stage heap snapshots
+NODE_OPTIONS=--conditions=react-server node --expose-gc --import tsx scripts/profile-scheduled-calculation.ts
 ```
+
+The last form enables the optional post-GC memory measurement. The harness
+does not require `--expose-gc`; without it, the measurement is reported as
+unavailable.
 
 Output contract: the JSON report is written to
 `profiles/report-<compiledArtifactId[:12]>-<timestamp>.json` and its path is
@@ -48,6 +53,54 @@ tsx/loader startup is not included. It is approximately the measured window; the
 small difference is profiler start/stop overhead outside the measured stages.
 Heap snapshots are written at stage boundaries; snapshot write time is
 reported as separate `heap-snapshot:<stage>` rows so stage timings stay clean.
+When a snapshot follows a completed stage, that stage is ended before the
+snapshot starts, and the next stage's start time, memory, and GC counters are
+captured only after snapshot work completes. Snapshot I/O therefore cannot
+extend the following normal stage span.
+
+## Report memory and routing metadata (issue #74)
+
+Each stage measurement includes `memoryBefore`, `memoryAfter`, and
+`memoryDelta` snapshots. Every snapshot records the Node
+`process.memoryUsage()` values `rss`, `heapTotal`, `heapUsed`, `external`, and
+`arrayBuffers`, in bytes. The existing `heapDeltaBytes` field remains as a
+backwards-readable alias for `memoryDelta.heapUsed`.
+
+The report records the normal calculation window's `connectionCount` and
+`compactTableByteLength`. The harness obtains these from the cached immutable
+window after the normal timing window and CPU profile have ended, so the lookup
+is not included in the total or stage timings.
+
+It also records `coldRoutingWindowProbe` after `totalElapsedMs` is captured.
+The probe clears the routing-window cache and calls
+`createScheduledRoutingWindow` with its sparse
+`onMaterializationCheckpoint` instrumentation callback. That callback disables
+caching and samples `process.memoryUsage()` every 2,048 materialized rows and
+at the before/after boundaries. The probe reports
+`materializationElapsedMs`, table connection and byte counts, `memoryBefore`,
+`memoryAfter`, `memoryDelta`, `peakMemory`, and the corresponding GC fields.
+It is a separate allocation measurement and is never part of a normal stage or
+the normal total.
+
+`peakMemory` is the maximum observed value for each memory-usage field at
+those in-process checkpoints. It is not an OS-level peak measurement and can
+miss a short-lived allocation between checkpoints. The compact table's
+typed-array storage is included in `external`/`arrayBuffers` and RSS.
+
+Every normal stage row and the cold-window probe has `gcBefore`, `gcAfter`,
+and `gcDelta` fields. Each contains `count` and `totalPauseMs`, collected with
+Node `perf_hooks.PerformanceObserver` from `gc` performance entries. The
+observer is drained at measurement boundaries and disconnected when the run
+ends; no special runtime flag is required for these observations. After all
+normal timings and the cold probe, the harness calls `global.gc` when
+available and records `postGcMemory.before`, `postGcMemory.after`, and
+`postGcMemory.delta`; without `--expose-gc` (or another runtime that provides
+`global.gc`) it records `postGcMemory.available: false`. GC is optional and is
+never required to run the profile.
+
+The compact routing table uses typed-array backing stores. Those allocations
+are accounted for in `external`/`arrayBuffers` and RSS, not just the V8 heap,
+so heap-only deltas understate the routing-window memory footprint.
 
 ## Before/after protocol
 
@@ -56,17 +109,59 @@ For every optimization ticket:
 1. Check out the target commit, compile the real feed if the artifact is
    missing or stale (`npm run schedule:compile:mvv`), and record the
    `compiledArtifactId` from the report.
-2. Run the harness at least 3 times in fresh processes and take the median of
-   each stage. Use the same fixed request (see below) and the same artifact.
+2. Run the harness three times in fresh Node 24 processes and take the median
+   of each stage. Use the same fixed request (see below) and the same artifact.
 3. Record the ranked stage table and the total in the ticket.
 4. Implement the change, then repeat steps 1-3 on the same artifact identity.
 5. Attribute the win: report the per-stage delta, not just the total.
+
+The existing real-feed baseline above is not refreshed by the issue #74 report
+schema change. No new real-feed result or baseline is recorded here when the
+artifact is unavailable locally.
 
 The fixed profile request is hard-coded in the harness: red
 (48.1374, 11.5755) / blue (48.14, 11.57), tolerance 10%, change time medium,
 `searchStartAt = 2026-08-11T08:05:00+02:00` (a weekday morning inside the
 artifact's routable coverage). Changing the request invalidates the baseline
 comparison.
+
+## Issue #74 measured evidence (2026-08-24)
+
+Measured with Node 24.19.0, real MVV feed `20260803`, and compiled artifact
+`4441c627e8b91ab75932664361de2b670c39d2737eedb9db990ef91dc76c3e20` (2,075,789
+artifact connections). The materialized windows contained 741,295 rows.
+Node 24 is required. The matched fresh-process comparison used the exact same
+artifact, request/options, process setup, and explicit GC before and after
+window materialization; the baseline dynamically loaded the `origin/dev`
+router.
+
+| Direct window materialization | Samples (ms) | Median (ms) |
+| --- | --- | ---: |
+| Baseline (`origin/dev`) | 689, 4969, 4536 | 4536 |
+| Current | 182, 1568, 1955 | 1568 |
+
+The current median is 65.4% lower. Host artifact-load and RSS variance was
+high; direct window timing deliberately excludes artifact load.
+
+Baseline post-GC retained JS heap delta samples were
+`[215304824, 207250608, 207437952]` bytes (median `207437952`). The current
+compact table has a fixed retained size of `11860720` bytes. Immediate current
+materialization heap deltas were roughly 19.8–21.1 MB, plus `45,398,768` bytes
+of temporary array buffers; `11,860,720` bytes of array buffers remained after
+GC. On these measured retained-size figures, the current window representation
+is 94.3% smaller than the baseline median. The current profiler probe observed
+zero collections during its materialization runs and reports GC counters for
+future comparisons; no GC-count comparison is inferred here.
+
+With identical 8/8 live-resolved access seeds, paired baseline/current scans
+produced the same SHA-256
+`956c0ae75a89e9440d5618b9eb31eb4ced6e955cfc983d49d401298c38b51387` over sorted
+predecessor details and station arrivals. Both windows had 741,295 rows.
+
+The current full-profile cold-window probe samples were `[1083, 1296, 1588]`
+ms (median 1296 ms). The normal routing-window stage samples were
+`[2712, 1978, 1995]` ms (median 1995 ms); this stage is not comparable to the
+direct baseline because it includes full-calculation state.
 
 ## Current baseline (2026-08-20)
 
