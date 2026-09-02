@@ -1,11 +1,23 @@
 // E2E functional calculation gate.
 //
 // Runs against a built and started meeet server (fixture provider mode with a
-// freshly compiled fixture schedule artifact) and performs one functional
-// calculation through the public JSON endpoint at now + 5 minutes.
+// freshly compiled fixture schedule artifact) and exercises the calculation
+// journey the client actually uses at now + 5 minutes:
+//   1. The non-streaming JSON `meeet-meeting/v3` endpoint (existing smoke).
+//   2. The `meeet-meeting/v3` SSE stream: ordered progress phases, exactly one
+//      terminal result, and the calculation reference used to fetch details.
+//   3. The `meeet-station-area-details/v1` endpoint for a returned station
+//      area, using the calculation reference from the stream.
 // Plain Node ESM, no dependencies, no TypeScript.
 
 const BASE_URL = process.env.MEEET_E2E_BASE_URL ?? "http://127.0.0.1:3000";
+
+const CALCULATION_PROGRESS_PHASES = [
+  "access-seeds",
+  "scheduled-routing",
+  "station-area-evaluation",
+  "validating-result",
+];
 
 const REQUEST = {
   contractVersion: "meeet-meeting/v3",
@@ -26,39 +38,158 @@ function fail(assertion, detail) {
   process.exit(1);
 }
 
-const response = await fetch(`${BASE_URL}/api/meeting/calculate`, {
+function assertScheduledMeetingResponse(body, label) {
+  if (body.contractVersion !== "meeet-meeting/v3") {
+    fail(`${label}: contractVersion is "meeet-meeting/v3"`, body.contractVersion);
+  }
+  if (body.status !== "ok") {
+    fail(`${label}: status is "ok"`, body.status);
+  }
+  if (!Array.isArray(body.participants) || body.participants.length !== 2) {
+    fail(`${label}: participants is an array of length 2`, body.participants);
+  }
+  const colors = body.participants.map((participant) => participant.color).sort();
+  if (colors[0] !== "blue" || colors[1] !== "red") {
+    fail(`${label}: participant colors are "red" and "blue"`, colors);
+  }
+  if (!Array.isArray(body.stationAreas) || body.stationAreas.length === 0) {
+    fail(`${label}: stationAreas is a non-empty array`, body.stationAreas);
+  }
+  if (typeof body.metadata !== "object" || body.metadata === null) {
+    fail(`${label}: metadata is an object`, body.metadata);
+  }
+}
+
+// 1. Existing JSON calculation smoke.
+
+const jsonResponse = await fetch(`${BASE_URL}/api/meeting/calculate`, {
   method: "POST",
   headers: { "content-type": "application/json" },
   body: JSON.stringify(REQUEST),
 });
 
-if (response.status !== 200) {
-  fail(`HTTP status is 200 (got ${response.status})`, await response.text().catch(() => undefined));
+if (jsonResponse.status !== 200) {
+  fail(`JSON calculate: HTTP status is 200 (got ${jsonResponse.status})`, await jsonResponse.text().catch(() => undefined));
 }
 
-const body = await response.json();
+const jsonBody = await jsonResponse.json();
+assertScheduledMeetingResponse(jsonBody, "JSON calculate");
 
-if (body.contractVersion !== "meeet-meeting/v3") {
-  fail(`contractVersion is "meeet-meeting/v3"`, body.contractVersion);
+console.log(
+  `E2E OK: v3 JSON calculation returned status "ok" with ${jsonBody.stationAreas.length} station areas for red/blue participants`,
+);
+
+// 2. SSE stream: ordered progress, exactly one terminal result, and a
+//    calculation reference.
+
+const streamResponse = await fetch(`${BASE_URL}/api/meeting/calculate/stream`, {
+  method: "POST",
+  headers: { "content-type": "application/json" },
+  body: JSON.stringify(REQUEST),
+});
+
+if (streamResponse.status !== 200) {
+  fail(`SSE stream: HTTP status is 200 (got ${streamResponse.status})`, await streamResponse.text().catch(() => undefined));
 }
-if (body.status !== "ok") {
-  fail(`status is "ok"`, body.status);
+if (streamResponse.body === null) {
+  fail("SSE stream: response has a body");
 }
-if (!Array.isArray(body.participants) || body.participants.length !== 2) {
-  fail("participants is an array of length 2", body.participants);
+
+const observedPhases = [];
+let calculationRef = null;
+let resultBody = null;
+let resultCount = 0;
+let errorEvent = null;
+
+const decoder = new TextDecoder();
+const reader = streamResponse.body.getReader();
+let buffer = "";
+let done = false;
+while (!done) {
+  const chunk = await reader.read();
+  done = chunk.done;
+  if (chunk.value !== undefined) buffer += decoder.decode(chunk.value, { stream: true });
+  let separatorIndex;
+  while ((separatorIndex = buffer.indexOf("\n\n")) !== -1) {
+    const frame = buffer.slice(0, separatorIndex);
+    buffer = buffer.slice(separatorIndex + 2);
+    if (frame.trim() === "" || frame.startsWith(":")) continue;
+    const eventLine = frame.split("\n").find((line) => line.startsWith("event: "));
+    const dataLine = frame.split("\n").find((line) => line.startsWith("data: "));
+    if (eventLine === undefined || dataLine === undefined) continue;
+    const eventName = eventLine.slice("event: ".length);
+    const data = JSON.parse(dataLine.slice("data: ".length));
+    if (eventName === "progress") {
+      observedPhases.push(data.phase);
+    } else if (eventName === "ref") {
+      calculationRef = data.calculationRef;
+    } else if (eventName === "result") {
+      resultCount += 1;
+      resultBody = data;
+    } else if (eventName === "error") {
+      errorEvent = data;
+    }
+  }
 }
-const colors = body.participants.map((participant) => participant.color).sort();
-if (colors[0] !== "blue" || colors[1] !== "red") {
-  fail('participant colors are "red" and "blue"', colors);
+
+if (errorEvent !== null) {
+  fail("SSE stream: no error event", errorEvent);
 }
-if (!Array.isArray(body.stationAreas) || body.stationAreas.length === 0) {
-  fail("stationAreas is a non-empty array", body.stationAreas);
+if (observedPhases.join(",") !== CALCULATION_PROGRESS_PHASES.join(",")) {
+  fail(`SSE stream: progress phases are ordered ${JSON.stringify(CALCULATION_PROGRESS_PHASES)}`, observedPhases);
 }
-if (typeof body.metadata !== "object" || body.metadata === null) {
-  fail("metadata is an object", body.metadata);
+if (resultCount !== 1) {
+  fail("SSE stream: exactly one terminal result event", resultCount);
+}
+if (resultBody === null) {
+  fail("SSE stream: a result event was received");
+}
+assertScheduledMeetingResponse(resultBody, "SSE stream result");
+if (typeof calculationRef !== "string" || calculationRef.trim() === "") {
+  fail("SSE stream: a calculation reference was received", calculationRef);
+}
+
+console.log(`E2E OK: v3 SSE stream produced ordered progress and one terminal result with a calculation reference`);
+
+// 3. Station-area details for a returned station area, using the calculation
+//    reference from the stream.
+
+const targetStationArea = resultBody.stationAreas.find((area) => area.classification !== "unclassified")
+  ?? resultBody.stationAreas[0];
+
+const detailsResponse = await fetch(`${BASE_URL}/api/meeting/station-areas/${targetStationArea.stationAreaId}/details`, {
+  method: "POST",
+  headers: { "content-type": "application/json", "Meeet-Calculation-Ref": calculationRef },
+  body: JSON.stringify(REQUEST),
+});
+
+if (detailsResponse.status !== 200) {
+  fail(`Station-area details: HTTP status is 200 (got ${detailsResponse.status})`, await detailsResponse.text().catch(() => undefined));
+}
+
+const detailsBody = await detailsResponse.json();
+
+if (detailsBody.contractVersion !== "meeet-station-area-details/v1") {
+  fail(`Station-area details: contractVersion is "meeet-station-area-details/v1"`, detailsBody.contractVersion);
+}
+if (detailsBody.status !== "ok" && detailsBody.status !== "no-result") {
+  fail(`Station-area details: status is "ok" or "no-result"`, detailsBody.status);
+}
+if (typeof detailsBody.stationArea !== "object" || detailsBody.stationArea === null || detailsBody.stationArea.stationAreaId !== targetStationArea.stationAreaId) {
+  fail("Station-area details: stationArea matches the requested station area", detailsBody.stationArea);
+}
+if (!Array.isArray(detailsBody.participants) || detailsBody.participants.length !== 2) {
+  fail("Station-area details: participants is an array of length 2", detailsBody.participants);
+}
+const detailsColors = detailsBody.participants.map((participant) => participant.color).sort();
+if (detailsColors[0] !== "blue" || detailsColors[1] !== "red") {
+  fail('Station-area details: participant colors are "red" and "blue"', detailsColors);
+}
+if (typeof detailsBody.basis !== "object" || detailsBody.basis === null) {
+  fail("Station-area details: basis is an object", detailsBody.basis);
 }
 
 console.log(
-  `E2E OK: v3 calculation returned status "ok" with ${body.stationAreas.length} station areas for red/blue participants`,
+  `E2E OK: v1 station-area details returned status "${detailsBody.status}" for station area ${targetStationArea.stationAreaId}`,
 );
 process.exit(0);

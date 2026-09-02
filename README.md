@@ -120,8 +120,12 @@ git diff --check
 The e2e gate compiles the fixture GTFS into a fresh schedule artifact with a
 current validity window and time-shifted trips (`npm run schedule:compile:fixture`),
 starts the built server in fixture provider mode against that artifact, and
-performs one functional calculation at now + 5 minutes
-(`scripts/e2e-calculation.mjs`).
+exercises the calculation journey the client actually uses at now + 5 minutes
+(`scripts/e2e-calculation.mjs`): the non-streaming JSON `meeet-meeting/v3`
+calculation, the `meeet-meeting/v3` SSE stream (ordered progress phases,
+exactly one terminal result, and a calculation reference), and the
+`meeet-station-area-details/v1` endpoint for a returned station area using
+that reference.
 
 The application boundary is Munich for destinations, surfaces, station-area
 candidates, markers, and territories; participant origins are accepted across

@@ -215,6 +215,23 @@ test("PR CI includes an e2e gate that builds, starts meeet, and runs a functiona
   assert.match(e2eScript, /5 \* 60 \* 1000/);
 });
 
+test("PR CI e2e gate exercises the SSE stream and station-area details lifecycle", () => {
+  const e2eScript = read("scripts/e2e-calculation.mjs");
+  assert.match(e2eScript, /\/api\/meeting\/calculate\/stream/);
+  assert.match(e2eScript, /access-seeds/);
+  assert.match(e2eScript, /scheduled-routing/);
+  assert.match(e2eScript, /station-area-evaluation/);
+  assert.match(e2eScript, /validating-result/);
+  assert.match(e2eScript, /eventName === "progress"/);
+  assert.match(e2eScript, /eventName === "ref"/);
+  assert.match(e2eScript, /eventName === "result"/);
+  assert.match(e2eScript, /resultCount/);
+  assert.match(e2eScript, /calculationRef/);
+  assert.match(e2eScript, /\/api\/meeting\/station-areas\/\$\{targetStationArea\.stationAreaId\}\/details/);
+  assert.match(e2eScript, /Meeet-Calculation-Ref/);
+  assert.match(e2eScript, /meeet-station-area-details\/v1/);
+});
+
 test("PR CI compiles the real MVV feed so compiler regressions fail the gate", () => {
   const ciWorkflow = read(".github/workflows/ci.yml");
   assert.match(ciWorkflow, /name:\s*Compile real MVV feed/);
