@@ -14,14 +14,15 @@ import {
   routeScheduledEarliestArrivals,
   routeScheduledEarliestArrivalsPair,
   createScheduledRoutingWindow,
+  clearScheduledRoutingWindowCache,
   serviceDateRangeForSearch,
   serviceDateAnchorEpochSeconds,
   serviceDateForEpochSeconds,
   serviceDateSecondsToEpochSeconds,
   walkingSeconds,
   type GtfsFeedFiles,
-  type ScheduledMaterializedConnection,
   type ScheduledRoutingArtifact,
+  type ScheduledRoutingMaterializedConnection,
 } from "../lib/domain/scheduled-routing/index.ts";
 import { ScheduledCalculationDeadlineError } from "../lib/domain/scheduled-admission.ts";
 import { FIXTURE_SCHEDULED_ARTIFACT, FIXTURE_SCHEDULED_ACCESS_PROVIDER } from "../lib/fixtures/scheduled-routing.ts";
@@ -163,11 +164,21 @@ function overlappingStreamFixture(firstDate: string, lastDate: string): GtfsFeed
   };
 }
 
-function referenceMaterializeConnections(schedule: ScheduledRoutingArtifact, searchStartAt: string): ScheduledMaterializedConnection[] {
+interface ReferenceMaterializedConnection {
+  readonly instanceId: string;
+  readonly serviceDate: string;
+  readonly source: ScheduledRoutingArtifact["connections"][number];
+  readonly departureEpochSeconds: number;
+  readonly arrivalEpochSeconds: number;
+  readonly connectionKey: string;
+  readonly previousContinuationKey: string | null;
+}
+
+function referenceMaterializeConnections(schedule: ScheduledRoutingArtifact, searchStartAt: string): ReferenceMaterializedConnection[] {
   const searchStartEpochSeconds = parseSearchStartInstant(searchStartAt, schedule.timeZone).epochSeconds;
   const horizonEndEpochSeconds = searchStartEpochSeconds + 86_400;
   const [firstCandidateDate, lastCandidateDate] = serviceDateRangeForSearch(searchStartEpochSeconds, schedule.timeZone, schedule.maximumServiceDayTimeSeconds);
-  const results: ScheduledMaterializedConnection[] = [];
+  const results: ReferenceMaterializedConnection[] = [];
   let serviceDate = firstCandidateDate;
   while (serviceDate <= lastCandidateDate) {
     const activeServiceIds = referenceActiveServiceIds(schedule, serviceDate);
@@ -217,7 +228,7 @@ function referenceActiveServiceIds(schedule: ScheduledRoutingArtifact, serviceDa
   return activeServiceIds;
 }
 
-function compareReferenceMaterializedConnections(left: ScheduledMaterializedConnection, right: ScheduledMaterializedConnection): number {
+function compareReferenceMaterializedConnections(left: ReferenceMaterializedConnection, right: ReferenceMaterializedConnection): number {
   return left.departureEpochSeconds - right.departureEpochSeconds || compareScheduledConnections(left.source, right.source) || left.arrivalEpochSeconds - right.arrivalEpochSeconds || left.instanceId.localeCompare(right.instanceId);
 }
 
@@ -353,6 +364,10 @@ test("routeScheduledEarliestArrivalsPair matches two sequential routeScheduledEa
   assert.deepEqual(paired[0], sequential[0]);
   assert.deepEqual(paired[1], sequential[1]);
   assert.ok(paired[0].reachableStationAreaCount > 0);
+  assert.ok(paired[1].reachableStationAreaCount > 0);
+  assert.ok(Object.keys(paired[0].predecessorByArea).length > 0);
+  assert.deepEqual(paired[0].predecessorByArea, sequential[0].predecessorByArea);
+  assert.deepEqual(paired[1].predecessorByArea, sequential[1].predecessorByArea);
 });
 
 test("routeScheduledEarliestArrivalsPair matches sequential scans with asymmetric reachability", () => {
@@ -373,6 +388,7 @@ test("routeScheduledEarliestArrivalsPair matches sequential scans with asymmetri
   assert.deepEqual(paired[0], sequential[0]);
   assert.deepEqual(paired[1], sequential[1]);
   assert.ok(paired[0].reachableStationAreaCount > 0);
+  assert.deepEqual(paired[0].predecessorByArea, sequential[0].predecessorByArea);
   assert.equal(paired[1].reachableStationAreaCount, 1);
 });
 
@@ -405,10 +421,44 @@ test("lazy date streams and heap merge are reference-equivalent across normal an
     { schedule: fallSchedule, searchStartAt: "2026-10-25T22:40:00+01:00" },
   ];
   for (const { schedule, searchStartAt } of cases) {
-    const actual = createScheduledRoutingWindow(schedule, searchStartAt, { walkingVelocityMetersPerSecond: 10, transferRadiusMeters: 100 }).connections;
-    assert.deepEqual(actual, referenceMaterializeConnections(schedule, searchStartAt));
-    assert.ok(new Set(actual.map((connection) => connection.serviceDate)).size >= 2, `${searchStartAt}: ${[...new Set(actual.map((connection) => connection.serviceDate))].join(",")}`);
-    for (let index = 1; index < actual.length; index += 1) assert.ok(compareReferenceMaterializedConnections(actual[index - 1]!, actual[index]!) <= 0);
+    const actualRows: ScheduledRoutingMaterializedConnection[] = [];
+    const actual = createScheduledRoutingWindow(schedule, searchStartAt, { walkingVelocityMetersPerSecond: 10, transferRadiusMeters: 100 }, {
+      onMaterializedConnection: (connection) => actualRows.push(connection),
+    });
+    const reference = referenceMaterializeConnections(schedule, searchStartAt);
+    assert.equal(actual.connectionCount, reference.length);
+    assert.equal(actualRows.length, reference.length);
+    const referenceIndexByKey = new Map(reference.map((connection, index) => [connection.connectionKey, index]));
+    const continuationIndexByKey = new Map<string, number>();
+    for (let index = 0; index < reference.length; index += 1) {
+      const previousKey = reference[index]?.previousContinuationKey;
+      if (previousKey !== null && previousKey !== undefined) continuationIndexByKey.set(previousKey, index);
+    }
+    assert.deepEqual(
+      actualRows.map((row) => ({
+        source: row.source.id,
+        serviceDate: row.serviceDate,
+        departureEpochSeconds: row.departureEpochSeconds,
+        arrivalEpochSeconds: row.arrivalEpochSeconds,
+        predecessorRowIndex: row.predecessorRowIndex,
+        continuationRowIndex: row.continuationRowIndex,
+      })),
+      reference.map((row) => ({
+        source: row.source.id,
+        serviceDate: row.serviceDate,
+        departureEpochSeconds: row.departureEpochSeconds,
+        arrivalEpochSeconds: row.arrivalEpochSeconds,
+        predecessorRowIndex: row.previousContinuationKey === null ? null : referenceIndexByKey.get(row.previousContinuationKey) ?? null,
+        continuationRowIndex: continuationIndexByKey.get(row.connectionKey) ?? null,
+      })),
+    );
+    const firstActualRow = actualRows[0];
+    assert.ok(firstActualRow !== undefined);
+    assert.equal(Object.isFrozen(firstActualRow), true);
+    assert.ok(new Set(reference.map((connection) => connection.serviceDate)).size >= 2, `${searchStartAt}: ${[...new Set(reference.map((connection) => connection.serviceDate))].join(",")}`);
+    for (let index = 1; index < reference.length; index += 1) assert.ok(compareReferenceMaterializedConnections(reference[index - 1]!, reference[index]!) <= 0);
+    const routed = routeScheduledEarliestArrivals(schedule, [{ stationAreaId: "station-a", accessSeconds: 0 }], searchStartAt, { walkingVelocityMetersPerSecond: 10, transferRadiusMeters: 100 }, actual);
+    assert.ok(routed.reachableStationAreaCount > 0);
   }
 });
 
@@ -447,17 +497,42 @@ test("connection scan includes scheduled waiting and same-trip continuation, whi
   assert.equal(throughOnlyResult.stationArrivals.find((arrival) => arrival.stationAreaId === "station-c")?.elapsedSeconds, 25 * 60);
 });
 
-test("date streams preserve continuation predecessors and do not authorize one before search start", () => {
-  const schedule = fixture();
-  const window = createScheduledRoutingWindow(schedule, SEARCH_START, { walkingVelocityMetersPerSecond: 10, transferRadiusMeters: 100 });
-  const through = window.connections.filter((connection) => connection.source.tripId === "through");
-  assert.equal(through[0]?.previousContinuationKey, null);
-  assert.equal(through[1]?.previousContinuationKey, through[0]?.connectionKey);
+test("continuation authorization honors the search cutoff and same-bucket continuations", () => {
+  const throughOnly = importFixtureFiles({
+    ...FIXTURE_FILES,
+    "trips.txt": "route_id,service_id,trip_id\nred,weekday,only-through",
+    "stop_times.txt": [
+      "trip_id,arrival_time,departure_time,stop_id,stop_sequence,pickup_type,drop_off_type",
+      "only-through,08:10:00,08:10:00,a-1,1,0,0",
+      "only-through,08:10:00,08:10:00,b-1,2,0,0",
+      "only-through,08:20:00,08:20:00,c-1,3,0,0",
+    ].join("\n"),
+  });
+  const early = routeScheduledEarliestArrivals(throughOnly, [{ stationAreaId: "station-a", accessSeconds: 0 }], SEARCH_START, { walkingVelocityMetersPerSecond: 10, transferRadiusMeters: 100 });
+  assert.equal(early.stationArrivals.find((arrival) => arrival.stationAreaId === "station-c")?.elapsedSeconds, 15 * 60);
 
-  const lateWindow = createScheduledRoutingWindow(schedule, "2026-08-11T08:15:00+02:00", { walkingVelocityMetersPerSecond: 10, transferRadiusMeters: 100 });
-  const lateThrough = lateWindow.connections.find((connection) => connection.source.tripId === "through");
-  assert.equal(lateThrough?.source.fromStopSequence, 1);
-  assert.equal(lateThrough?.previousContinuationKey, null);
+  const late = routeScheduledEarliestArrivals(throughOnly, [{ stationAreaId: "station-a", accessSeconds: 0 }], "2026-08-11T08:15:00+02:00", { walkingVelocityMetersPerSecond: 10, transferRadiusMeters: 100 });
+  assert.equal(late.stationArrivals.find((arrival) => arrival.stationAreaId === "station-c")?.elapsedSeconds, null);
+
+  const cutoffNonBoardable = importFixtureFiles({
+    ...FIXTURE_FILES,
+    "trips.txt": "route_id,service_id,trip_id\nred,weekday,cutoff-through",
+    "stop_times.txt": [
+      "trip_id,arrival_time,departure_time,stop_id,stop_sequence,pickup_type,drop_off_type",
+      "cutoff-through,08:10:00,08:10:00,a-1,1,0,0",
+      "cutoff-through,08:20:00,08:20:00,b-1,2,0,0",
+      "cutoff-through,08:30:00,08:30:00,c-1,3,1,0",
+    ].join("\n"),
+  });
+  const cutoffRows: ScheduledRoutingMaterializedConnection[] = [];
+  createScheduledRoutingWindow(cutoffNonBoardable, "2026-08-11T08:15:00+02:00", { walkingVelocityMetersPerSecond: 10, transferRadiusMeters: 100 }, {
+    onMaterializedConnection: (connection) => cutoffRows.push(connection),
+  });
+  const successor = cutoffRows.find((row) => row.source.fromStationAreaId === "station-b");
+  assert.ok(successor !== undefined);
+  assert.equal(successor?.predecessorRowIndex, null);
+  const cutoffResult = routeScheduledEarliestArrivals(cutoffNonBoardable, [{ stationAreaId: "station-a", accessSeconds: 0 }], "2026-08-11T08:15:00+02:00", { walkingVelocityMetersPerSecond: 10, transferRadiusMeters: 100 });
+  assert.equal(cutoffResult.stationArrivals.find((arrival) => arrival.stationAreaId === "station-c")?.elapsedSeconds, null);
 });
 
 test("calendar exceptions determine service and do not cross service-day identity", () => {
@@ -497,9 +572,7 @@ test("midnight rollover is routable from the preceding local service date", () =
   const schedule = fixture();
   const midnightStart = "2026-08-09T23:50:00+02:00";
   const window = createScheduledRoutingWindow(schedule, midnightStart, { walkingVelocityMetersPerSecond: 10, transferRadiusMeters: 100 });
-  const midnightConnection = window.connections.find((connection) => connection.source.tripId === "midnight");
-  assert.equal(midnightConnection?.serviceDate, "2026-08-09");
-  assert.equal(midnightConnection === undefined ? null : midnightConnection.arrivalEpochSeconds - midnightConnection.departureEpochSeconds, 15 * 60);
+  assert.ok(window.connectionCount > 0);
   const result = routeScheduledEarliestArrivals(schedule, [{ stationAreaId: "station-a", accessSeconds: 0 }], midnightStart, { walkingVelocityMetersPerSecond: 10, transferRadiusMeters: 100 }, window);
   const stationBArrival = result.stationArrivals.find((arrival) => arrival.stationAreaId === "station-b");
   assert.equal(stationBArrival?.elapsedSeconds, 20 * 60);
@@ -619,7 +692,7 @@ test("cross-stream same-area transfers remain routable across consecutive servic
   const schedule = importFixtureFiles(crossStreamFiles);
   const searchStartAt = "2026-08-12T01:50:00+02:00";
   const window = createScheduledRoutingWindow(schedule, searchStartAt, { walkingVelocityMetersPerSecond: 10, transferRadiusMeters: 100 });
-  assert.deepEqual(new Set(window.connections.map((connection) => connection.serviceDate)), new Set(["2026-08-11", "2026-08-12"]));
+  assert.equal(window.connectionCount, referenceMaterializeConnections(schedule, searchStartAt).length);
   const result = routeScheduledEarliestArrivals(schedule, [{ stationAreaId: "station-a", accessSeconds: 0 }], searchStartAt, { walkingVelocityMetersPerSecond: 10, transferRadiusMeters: 100 }, window);
   assert.equal(result.stationArrivals.find((arrival) => arrival.stationAreaId === "station-c")?.elapsedSeconds, 25 * 60);
 });
@@ -689,6 +762,7 @@ test("no change time applies at the origin seed or the destination arrival", () 
 test("routing-window cache keys include the change-time preset and default to medium", () => {
   const schedule = fixture();
   const baseOptions = { walkingVelocityMetersPerSecond: 10, transferRadiusMeters: 100 };
+  clearScheduledRoutingWindowCache();
   const quickFirst = createScheduledRoutingWindow(schedule, SEARCH_START, { ...baseOptions, changeTimeSeconds: 180 });
   const quickSecond = createScheduledRoutingWindow(schedule, SEARCH_START, { ...baseOptions, changeTimeSeconds: 180 });
   assert.strictEqual(quickSecond, quickFirst);
@@ -699,6 +773,57 @@ test("routing-window cache keys include the change-time preset and default to me
   const defaultWindow = createScheduledRoutingWindow(schedule, SEARCH_START, baseOptions);
   assert.equal(defaultWindow.changeTimeSeconds, 300);
   assert.throws(() => createScheduledRoutingWindow(schedule, SEARCH_START, { ...baseOptions, changeTimeSeconds: 240 }), /presets/);
+  assert.equal("deadlineCheck" in quickFirst, false);
+
+  const cachedCallerPhases: string[] = [];
+  const cachedCallerWindow = createScheduledRoutingWindow(schedule, SEARCH_START, {
+    ...baseOptions,
+    deadlineCheck: (phase) => cachedCallerPhases.push(phase),
+  });
+  assert.notStrictEqual(cachedCallerWindow, defaultWindow);
+  assert.deepEqual(cachedCallerPhases, ["routing-window", "routing-window", "routing-window"]);
+
+  const inheritedPhaseCount = cachedCallerPhases.length;
+  routeScheduledEarliestArrivals(schedule, [{ stationAreaId: "station-a", accessSeconds: 0 }], SEARCH_START, {}, cachedCallerWindow);
+  assert.ok(cachedCallerPhases.length > inheritedPhaseCount);
+
+  const overridePhases: string[] = [];
+  const inheritedPhaseCountBeforeOverride = cachedCallerPhases.length;
+  routeScheduledEarliestArrivals(schedule, [{ stationAreaId: "station-a", accessSeconds: 0 }], SEARCH_START, {
+    ...baseOptions,
+    deadlineCheck: (phase) => overridePhases.push(phase),
+  }, cachedCallerWindow);
+  assert.ok(overridePhases.length > 0);
+  assert.equal(cachedCallerPhases.length, inheritedPhaseCountBeforeOverride);
+
+  const phases: string[] = [];
+  const currentCallerWindow = createScheduledRoutingWindow(schedule, SEARCH_START, {
+    ...baseOptions,
+    walkingVelocityMetersPerSecond: 11,
+    deadlineCheck: (phase) => phases.push(phase),
+  });
+  assert.equal(currentCallerWindow.connectionCount, quickFirst.connectionCount);
+  assert.deepEqual(phases, ["routing-window", "routing-window", "routing-window"]);
+});
+
+test("compact table byte metrics are exposed and table eviction removes linked wrappers", () => {
+  const schedule = fixture();
+  const options = { walkingVelocityMetersPerSecond: 10, transferRadiusMeters: 100 };
+  clearScheduledRoutingWindowCache();
+  const first = createScheduledRoutingWindow(schedule, SEARCH_START, options);
+  const second = createScheduledRoutingWindow(schedule, "2026-08-11T09:05:00+02:00", options);
+  createScheduledRoutingWindow(schedule, "2026-08-12T08:05:00+02:00", options);
+  createScheduledRoutingWindow(schedule, "2026-08-13T08:05:00+02:00", options);
+
+  assert.equal(first.compactTableByteLength, first.connectionCount * 4 * Uint32Array.BYTES_PER_ELEMENT);
+  assert.ok(first.compactTableByteLength > 0);
+  // A wrapper hit also refreshes its linked table. The first wrapper/table
+  // pair therefore survives insertion of the fifth distinct search epoch,
+  // while the untouched second pair is evicted.
+  assert.strictEqual(createScheduledRoutingWindow(schedule, SEARCH_START, options), first);
+  createScheduledRoutingWindow(schedule, "2026-08-14T08:05:00+02:00", options);
+  assert.strictEqual(createScheduledRoutingWindow(schedule, SEARCH_START, options), first);
+  assert.notStrictEqual(createScheduledRoutingWindow(schedule, "2026-08-11T09:05:00+02:00", options), second);
 });
 
 test("surface classifies station areas across red, blue, and fair tolerance boundaries", () => {

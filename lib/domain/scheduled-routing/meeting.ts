@@ -47,8 +47,7 @@ export type ScheduledCalculationStage =
   | "access-seeds"
   | "station-area-catalog"
   | "routing-window"
-  | "scan-red"
-  | "scan-blue"
+  | "participant-scans"
   | "participant-surfaces"
   | "station-area-evaluation"
   | "response-build";
@@ -167,8 +166,7 @@ export async function calculateScheduledMeetingWithBasis(
     changeTimeSeconds,
     deadlineCheck: providers.deadlineCheck,
   });
-  await hooks?.onStage?.("scan-red");
-  await hooks?.onStage?.("scan-blue");
+  await hooks?.onStage?.("participant-scans");
   let firstRoute: ReturnType<typeof routeScheduledEarliestArrivals> | null = null;
   let secondRoute: ReturnType<typeof routeScheduledEarliestArrivals> | null = null;
   if (scheduledSeedSets[0].length > 0 && scheduledSeedSets[1].length > 0) {

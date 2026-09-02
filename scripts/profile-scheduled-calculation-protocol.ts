@@ -2,18 +2,83 @@ import type { ProviderDescriptor } from "../lib/domain/types.ts";
 import type { ScheduledMeetingRequest } from "../lib/validation/meeting-v3.ts";
 
 export const PROFILE_SAMPLE_COUNT = 3;
+export const ROUTING_WINDOW_SAMPLE_INTERVAL_CONNECTIONS = 2_048;
 export const EXPECTED_CALCULATION_STAGES = [
   "access-seeds",
   "station-area-catalog",
   "routing-window",
-  "scan-red",
-  "scan-blue",
+  "participant-scans",
   "participant-surfaces",
   "station-area-evaluation",
   "response-build",
 ] as const;
 
 type RequestKind = "first" | "warm";
+
+export interface MemorySnapshot {
+  readonly rss: number;
+  readonly heapTotal: number;
+  readonly heapUsed: number;
+  readonly external: number;
+  readonly arrayBuffers: number;
+}
+
+export interface MemoryDelta {
+  readonly rss: number;
+  readonly heapTotal: number;
+  readonly heapUsed: number;
+  readonly external: number;
+  readonly arrayBuffers: number;
+}
+
+export interface GcSnapshot {
+  readonly count: number;
+  readonly totalPauseMs: number;
+}
+
+export interface GcDelta {
+  readonly count: number;
+  readonly totalPauseMs: number;
+}
+
+export interface PostGcMemoryReport {
+  readonly available: boolean;
+  readonly before?: MemorySnapshot;
+  readonly after?: MemorySnapshot;
+  readonly delta?: MemoryDelta;
+}
+
+export interface ColdRoutingWindowProbe {
+  readonly processId: number;
+  readonly nodeVersion: string;
+  readonly artifactPath: string;
+  readonly compiledArtifactId: string;
+  readonly searchStartAt: string;
+  readonly materializationElapsedMs: number;
+  readonly connectionCount: number;
+  readonly compactTableByteLength: number;
+  readonly materializedConnectionCount: number;
+  readonly sampleIntervalConnections: number;
+  readonly checkpointSampleCount: number;
+  readonly memoryBefore: MemorySnapshot;
+  readonly memoryAfter: MemorySnapshot;
+  readonly memoryDelta: MemoryDelta;
+  readonly peakMemory: MemorySnapshot;
+  readonly gcBefore: GcSnapshot;
+  readonly gcAfter: GcSnapshot;
+  readonly gcDelta: GcDelta;
+  readonly postGcMemory: PostGcMemoryReport;
+}
+
+export interface RoutingDiagnostics {
+  /** Scalar metadata from the normal, cacheable routing-window call. */
+  readonly routingWindow: {
+    readonly connectionCount: number;
+    readonly compactTableByteLength: number;
+  };
+  /** Callback-bearing materialization is deliberately routing-cache-cold. */
+  readonly coldRoutingWindowProbe: ColdRoutingWindowProbe;
+}
 
 export interface RequestMeasurement {
   readonly sample: number;
@@ -60,6 +125,7 @@ export interface ChildProfileReport {
   readonly firstRequest: RequestMeasurement;
   readonly warmRequest: RequestMeasurement;
   readonly stages: readonly StageMeasurement[];
+  readonly routingDiagnostics: RoutingDiagnostics | null;
   readonly cpuProfilePath: string | null;
   readonly heapSnapshotPath: string | null;
 }
@@ -121,6 +187,7 @@ export interface AggregateProfileReport {
     readonly firstRequest: readonly StageAggregate[];
     readonly warmRequest: readonly StageAggregate[];
   };
+  readonly routingDiagnostics: readonly RoutingDiagnostics[];
   readonly response: {
     readonly status: "ok" | "no-result";
     readonly reason: "no-access-seeds" | "no-reachable-stations" | null;
@@ -161,12 +228,14 @@ export interface StageAggregate {
 
 export function buildWorkerLaunch(options: {
   readonly nodePath: string;
-  readonly tsxCliPath: string;
   readonly workerPath: string;
   readonly outputPath: string;
   readonly request: ChildRunRequest;
+  readonly exposeGc?: boolean;
 }): ChildLaunch {
-  const args = ["--conditions=react-server", options.tsxCliPath, options.workerPath, "--sample", String(options.request.sample), "--output", options.outputPath];
+  const args = ["--conditions=react-server"];
+  if (options.exposeGc === true) args.push("--expose-gc");
+  args.push("--import", "tsx", options.workerPath, "--sample", String(options.request.sample), "--output", options.outputPath);
   if (options.request.diagnostic) args.push("--diagnostic");
   if (options.request.cpuProfile) args.push("--inspector-cpu");
   if (options.request.heapSnapshots) args.push("--heap-snapshots");
@@ -210,7 +279,8 @@ export function validateChildProfileReport(value: unknown): ChildProfileReport {
     !isCanonicalRequest(value.request) || !isAccessProviderDescriptor(value.accessProvider) ||
     !isArtifact(value.artifact) || !isArtifactLoad(value.artifactLoad) ||
     !isRequestMeasurement(value.firstRequest) || !isRequestMeasurement(value.warmRequest) ||
-    !isStageList(value.stages) || !isNullableString(value.cpuProfilePath) || !isNullableString(value.heapSnapshotPath)) {
+    !isStageList(value.stages) || !isNullableRoutingDiagnostics(value.routingDiagnostics) ||
+    !isNullableString(value.cpuProfilePath) || !isNullableString(value.heapSnapshotPath)) {
     throw new Error("The profiling child report is malformed.");
   }
   return value as unknown as ChildProfileReport;
@@ -268,6 +338,11 @@ export function aggregateProfile(collection: ProfileCollection): AggregateProfil
       firstRequest: aggregateStages(samples, "first"),
       warmRequest: aggregateStages(samples, "warm"),
     },
+    routingDiagnostics: samples.map((sample) => {
+      const routingDiagnostics = sample.report.routingDiagnostics;
+      if (routingDiagnostics === null) throw new Error(`Timing sample ${sample.sample} is missing routing diagnostics.`);
+      return routingDiagnostics;
+    }),
     response: {
       status: representative.report.warmRequest.status,
       reason: representative.report.warmRequest.reason,
@@ -316,6 +391,16 @@ function validateSampleReport(report: ChildProfileReport, request: ChildRunReque
   if (request.cpuProfile !== (report.cpuProfilePath !== null) ||
     request.heapSnapshots !== (report.heapSnapshotPath !== null)) {
     throw new Error(`Profiling child ${request.sample} diagnostic routing does not match its report.`);
+  }
+  if (request.diagnostic !== (report.routingDiagnostics === null)) {
+    throw new Error(`Profiling child ${request.sample} routing diagnostics do not match its timing role.`);
+  }
+  if (report.routingDiagnostics !== null) {
+    const probe = report.routingDiagnostics.coldRoutingWindowProbe;
+    if (probe.processId !== report.processId || probe.artifactPath !== report.artifact.path || probe.compiledArtifactId !== report.artifact.compiledArtifactId ||
+      probe.nodeVersion !== report.nodeVersion || probe.searchStartAt !== report.request.searchStartAt) {
+      throw new Error(`Profiling child ${request.sample} disagrees on artifact, request, or access-provider provenance.`);
+    }
   }
   if (!report.firstRequest.validationSuccess || !report.warmRequest.validationSuccess ||
     report.firstRequest.status !== "ok" || report.warmRequest.status !== "ok") {
@@ -392,6 +477,88 @@ function isStageList(value: unknown): value is readonly StageMeasurement[] {
   return seen.size === EXPECTED_CALCULATION_STAGES.length * 2;
 }
 
+function isNullableRoutingDiagnostics(value: unknown): value is RoutingDiagnostics | null {
+  return value === null || isRoutingDiagnostics(value);
+}
+
+function isRoutingDiagnostics(value: unknown): value is RoutingDiagnostics {
+  if (!isRecord(value) || !isRoutingWindowMetadata(value.routingWindow) || !isColdRoutingWindowProbe(value.coldRoutingWindowProbe)) return false;
+  const probe = value.coldRoutingWindowProbe;
+  return probe.connectionCount === value.routingWindow.connectionCount &&
+    probe.compactTableByteLength === value.routingWindow.compactTableByteLength;
+}
+
+function isRoutingWindowMetadata(value: unknown): value is RoutingDiagnostics["routingWindow"] {
+  return isRecord(value) && isSafeCount(value.connectionCount) && isSafeCount(value.compactTableByteLength) &&
+    value.compactTableByteLength === value.connectionCount * 4 * Uint32Array.BYTES_PER_ELEMENT;
+}
+
+function isColdRoutingWindowProbe(value: unknown): value is ColdRoutingWindowProbe {
+  if (!isRecord(value) || !isPositiveSafeInteger(value.processId) || typeof value.nodeVersion !== "string" ||
+    typeof value.artifactPath !== "string" || value.artifactPath === "" || typeof value.compiledArtifactId !== "string" || value.compiledArtifactId === "" ||
+    typeof value.searchStartAt !== "string" || value.searchStartAt === "" || !isNonNegativeFinite(value.materializationElapsedMs) ||
+    !isSafeCount(value.connectionCount) || !isSafeCount(value.compactTableByteLength) || !isSafeCount(value.materializedConnectionCount) ||
+    !isPositiveSafeInteger(value.sampleIntervalConnections) || !isPositiveSafeInteger(value.checkpointSampleCount) ||
+    !isMemorySnapshot(value.memoryBefore) || !isMemorySnapshot(value.memoryAfter) || !isMemoryDelta(value.memoryDelta) ||
+    !isMemorySnapshot(value.peakMemory) || !isGcSnapshot(value.gcBefore) || !isGcSnapshot(value.gcAfter) || !isGcDelta(value.gcDelta) ||
+    !isPostGcMemoryReport(value.postGcMemory)) return false;
+  if (value.compactTableByteLength !== value.connectionCount * 4 * Uint32Array.BYTES_PER_ELEMENT ||
+    value.materializedConnectionCount !== value.connectionCount ||
+    value.sampleIntervalConnections !== ROUTING_WINDOW_SAMPLE_INTERVAL_CONNECTIONS ||
+    value.checkpointSampleCount !== expectedRoutingWindowCheckpointSampleCount(value.materializedConnectionCount) ||
+    !memoryDeltaMatches(value.memoryDelta, value.memoryAfter, value.memoryBefore) ||
+    !gcDeltaMatches(value.gcDelta, value.gcAfter, value.gcBefore) ||
+    !peakAtLeast(value.peakMemory, value.memoryBefore) || !peakAtLeast(value.peakMemory, value.memoryAfter)) return false;
+  return true;
+}
+
+function expectedRoutingWindowCheckpointSampleCount(materializedConnectionCount: number): number {
+  // The producer records one sample before materialization, one at every
+  // interval, one unconditionally when the table is finished, and one final
+  // memory sample after materialization.
+  return Math.floor(materializedConnectionCount / ROUTING_WINDOW_SAMPLE_INTERVAL_CONNECTIONS) + 3;
+}
+
+function isMemorySnapshot(value: unknown): value is MemorySnapshot {
+  return isRecord(value) && isNonNegativeFinite(value.rss) && isNonNegativeFinite(value.heapTotal) &&
+    isNonNegativeFinite(value.heapUsed) && isNonNegativeFinite(value.external) && isNonNegativeFinite(value.arrayBuffers);
+}
+
+function isMemoryDelta(value: unknown): value is MemoryDelta {
+  return isRecord(value) && isFiniteNumber(value.rss) && isFiniteNumber(value.heapTotal) && isFiniteNumber(value.heapUsed) &&
+    isFiniteNumber(value.external) && isFiniteNumber(value.arrayBuffers);
+}
+
+function isGcSnapshot(value: unknown): value is GcSnapshot {
+  return isRecord(value) && isSafeCount(value.count) && isNonNegativeFinite(value.totalPauseMs);
+}
+
+function isGcDelta(value: unknown): value is GcDelta {
+  return isRecord(value) && isSafeCount(value.count) && isNonNegativeFinite(value.totalPauseMs);
+}
+
+function isPostGcMemoryReport(value: unknown): value is PostGcMemoryReport {
+  if (!isRecord(value) || typeof value.available !== "boolean") return false;
+  if (!value.available) return value.before === undefined && value.after === undefined && value.delta === undefined;
+  return isMemorySnapshot(value.before) && isMemorySnapshot(value.after) && isMemoryDelta(value.delta) &&
+    memoryDeltaMatches(value.delta, value.after, value.before);
+}
+
+function memoryDeltaMatches(delta: MemoryDelta, after: MemorySnapshot, before: MemorySnapshot): boolean {
+  return delta.rss === after.rss - before.rss && delta.heapTotal === after.heapTotal - before.heapTotal &&
+    delta.heapUsed === after.heapUsed - before.heapUsed && delta.external === after.external - before.external &&
+    delta.arrayBuffers === after.arrayBuffers - before.arrayBuffers;
+}
+
+function gcDeltaMatches(delta: GcDelta, after: GcSnapshot, before: GcSnapshot): boolean {
+  return delta.count === after.count - before.count && delta.totalPauseMs === after.totalPauseMs - before.totalPauseMs;
+}
+
+function peakAtLeast(peak: MemorySnapshot, sample: MemorySnapshot): boolean {
+  return peak.rss >= sample.rss && peak.heapTotal >= sample.heapTotal && peak.heapUsed >= sample.heapUsed &&
+    peak.external >= sample.external && peak.arrayBuffers >= sample.arrayBuffers;
+}
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
@@ -410,6 +577,10 @@ function isSafeCount(value: unknown): value is number {
 
 function isNonNegativeFinite(value: unknown): value is number {
   return typeof value === "number" && Number.isFinite(value) && value >= 0;
+}
+
+function isFiniteNumber(value: unknown): value is number {
+  return typeof value === "number" && Number.isFinite(value);
 }
 
 function isTolerance(value: unknown): value is 5 | 10 | 15 {

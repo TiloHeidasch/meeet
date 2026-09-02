@@ -6,6 +6,7 @@
 import { writeFileSync } from "node:fs";
 import { Session } from "node:inspector";
 import { resolve as resolvePath } from "node:path";
+import { PerformanceObserver } from "node:perf_hooks";
 import { fileURLToPath } from "node:url";
 import { writeHeapSnapshot } from "node:v8";
 
@@ -14,10 +15,25 @@ import {
   calculateScheduledMeetingWithBasis,
   type ScheduledCalculationStage,
 } from "../lib/domain/scheduled-routing/meeting.ts";
-import { clearScheduledRoutingWindowCache } from "../lib/domain/scheduled-routing/router.ts";
+import {
+  clearScheduledRoutingWindowCache,
+  createScheduledRoutingWindow,
+  DEFAULT_TRANSFER_RADIUS_METERS,
+  DEFAULT_WALKING_VELOCITY_METERS_PER_SECOND,
+} from "../lib/domain/scheduled-routing/router.ts";
+import { CHANGE_TIME_PRESETS } from "../lib/domain/scheduled-routing/models.ts";
 import { clearScheduledStationAreaCatalogCache } from "../lib/domain/scheduled-routing/surface.ts";
 import { elapsedMs } from "../lib/log.ts";
 import { MvgScheduledAccessSeedProvider } from "../lib/providers/mvg-scheduled-access.ts";
+import {
+  ROUTING_WINDOW_SAMPLE_INTERVAL_CONNECTIONS,
+  type GcDelta,
+  type GcSnapshot,
+  type MemoryDelta,
+  type MemorySnapshot,
+  type PostGcMemoryReport,
+  type RoutingDiagnostics,
+} from "./profile-scheduled-calculation-protocol.ts";
 import {
   parseScheduledMeetingRequest,
   validateScheduledMeetingResponse,
@@ -117,6 +133,10 @@ async function run(sample: number, outputPath: string, diagnostic: boolean, heap
   const firstRequest = await runRequest(parsed.data, artifact, access, sample, "first", stageMeasurements);
   const warmRequest = await runRequest(parsed.data, artifact, access, sample, "warm", stageMeasurements);
   const cpuProfilePath = profiler === null ? null : await stopCpuProfiler(profiler);
+  // The routing probe is deliberately post-pair and only belongs to the three
+  // timing children. It is not a fresh-process cold measurement: this child has
+  // already completed both requests and the normal routing window is cached.
+  const routingDiagnostics = diagnostic ? null : measureRoutingDiagnostics(artifact, parsed.data.searchStartAt, parsed.data.changeTimePreset);
 
   // Snapshot I/O happens only after both request timers have ended and after
   // the CPU profile has stopped. It cannot perturb the warm measurement.
@@ -147,6 +167,7 @@ async function run(sample: number, outputPath: string, diagnostic: boolean, heap
     firstRequest,
     warmRequest,
     stages: stageMeasurements,
+    routingDiagnostics,
     cpuProfilePath,
     heapSnapshotPath,
   };
@@ -164,6 +185,168 @@ async function run(sample: number, outputPath: string, diagnostic: boolean, heap
     console.error(`[profile-worker] ${failedStatus.requestKind} request returned status ${failedStatus.status} (reason=${failedStatus.reason}).`);
     process.exitCode = 1;
   }
+}
+
+interface GcCollector {
+  readonly snapshot: () => GcSnapshot;
+  readonly disconnect: () => void;
+}
+
+function measureRoutingDiagnostics(
+  artifact: NonNullable<Parameters<typeof calculateScheduledMeetingWithBasis>[1]["artifact"]>,
+  searchStartAt: string,
+  changeTimePreset: keyof typeof CHANGE_TIME_PRESETS,
+): RoutingDiagnostics {
+  const options = {
+    walkingVelocityMetersPerSecond: DEFAULT_WALKING_VELOCITY_METERS_PER_SECOND,
+    transferRadiusMeters: DEFAULT_TRANSFER_RADIUS_METERS,
+    changeTimeSeconds: CHANGE_TIME_PRESETS[changeTimePreset],
+  };
+  const normalRoutingWindow = (() => {
+    const normalWindow = createScheduledRoutingWindow(artifact, searchStartAt, options);
+    return {
+      connectionCount: normalWindow.connectionCount,
+      compactTableByteLength: normalWindow.compactTableByteLength,
+    };
+  })();
+
+  // A callback-bearing invocation is intentionally not cacheable. Clear the
+  // cache immediately before it so this is routing-cache-cold, not fresh-process
+  // cold; both requests and the normal scalar metadata call already happened.
+  clearScheduledRoutingWindowCache();
+  const gc = createGcCollector();
+  try {
+    collectIfAvailable();
+    const memoryBefore = memorySnapshot();
+    let peakMemory = memoryBefore;
+    let checkpointSampleCount = 1;
+    let materializedConnectionCount = 0;
+    const capturePeakSample = (sample: MemorySnapshot): void => {
+      peakMemory = maxMemorySnapshots(peakMemory, sample);
+      checkpointSampleCount += 1;
+    };
+    const gcBefore = gc.snapshot();
+    const coldRoutingWindowMeasurements = (() => {
+      const materializationStartedAt = performance.now();
+      const coldWindow = createScheduledRoutingWindow(artifact, searchStartAt, options, {
+        // Primitive-only instrumentation samples the production compact-table
+        // path without allocating a projection for every materialized row.
+        onMaterializationCheckpoint: (count) => {
+          materializedConnectionCount = count;
+          capturePeakSample(memorySnapshot());
+        },
+      });
+      const materializationElapsedMs = elapsedMs(materializationStartedAt);
+      const memoryAfter = memorySnapshot();
+      capturePeakSample(memoryAfter);
+      const gcAfter = gc.snapshot();
+      // Return only scalar window metadata and snapshots from this scope. The
+      // checkpoint-bearing window must be unreachable before the explicit
+      // post-GC measurement, while the materialization timer remains isolated.
+      return {
+        processId: process.pid,
+        nodeVersion: process.versions.node,
+        artifactPath: ARTIFACT_PATH,
+        compiledArtifactId: artifact.provenance.compiledArtifactId,
+        searchStartAt,
+        materializationElapsedMs,
+        connectionCount: coldWindow.connectionCount,
+        compactTableByteLength: coldWindow.compactTableByteLength,
+        materializedConnectionCount,
+        sampleIntervalConnections: ROUTING_WINDOW_SAMPLE_INTERVAL_CONNECTIONS,
+        checkpointSampleCount,
+        memoryBefore,
+        memoryAfter,
+        memoryDelta: subtractMemorySnapshots(memoryAfter, memoryBefore),
+        peakMemory,
+        gcBefore,
+        gcAfter,
+        gcDelta: subtractGcSnapshots(gcAfter, gcBefore),
+      };
+    })();
+    const coldRoutingWindowProbe = {
+      ...coldRoutingWindowMeasurements,
+      postGcMemory: collectPostGcMemory(),
+    };
+    return { routingWindow: normalRoutingWindow, coldRoutingWindowProbe };
+  } finally {
+    gc.disconnect();
+  }
+}
+
+function memorySnapshot(): MemorySnapshot {
+  const usage = process.memoryUsage();
+  return {
+    rss: usage.rss,
+    heapTotal: usage.heapTotal,
+    heapUsed: usage.heapUsed,
+    external: usage.external,
+    arrayBuffers: usage.arrayBuffers,
+  };
+}
+
+function subtractMemorySnapshots(after: MemorySnapshot, before: MemorySnapshot): MemoryDelta {
+  return {
+    rss: after.rss - before.rss,
+    heapTotal: after.heapTotal - before.heapTotal,
+    heapUsed: after.heapUsed - before.heapUsed,
+    external: after.external - before.external,
+    arrayBuffers: after.arrayBuffers - before.arrayBuffers,
+  };
+}
+
+function subtractGcSnapshots(after: GcSnapshot, before: GcSnapshot): GcDelta {
+  return {
+    count: after.count - before.count,
+    totalPauseMs: after.totalPauseMs - before.totalPauseMs,
+  };
+}
+
+function maxMemorySnapshots(left: MemorySnapshot, right: MemorySnapshot): MemorySnapshot {
+  return {
+    rss: Math.max(left.rss, right.rss),
+    heapTotal: Math.max(left.heapTotal, right.heapTotal),
+    heapUsed: Math.max(left.heapUsed, right.heapUsed),
+    external: Math.max(left.external, right.external),
+    arrayBuffers: Math.max(left.arrayBuffers, right.arrayBuffers),
+  };
+}
+
+function createGcCollector(): GcCollector {
+  let count = 0;
+  let totalPauseMs = 0;
+  const consume = (entries: readonly PerformanceEntry[]): void => {
+    for (const entry of entries) {
+      count += 1;
+      totalPauseMs += entry.duration;
+    }
+  };
+  const observer = new PerformanceObserver((list) => consume(list.getEntries()));
+  observer.observe({ entryTypes: ["gc"] });
+  return {
+    snapshot: () => {
+      consume(observer.takeRecords());
+      return { count, totalPauseMs };
+    },
+    disconnect: () => {
+      consume(observer.takeRecords());
+      observer.disconnect();
+    },
+  };
+}
+
+function collectIfAvailable(): void {
+  const nodeGlobal = globalThis as typeof globalThis & { gc?: () => void };
+  if (typeof nodeGlobal.gc === "function") nodeGlobal.gc();
+}
+
+function collectPostGcMemory(): PostGcMemoryReport {
+  const nodeGlobal = globalThis as typeof globalThis & { gc?: () => void };
+  if (typeof nodeGlobal.gc !== "function") return { available: false };
+  const before = memorySnapshot();
+  nodeGlobal.gc();
+  const after = memorySnapshot();
+  return { available: true, before, after, delta: subtractMemorySnapshots(after, before) };
 }
 
 async function runRequest(
