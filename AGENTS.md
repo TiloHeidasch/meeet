@@ -37,7 +37,9 @@
   and be up-to-date with their target.
 - PRs into `dev` and `main` must pass the e2e gate (required check
   `E2E build, spin up, calculate`): a full application build, a schedule-artifact
-  compilation, a server spin-up, and one functional calculation.
+  compilation, a server spin-up, and the production calculation journey (JSON
+  calculate, the SSE progress stream, and station-area details via the
+  returned calculation reference).
 - PRs into `dev` and `main` must pass the real-feed compile gate (required
   check `Compile real MVV feed`): the production rotation path
   (`npm run schedule:compile:mvv`) must compile the live MVV Gesamt-GTFS

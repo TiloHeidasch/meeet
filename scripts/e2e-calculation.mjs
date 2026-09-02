@@ -60,6 +60,11 @@ function assertScheduledMeetingResponse(body, label) {
   }
 }
 
+// These three steps run sequentially and fully awaited, not in parallel: the
+// server admits only one scheduled calculation at a time (SCHEDULED_CALCULATION_CONCURRENCY
+// in lib/domain/scheduled-admission.ts), so an overlapping request would be
+// rejected with 503 TEMPORARILY_UNAVAILABLE.
+
 // 1. Existing JSON calculation smoke.
 
 const jsonResponse = await fetch(`${BASE_URL}/api/meeting/calculate`, {
@@ -108,7 +113,7 @@ let done = false;
 while (!done) {
   const chunk = await reader.read();
   done = chunk.done;
-  if (chunk.value !== undefined) buffer += decoder.decode(chunk.value, { stream: true });
+  if (chunk.value !== undefined) buffer += decoder.decode(chunk.value, { stream: true }).replace(/\r\n?/g, "\n");
   let separatorIndex;
   while ((separatorIndex = buffer.indexOf("\n\n")) !== -1) {
     const frame = buffer.slice(0, separatorIndex);
@@ -118,7 +123,12 @@ while (!done) {
     const dataLine = frame.split("\n").find((line) => line.startsWith("data: "));
     if (eventLine === undefined || dataLine === undefined) continue;
     const eventName = eventLine.slice("event: ".length);
-    const data = JSON.parse(dataLine.slice("data: ".length));
+    let data;
+    try {
+      data = JSON.parse(dataLine.slice("data: ".length));
+    } catch (error) {
+      fail(`SSE stream: "${eventName}" event data is valid JSON`, { dataLine, error: String(error) });
+    }
     if (eventName === "progress") {
       observedPhases.push(data.phase);
     } else if (eventName === "ref") {
@@ -172,8 +182,10 @@ const detailsBody = await detailsResponse.json();
 if (detailsBody.contractVersion !== "meeet-station-area-details/v1") {
   fail(`Station-area details: contractVersion is "meeet-station-area-details/v1"`, detailsBody.contractVersion);
 }
-if (detailsBody.status !== "ok" && detailsBody.status !== "no-result") {
-  fail(`Station-area details: status is "ok" or "no-result"`, detailsBody.status);
+// The details basis mirrors the already-asserted "ok" top-level result status
+// (lib/domain/scheduled-routing/meeting.ts), so "no-result" cannot occur here.
+if (detailsBody.status !== "ok") {
+  fail(`Station-area details: status is "ok"`, detailsBody.status);
 }
 if (typeof detailsBody.stationArea !== "object" || detailsBody.stationArea === null || detailsBody.stationArea.stationAreaId !== targetStationArea.stationAreaId) {
   fail("Station-area details: stationArea matches the requested station area", detailsBody.stationArea);
