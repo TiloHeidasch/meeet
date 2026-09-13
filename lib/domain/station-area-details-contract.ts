@@ -37,6 +37,36 @@ export interface StationAreaDetailsBasisDto {
   readonly accessProvider: ProviderDescriptor;
 }
 
+/**
+ * One leg of a participant's certified itinerary to the selected station area.
+ * Station-area granularity only (ADR 0003): legs reference station areas, never
+ * boarding stops or platforms. `walk` legs carry no distance (no pedestrian
+ * navigation); `transit` legs carry the MVV line identity and headsign.
+ */
+export type ItineraryLeg =
+  | {
+      readonly kind: "walk";
+      readonly fromAreaId: string | null;
+      readonly toAreaId: string;
+      readonly fromAreaName: string | null;
+      readonly toAreaName: string;
+      readonly startEpochSeconds: number;
+      readonly endEpochSeconds: number;
+    }
+  | {
+      readonly kind: "transit";
+      readonly fromAreaId: string;
+      readonly toAreaId: string;
+      readonly fromAreaName: string;
+      readonly toAreaName: string;
+      readonly line: string;
+      readonly routeType: number;
+      readonly headsign: string;
+      readonly tripId: string;
+      readonly startEpochSeconds: number;
+      readonly endEpochSeconds: number;
+    };
+
 export interface StationAreaDetailParticipantDto {
   readonly id: string;
   readonly color: "red" | "blue";
@@ -47,6 +77,8 @@ export interface StationAreaDetailParticipantDto {
     readonly totalSeconds: number | null;
     readonly arrivalAt: string | null;
   };
+  /** Certified leg-by-leg itinerary, or null when the participant is unavailable. */
+  readonly itinerary: readonly ItineraryLeg[] | null;
 }
 
 export interface StationAreaDetailsResponseDto {

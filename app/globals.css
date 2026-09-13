@@ -41,3 +41,10 @@ button, input, select { font: inherit; } button { cursor: pointer; } button:focu
 .maplibregl-ctrl-refocus { display: grid; place-items: center; width: 29px; height: 29px; padding: 0; border: 0; background: transparent; color: #202522; }
 .maplibregl-ctrl-refocus svg { display: block; }
 .maplibregl-ctrl-refocus:disabled { opacity: .4; cursor: default; }
+.location-feedback.location-error { color: #a34334; }
+.location-feedback.location-success { color: var(--green); font-weight: 700; }
+.location-feedback { display: block; max-width: 38rem; margin-top: 8px; font-size: 11px; line-height: 1.45; }
+.location-feedback[role="alert"] { font-weight: 600; }
+.current-location-button { display: inline-flex; align-items: center; gap: 6px; min-height: 34px; margin-top: 9px; padding: 0 10px; border: 1px solid #c9d5cb; border-radius: 9px; background: #f3f8f2; color: var(--green); font-size: 11px; font-weight: 800; transition: border-color .18s, background .18s, transform .18s; }
+.current-location-button:hover:not(:disabled) { border-color: var(--green); background: #eaf1eb; transform: translateY(-1px); }
+.current-location-button:disabled { cursor: not-allowed; opacity: .55; }

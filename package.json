@@ -21,7 +21,8 @@
     "lint": "eslint",
     "test": "tsx --test --import ./test/server-only-register.mjs test/*.test.ts",
     "test:e2e": "playwright test",
-    "boundary:refresh": "tsx scripts/refresh-munich-boundary.ts"
+    "boundary:refresh": "tsx scripts/refresh-munich-boundary.ts",
+    "bench:parallel-scans": "tsx --import ./test/server-only-register.mjs scripts/benchmark-parallel-scans.ts"
   },
   "dependencies": {
     "d3-delaunay": "^6.0.4",

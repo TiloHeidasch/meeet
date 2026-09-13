@@ -19,6 +19,7 @@ import {
 } from "../lib/validation/meeting-v3.ts";
 import {
   calculateScheduledMeeting,
+  calculateScheduledMeetingWithBasis,
   type ScheduledMeetingProviderBundle,
 } from "../lib/domain/scheduled-routing/meeting.ts";
 import {
@@ -27,12 +28,16 @@ import {
 } from "../lib/fixtures/scheduled-routing.ts";
 import { currentDateRange, fixtureFeedFiles } from "../scripts/fixture-schedule-transform.ts";
 import { MvgScheduledAccessSeedProvider } from "../lib/providers/mvg-scheduled-access.ts";
+import { clearMvgNearbyCache } from "../lib/providers/mvg-nearby.ts";
 import { handleMeetingPost } from "../lib/domain/meeting-api.ts";
 import { fixtureProviders } from "../lib/fixtures/providers.ts";
 import type { MeetingProviders } from "../lib/domain/providers.ts";
 import { compareScheduledIds, importGtfsSchedule, type GtfsFeedFiles } from "../lib/domain/scheduled-routing/gtfs.ts";
 import type { ScheduledRoutingArtifact } from "../lib/domain/scheduled-routing/models.ts";
-import { buildScheduledStationAreaCatalog } from "../lib/domain/scheduled-routing/surface.ts";
+import {
+  buildScheduledStationAreaCatalog,
+  clearScheduledStationAreaCatalogCache,
+} from "../lib/domain/scheduled-routing/surface.ts";
 import { createMeetingProviders } from "../lib/providers/factory.ts";
 import { MVG_NEARBY_URL } from "../lib/providers/mvg-constants.ts";
 import { ScheduledCalculationDeadlineError } from "../lib/domain/scheduled-admission.ts";
@@ -59,6 +64,13 @@ function compilerFeedFiles(): GtfsFeedFiles {
     "trips.txt": "route_id,service_id,trip_id\nfixture-line,fixture-service,fixture-trip",
     "stop_times.txt": "trip_id,arrival_time,departure_time,stop_id,stop_sequence\nfixture-trip,08:10:00,08:10:00,fixture-a-stop,1\nfixture-trip,08:20:00,08:20:00,fixture-b-stop,2",
     "calendar.txt": "service_id,monday,tuesday,wednesday,thursday,friday,saturday,sunday,start_date,end_date\nfixture-service,1,1,1,1,1,1,1,20260801,20260831",
+  };
+}
+
+function freezeCoverageFeedFiles(): GtfsFeedFiles {
+  return {
+    ...compilerFeedFiles(),
+    "calendar_dates.txt": "service_id,date,exception_type\nfixture-service,20260810,2",
   };
 }
 
@@ -259,6 +271,56 @@ test("scheduled artifact persists as a compact binary bundle and retains immutab
   await rm(directory, { recursive: true, force: true });
 });
 
+test("schema-aware artifact loading freezes every persisted artifact branch", async () => {
+  const artifact = compileScheduledArtifact({
+    sourceUrl: SCHEDULED_MVV_FEED_URL,
+    rawArchiveBytes: new TextEncoder().encode("schema-aware-freeze-coverage"),
+    feedFiles: freezeCoverageFeedFiles(),
+    retrievedAt: "2026-08-11T10:00:00Z",
+  });
+  const directory = await mkdtemp(join(tmpdir(), "meeet-schema-aware-freeze-"));
+  const manifestPath = join(directory, "scheduled-bundle.json");
+  writeScheduledArtifact(manifestPath, artifact);
+  const loaded = loadScheduledArtifact(manifestPath, { now: "2026-08-11T12:00:00Z" });
+  const assertFrozen = (value: object): void => assert.equal(Object.isFrozen(value), true);
+
+  assertFrozen(loaded);
+  assertFrozen(loaded.searchStartBounds);
+  assertFrozen(loaded.serviceDateRange);
+  assertFrozen(loaded.routes);
+  for (const route of loaded.routes) assertFrozen(route);
+  assertFrozen(loaded.trips);
+  for (const trip of loaded.trips) assertFrozen(trip);
+  assertFrozen(loaded.stationAreas);
+  for (const area of loaded.stationAreas) {
+    assertFrozen(area);
+    assertFrozen(area.coordinate);
+    assertFrozen(area.transferNeighbors);
+    for (const neighbor of area.transferNeighbors) assertFrozen(neighbor);
+  }
+  assertFrozen(loaded.calendars);
+  for (const calendar of loaded.calendars) {
+    assertFrozen(calendar);
+    assertFrozen(calendar.weekdays);
+  }
+  assertFrozen(loaded.exceptions);
+  for (const exception of loaded.exceptions) assertFrozen(exception);
+  assertFrozen(loaded.connections);
+  for (const connection of loaded.connections) {
+    assertFrozen(connection);
+    assertFrozen(connection.line);
+  }
+  assertFrozen(loaded.provenance);
+  assertFrozen(loaded.provenance.files);
+  for (const file of loaded.provenance.files) assertFrozen(file);
+  assertFrozen(loaded.provenance.acquisition);
+  assertFrozen(loaded.provenance.acquisition.officialLicense);
+  assertFrozen(loaded.provenance.acquisition.officialProvenance);
+
+  assert.strictEqual(loadScheduledArtifact(manifestPath, { now: "2026-08-11T12:00:00Z" }), loaded);
+  await rm(directory, { recursive: true, force: true });
+});
+
 test("loader normalizes its default freshness clock but keeps explicit fractional now invalid", async () => {
   const artifact = compileScheduledArtifact({ sourceUrl: SCHEDULED_MVV_FEED_URL, rawArchiveBytes: new TextEncoder().encode("default-loader-clock"), feedFiles: compilerFeedFiles(), retrievedAt: "2026-08-11T10:00:00Z" });
   const directory = await mkdtemp(join(tmpdir(), "meeet-loader-clock-"));
@@ -393,6 +455,45 @@ test("bundle manifest rejects unsafe payload paths and size-limit violations", a
   assert.throws(() => loadScheduledArtifact(manifestPath, { now: "2026-08-11T12:00:00Z" }), ScheduleArtifactUnavailableError);
   await writeFile(manifestPath, JSON.stringify({ ...validManifest, payloadByteLength: 1_073_741_825 }), "utf8");
   assert.throws(() => loadScheduledArtifact(manifestPath, { now: "2026-08-11T12:00:00Z" }), ScheduleArtifactUnavailableError);
+  await rm(directory, { recursive: true, force: true });
+});
+
+test("bundle loader rejects persisted manifests and provenance records with missing or unexpected enumerable keys", async () => {
+  const artifact = compileScheduledArtifact({ sourceUrl: SCHEDULED_MVV_FEED_URL, rawArchiveBytes: new TextEncoder().encode("manifest-key-tamper"), feedFiles: compilerFeedFiles(), retrievedAt: "2026-08-11T10:00:00Z" });
+  const directory = await mkdtemp(join(tmpdir(), "meeet-manifest-keys-"));
+  const validPath = join(directory, "valid-bundle.json");
+  writeScheduledArtifact(validPath, artifact);
+  const validManifest = JSON.parse(await readFile(validPath, "utf8")) as Record<string, unknown>;
+
+  const missingManifest = { ...validManifest };
+  delete missingManifest.payloadFile;
+  const missingPath = join(directory, "missing-key-bundle.json");
+  await writeFile(missingPath, JSON.stringify(missingManifest), "utf8");
+  assert.throws(() => loadScheduledArtifact(missingPath, { now: "2026-08-11T12:00:00Z" }), ScheduleArtifactUnavailableError);
+
+  const unexpectedPath = join(directory, "unexpected-key-bundle.json");
+  await writeFile(unexpectedPath, JSON.stringify({ ...validManifest, unexpectedKey: true }), "utf8");
+  assert.throws(() => loadScheduledArtifact(unexpectedPath, { now: "2026-08-11T12:00:00Z" }), ScheduleArtifactUnavailableError);
+
+  const validProvenance = validManifest.provenance as Record<string, unknown>;
+  const validFiles = validProvenance.files as Array<Record<string, unknown>>;
+  const firstFile = validFiles[0];
+  assert.ok(firstFile);
+  const persistedManifestWithFile = (file: Record<string, unknown>) => ({
+    ...validManifest,
+    provenance: { ...validProvenance, files: [file, ...validFiles.slice(1)] },
+  });
+
+  const missingFileKey = { ...firstFile };
+  delete missingFileKey.fileName;
+  const missingFileKeyPath = join(directory, "missing-file-key-bundle.json");
+  await writeFile(missingFileKeyPath, JSON.stringify(persistedManifestWithFile(missingFileKey)), "utf8");
+  assert.throws(() => loadScheduledArtifact(missingFileKeyPath, { now: "2026-08-11T12:00:00Z" }), ScheduleArtifactUnavailableError);
+
+  const unexpectedFileKeyPath = join(directory, "unexpected-file-key-bundle.json");
+  await writeFile(unexpectedFileKeyPath, JSON.stringify(persistedManifestWithFile({ ...firstFile, unexpectedKey: true })), "utf8");
+  assert.throws(() => loadScheduledArtifact(unexpectedFileKeyPath, { now: "2026-08-11T12:00:00Z" }), ScheduleArtifactUnavailableError);
+
   await rm(directory, { recursive: true, force: true });
 });
 
@@ -680,6 +781,83 @@ test("v3 response validation derives exact station-area classification and rejec
   assert.equal(validateScheduledMeetingResponse(oneSidedTamper, parsed.data).success, false);
 });
 
+test("station-area catalogs are cached by artifact object and shared by strict validation", async () => {
+  clearScheduledStationAreaCatalogCache();
+  const artifact = stationAreaMeetingArtifact();
+  const catalog = buildScheduledStationAreaCatalog(artifact);
+  assert.equal(Object.isFrozen(catalog), true);
+  assert.equal(Object.isFrozen(catalog.entries), true);
+  const catalogEntry = catalog.entries[0];
+  assert.ok(catalogEntry !== undefined);
+  assert.equal(Object.isFrozen(catalogEntry), true);
+  assert.equal(Object.isFrozen(catalogEntry.coordinate), true);
+  const originalEntryName = catalogEntry.name;
+  const originalLatitude = catalogEntry.coordinate.latitude;
+  assert.throws(() => {
+    (catalogEntry as unknown as { name: string }).name = "Tampered catalog name";
+  }, TypeError);
+  assert.throws(() => {
+    (catalogEntry.coordinate as unknown as { latitude: number }).latitude = 0;
+  }, TypeError);
+  assert.equal(catalogEntry.name, originalEntryName);
+  assert.equal(catalogEntry.coordinate.latitude, originalLatitude);
+  assert.strictEqual(buildScheduledStationAreaCatalog(artifact), catalog);
+
+  const replacementArtifact: ScheduledRoutingArtifact = { ...artifact };
+  const replacementCatalog = buildScheduledStationAreaCatalog(replacementArtifact);
+  assert.equal(replacementArtifact.provenance.compiledArtifactId, artifact.provenance.compiledArtifactId);
+  assert.deepEqual(replacementCatalog, catalog);
+  assert.notStrictEqual(replacementCatalog, catalog);
+
+  const parsed = parseScheduledMeetingRequest(V3_REQUEST);
+  assert.equal(parsed.success, true);
+  if (!parsed.success) return;
+  const firstCalculation = await calculateScheduledMeetingWithBasis(parsed.data, {
+    artifact,
+    access: stationAreaMeetingAccessProvider(),
+  });
+  const secondCalculation = await calculateScheduledMeetingWithBasis(parsed.data, {
+    artifact,
+    access: stationAreaMeetingAccessProvider(),
+  });
+  assert.strictEqual(firstCalculation.stationAreaCatalog, secondCalculation.stationAreaCatalog);
+  assert.equal(validateScheduledMeetingResponse(firstCalculation.response, parsed.data, {
+    stationAreaCatalog: firstCalculation.stationAreaCatalog,
+  }).success, true);
+  assert.equal(validateScheduledMeetingResponse(secondCalculation.response, parsed.data, {
+    stationAreaCatalog: secondCalculation.stationAreaCatalog,
+  }).success, true);
+});
+
+test("station-area catalog cache preserves its immediate deadline checkpoint and does not publish interrupted builds", () => {
+  clearScheduledStationAreaCatalogCache();
+  const artifact = stationAreaMeetingArtifact();
+  const baseCatalog = buildScheduledStationAreaCatalog(artifact);
+  let cacheHitCheckpoints = 0;
+  buildScheduledStationAreaCatalog(artifact, () => {
+    cacheHitCheckpoints += 1;
+  });
+  assert.equal(cacheHitCheckpoints, 1);
+
+  const expandedArtifact: ScheduledRoutingArtifact = {
+    ...artifact,
+    stationAreas: Array.from({ length: 33 }, (_, index) => artifact.stationAreas[index % artifact.stationAreas.length]!),
+  };
+  let interruptedCheckpoints = 0;
+  assert.throws(() => buildScheduledStationAreaCatalog(expandedArtifact, () => {
+    interruptedCheckpoints += 1;
+    if (interruptedCheckpoints === 2) throw new Error("deadline");
+  }), /deadline/);
+  assert.equal(interruptedCheckpoints, 2);
+  interruptedCheckpoints = 0;
+  const fullCatalog = buildScheduledStationAreaCatalog(expandedArtifact, () => {
+    interruptedCheckpoints += 1;
+  });
+  assert.equal(interruptedCheckpoints, 2);
+  const expectedEntryCount = expandedArtifact.stationAreas.filter((area) => baseCatalog.entries.some((entry) => entry.stationAreaId === area.id)).length;
+  assert.equal(fullCatalog.entries.length, expectedEntryCount);
+});
+
 test("v3 response validation rejects arrival and access seconds that are not minute-aligned", async () => {
   const parsed = parseScheduledMeetingRequest(V3_REQUEST);
   assert.equal(parsed.success, true);
@@ -942,6 +1120,7 @@ test("scheduled HTTP path handles fixture success, no seeds, and unavailable art
 });
 
 test("scheduled HTTP uses only MVG nearby access through the real endpoint seam", async () => {
+  clearMvgNearbyCache();
   const calls: string[] = [];
   const scheduledAccess = new MvgScheduledAccessSeedProvider({
     fetchImplementation: async (input) => {

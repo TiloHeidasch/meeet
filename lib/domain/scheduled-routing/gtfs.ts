@@ -13,12 +13,16 @@ import type {
   ScheduledRoutingArtifact,
   ScheduledSearchStartBounds,
   ScheduledStationArea,
+  ScheduledTransferNeighbor,
   ScheduledTrip,
   ServiceCalendar,
   ServiceException,
   StationAreaMode,
 } from "./models.ts";
+import { TRANSFER_NEIGHBOR_RADIUS_METERS } from "./models.ts";
+import { freezeScheduledArtifact } from "./freeze.ts";
 import { addServiceDays, parseOffsetInstant, serviceDateAnchorEpochSeconds } from "./time.ts";
+import { buildAreaSpatialIndex, findAreasWithinRadius, haversineDistanceMeters } from "./spatial.ts";
 
 export interface GtfsFeedFiles {
   readonly [fileName: string]: string;
@@ -213,7 +217,7 @@ export function importGtfsSchedule(
     provenance,
   };
   if (logProgress) logCompilerProgress(`GTFS import complete (feedId=${feedId}, serviceDateRange=${serviceDateRange.firstDate}..${serviceDateRange.lastDate})`);
-  return deepFreeze(artifact);
+  return freezeScheduledArtifact(artifact);
 }
 
 /** Short alias for callers treating the result as an imported snapshot. */
@@ -444,11 +448,11 @@ function createStationAreas(
   modesByArea: ReadonlyMap<string, ReadonlySet<StationAreaMode>>,
 ): ScheduledStationArea[] {
   const byId = new Map(stops.map((stop) => [stop.id, stop]));
-  const areas: ScheduledStationArea[] = [];
+  const baseAreas: ScheduledStationArea[] = [];
   for (const stop of stops) {
     if (stop.locationType === 1) {
       const mode = highestStationMode(modesByArea.get(stop.id));
-      areas.push({ id: stop.id, name: stop.name, coordinate: coordinateOf(stop), mode });
+      baseAreas.push({ id: stop.id, name: stop.name, coordinate: coordinateOf(stop), mode, transferNeighbors: [] });
     }
   }
   for (const stop of stops) {
@@ -459,10 +463,28 @@ function createStationAreas(
     }
     if (parent === null) {
       const mode = highestStationMode(modesByArea.get(stop.id));
-      areas.push({ id: stop.id, name: stop.name, coordinate: coordinateOf(stop), mode });
+      baseAreas.push({ id: stop.id, name: stop.name, coordinate: coordinateOf(stop), mode, transferNeighbors: [] });
     }
   }
-  return areas;
+  return attachTransferNeighbors(baseAreas);
+}
+
+/**
+ * Precompute, at compile time, the transfer-neighbor list for every station area
+ * within `TRANSFER_NEIGHBOR_RADIUS_METERS` (issue #76). The list is sorted by
+ * station-area id and always includes the area itself with `distanceMeters: 0`,
+ * matching the previous per-arrival spatial-query enumeration so routing results
+ * are identical for any runtime radius up to the precomputed radius.
+ */
+function attachTransferNeighbors(areas: ScheduledStationArea[]): ScheduledStationArea[] {
+  const index = buildAreaSpatialIndex(areas, TRANSFER_NEIGHBOR_RADIUS_METERS);
+  return areas.map((area) => {
+    const transferNeighbors: ScheduledTransferNeighbor[] = findAreasWithinRadius(index, area.coordinate, TRANSFER_NEIGHBOR_RADIUS_METERS).map((neighbor) => ({
+      stationAreaId: neighbor.id,
+      distanceMeters: haversineDistanceMeters(area.coordinate, neighbor.coordinate),
+    }));
+    return { ...area, transferNeighbors };
+  });
 }
 
 function parseTrips(table: CsvTable, routes: readonly ScheduledRoute[]): ScheduledTrip[] {
@@ -914,48 +936,96 @@ function sha256(value: string): string {
 
 function sha256Canonical(value: unknown): string {
   const hash = createHash("sha256");
-  writeCanonicalJson(hash, value);
+  const writer = new CanonicalHashWriter(hash);
+  writeCanonicalJson(writer, value);
+  writer.flush();
   return hash.digest("hex");
 }
 
-function writeCanonicalJson(hash: Hash, value: unknown): void {
+const CANONICAL_HASH_BATCH_BYTES = 64 * 1024;
+
+/** Batches canonical JSON without materializing the complete serialized value. */
+class CanonicalHashWriter {
+  private readonly chunks: string[] = [];
+  private pendingBytes = 0;
+
+  constructor(private readonly hash: Hash) {}
+
+  write(value: string): void {
+    let offset = 0;
+    while (offset < value.length) {
+      const availableBytes = CANONICAL_HASH_BATCH_BYTES - this.pendingBytes;
+      if (availableBytes === 0) {
+        this.flush();
+        continue;
+      }
+
+      if (offset === 0) {
+        const valueBytes = Buffer.byteLength(value, "utf8");
+        if (valueBytes <= availableBytes) {
+          this.chunks.push(value);
+          this.pendingBytes += valueBytes;
+          return;
+        }
+      }
+
+      let end = offset;
+      let chunkBytes = 0;
+      while (end < value.length) {
+        const codePoint = value.codePointAt(end);
+        if (codePoint === undefined) break;
+        const codeUnitLength = codePoint > 0xffff ? 2 : 1;
+        const codePointBytes = codePoint <= 0x7f ? 1 : codePoint <= 0x7ff ? 2 : codePoint <= 0xffff ? 3 : 4;
+        if (chunkBytes + codePointBytes > availableBytes) break;
+        chunkBytes += codePointBytes;
+        end += codeUnitLength;
+      }
+
+      if (end === offset) {
+        this.flush();
+        continue;
+      }
+      this.chunks.push(value.slice(offset, end));
+      this.pendingBytes += chunkBytes;
+      offset = end;
+      if (this.pendingBytes === CANONICAL_HASH_BATCH_BYTES) this.flush();
+    }
+  }
+
+  flush(): void {
+    if (this.pendingBytes === 0) return;
+    this.hash.update(this.chunks.join(""), "utf8");
+    this.chunks.length = 0;
+    this.pendingBytes = 0;
+  }
+}
+
+function writeCanonicalJson(writer: CanonicalHashWriter, value: unknown): void {
   if (value === null || typeof value === "string" || typeof value === "number" || typeof value === "boolean") {
     const encoded = JSON.stringify(value);
     if (encoded === undefined) throw new TypeError("Cannot hash an unsupported provenance value.");
-    hash.update(encoded, "utf8");
+    writer.write(encoded);
     return;
   }
   if (Array.isArray(value)) {
-    hash.update("[", "utf8");
+    writer.write("[");
     value.forEach((entry, index) => {
-      if (index > 0) hash.update(",", "utf8");
-      writeCanonicalJson(hash, entry);
+      if (index > 0) writer.write(",");
+      writeCanonicalJson(writer, entry);
     });
-    hash.update("]", "utf8");
+    writer.write("]");
     return;
   }
   if (typeof value === "object" && value !== null) {
-    hash.update("{", "utf8");
+    writer.write("{");
     Object.keys(value).sort((left, right) => left.localeCompare(right)).forEach((key, index) => {
-      if (index > 0) hash.update(",", "utf8");
-      hash.update(JSON.stringify(key), "utf8");
-      hash.update(":", "utf8");
-      writeCanonicalJson(hash, (value as Record<string, unknown>)[key]);
+      if (index > 0) writer.write(",");
+      writer.write(JSON.stringify(key));
+      writer.write(":");
+      writeCanonicalJson(writer, (value as Record<string, unknown>)[key]);
     });
-    hash.update("}", "utf8");
+    writer.write("}");
     return;
   }
   throw new TypeError("Cannot hash an unsupported provenance value.");
-}
-
-function deepFreeze<T>(value: T): T {
-  if (value !== null && typeof value === "object" && !Object.isFrozen(value)) {
-    if (Array.isArray(value)) {
-      for (const child of value) deepFreeze(child);
-    } else {
-      for (const child of Object.values(value)) deepFreeze(child);
-    }
-    Object.freeze(value);
-  }
-  return value;
 }

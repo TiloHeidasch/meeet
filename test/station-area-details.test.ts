@@ -132,6 +132,36 @@ test("details assemble terminal totals and arrival instants from the cached mark
   assert.equal(detailBody.basis.changeTimeSeconds, 300);
 });
 
+test("details reconstruct a consistent certified itinerary for available participants", async () => {
+  const cache = new InMemoryStationAreaCalculationBasisCache({ referenceFactory: () => "itinerary-reference" });
+  const calculate = await calculateRequest(cache);
+  assert.equal(calculate.status, 200);
+  const reference = calculate.headers.get("Meeet-Calculation-Ref")!;
+  const detail = await detailsRequest(reference, cache, "fixture-c");
+  assert.equal(detail.status, 200);
+  const detailBody = await detail.json() as {
+    participants: Array<{
+      status: string;
+      terminal: { totalSeconds: number | null };
+      itinerary: Array<{ kind: string; startEpochSeconds: number; endEpochSeconds: number; fromAreaId: string | null; toAreaId: string }> | null;
+    }>;
+    basis: { searchStartAt: string };
+  };
+  const searchStartEpochSeconds = Date.parse(detailBody.basis.searchStartAt) / 1_000;
+  for (const participant of detailBody.participants) {
+    assert.equal(participant.status, "available");
+    assert.ok(Array.isArray(participant.itinerary) && participant.itinerary.length > 0, "available participant must expose a non-empty itinerary");
+    const itinerary = participant.itinerary!;
+    assert.equal(itinerary[0]!.startEpochSeconds, searchStartEpochSeconds, "first leg starts at search start");
+    const last = itinerary[itinerary.length - 1]!;
+    assert.equal(last.endEpochSeconds, searchStartEpochSeconds + participant.terminal.totalSeconds!, "final arrival equals searchStart plus total");
+    for (const leg of itinerary) {
+      assert.ok(leg.endEpochSeconds >= leg.startEpochSeconds, "leg end must not precede start");
+      assert.ok(leg.toAreaId.length > 0, "leg must target a station area");
+    }
+  }
+});
+
 test("details reuse cached canonical seeds and never re-resolve access", async () => {
   let accessCalls = 0;
   const providers: MeetingProviders = {
@@ -341,6 +371,7 @@ test("ok surfaces expose cached unclassified markers as explicit unavailable det
     name: "Fixture Unclassified",
     coordinate: { latitude: 48.15, longitude: 11.65 },
     mode: "bus",
+    transferNeighbors: [],
   } as const;
   const unreachableConnection = {
     ...FIXTURE_SCHEDULED_ARTIFACT.connections[0]!,
