@@ -201,6 +201,7 @@ interface ScheduledScanState {
 
 interface ScheduledScanGraph {
   readonly stationById: Map<string, ScheduledStationArea>;
+  readonly stationIndexById: Map<string, number>;
   readonly connectionTable: ScheduledConnectionTable;
 }
 
@@ -216,6 +217,12 @@ interface ScheduledConnectionTable {
   readonly departureMinuteOffset: Uint32Array;
   readonly arrivalMinuteOffset: Uint32Array;
   readonly continuationRowPlusOne: Uint32Array;
+  readonly departureBucketStartRowIndex: Uint32Array;
+  readonly departureBucketEndRowIndex: Uint32Array;
+  readonly departureBucketAreaOffset: Uint32Array;
+  readonly departureBucketAreaStationIndex: Uint32Array;
+  readonly departureBucketAreaRowOffset: Uint32Array;
+  readonly departureBucketAreaRows: Uint32Array;
   readonly byteLength: number;
 }
 
@@ -228,10 +235,11 @@ function buildScheduledScanGraph(
   deadlineCheck?: ScheduledDeadlineCheck,
 ): ScheduledScanGraph {
   const stationById = new Map(schedule.stationAreas.map((area) => [area.id, area]));
+  const stationIndexById = new Map(schedule.stationAreas.map((area, index) => [area.id, index]));
   deadlineCheck?.("routing-scan");
   const connectionTable = connectionTableByWindow.get(window);
   if (connectionTable === undefined) throw new Error("Routing window is missing its private connection table.");
-  return { stationById, connectionTable };
+  return { stationById, stationIndexById, connectionTable };
 }
 
 function scanScheduledConnectionsForParticipant(
@@ -318,22 +326,17 @@ function scanScheduledConnectionsForParticipant(
 
   // Linear CSA with a bounded fixpoint for one departure-time bucket. This is
   // the shared scan used by the meeting surface.
-  let bucketStart = 0;
-  while (bucketStart < table.sourceConnectionIndex.length) {
+  for (let bucketIndex = 0; bucketIndex < table.departureBucketStartRowIndex.length; bucketIndex += 1) {
     resolvedOptions.deadlineCheck?.("routing-scan");
+    const bucketStart = table.departureBucketStartRowIndex[bucketIndex];
+    const bucketEnd = table.departureBucketEndRowIndex[bucketIndex];
+    if (bucketStart === undefined || bucketEnd === undefined) throw new Error("Compact routing table is missing a departure bucket.");
     const departureMinuteOffset = table.departureMinuteOffset[bucketStart];
-    if (departureMinuteOffset === undefined) break;
+    if (departureMinuteOffset === undefined) throw new Error("Compact routing bucket is missing its departure offset.");
     const departureEpochSeconds = window.searchStartEpochSeconds + departureMinuteOffset * 60;
-    let bucketEnd = bucketStart + 1;
-    while (bucketEnd < table.sourceConnectionIndex.length && table.departureMinuteOffset[bucketEnd] === departureMinuteOffset) bucketEnd += 1;
-    const byFromArea = new Map<string, number[]>();
-    for (let index = bucketStart; index < bucketEnd; index += 1) {
-      if ((index - bucketStart) % ROUTING_CONNECTION_CHECKPOINT === 0) resolvedOptions.deadlineCheck?.("routing-scan");
-      const source = sourceForRow(index);
-      const current = byFromArea.get(source.fromStationAreaId) ?? [];
-      current.push(index);
-      byFromArea.set(source.fromStationAreaId, current);
-    }
+    const areaStart = table.departureBucketAreaOffset[bucketIndex];
+    const areaEnd = table.departureBucketAreaOffset[bucketIndex + 1];
+    if (areaStart === undefined || areaEnd === undefined) throw new Error("Compact routing bucket is missing its source-area index.");
     const queue: number[] = [];
     const enqueueConnection = (rowIndex: number): void => {
       if (queuedOrProcessedRows[rowIndex] === 1) return;
@@ -345,7 +348,16 @@ function scanScheduledConnectionsForParticipant(
       queue.push(rowIndex);
     };
     enqueueForArea = (areaId) => {
-      for (const rowIndex of byFromArea.get(areaId) ?? []) enqueueConnection(rowIndex);
+      const stationIndex = graph.stationIndexById.get(areaId);
+      if (stationIndex === undefined) return;
+      for (let areaIndex = areaStart; areaIndex < areaEnd; areaIndex += 1) {
+        if (table.departureBucketAreaStationIndex[areaIndex] !== stationIndex) continue;
+        const rowStart = table.departureBucketAreaRowOffset[areaIndex];
+        const rowEnd = table.departureBucketAreaRowOffset[areaIndex + 1];
+        if (rowStart === undefined || rowEnd === undefined) throw new Error("Compact routing source-area index is missing row offsets.");
+        for (let rowOffset = rowStart; rowOffset < rowEnd; rowOffset += 1) enqueueConnection(table.departureBucketAreaRows[rowOffset]!);
+        return;
+      }
     };
     for (let index = bucketStart; index < bucketEnd; index += 1) {
       if ((index - bucketStart) % ROUTING_CONNECTION_CHECKPOINT === 0) resolvedOptions.deadlineCheck?.("routing-scan");
@@ -383,7 +395,6 @@ function scanScheduledConnectionsForParticipant(
       }
     }
     enqueueForArea = null;
-    bucketStart = bucketEnd;
   }
   return { earliestArrivalByArea, window, parsedStartEpochSeconds: window.searchStartEpochSeconds, predecessorByArea };
 }
@@ -657,7 +668,7 @@ function materializeConnections(
     mergedConnections += 1;
     if (advanceScheduledConnectionDateCursor(entry.cursor, schedule.connections, deadlineCheck)) heap.push(entry);
   }
-  return tableBuilder.finish(schedule.connections, instrumentation.onMaterializedConnection);
+  return tableBuilder.finish(schedule.connections, schedule.stationAreas, instrumentation.onMaterializedConnection);
 }
 
 interface ScheduledConnectionDateCursor {
@@ -806,14 +817,21 @@ class ScheduledConnectionTableBuilder {
 
   finish(
     connections: readonly ScheduledConnection[],
+    stationAreas: readonly ScheduledStationArea[],
     onMaterializedConnection?: (connection: ScheduledRoutingMaterializedConnection) => void,
   ): ScheduledConnectionTable {
-    const table: ScheduledConnectionTable = {
-      sourceConnectionIndex: this.flatten("sourceConnectionIndex"),
-      departureMinuteOffset: this.flatten("departureMinuteOffset"),
+    const sourceConnectionIndex = this.flatten("sourceConnectionIndex");
+    const departureMinuteOffset = this.flatten("departureMinuteOffset");
+    const tableWithoutByteLength = {
+      sourceConnectionIndex,
+      departureMinuteOffset,
       arrivalMinuteOffset: this.flatten("arrivalMinuteOffset"),
       continuationRowPlusOne: this.flatten("continuationRowPlusOne"),
-      byteLength: this.count * Uint32Array.BYTES_PER_ELEMENT * 4,
+      ...buildDepartureBucketIndex(sourceConnectionIndex, departureMinuteOffset, connections, stationAreas),
+    };
+    const table: ScheduledConnectionTable = {
+      ...tableWithoutByteLength,
+      byteLength: compactTableByteLength(tableWithoutByteLength),
     };
     this.onMaterializationCheckpoint?.(this.count);
     if (onMaterializedConnection !== undefined) {
@@ -857,6 +875,53 @@ class ScheduledConnectionTableBuilder {
     }
     return values;
   }
+}
+
+function buildDepartureBucketIndex(
+  sourceConnectionIndex: Uint32Array,
+  departureMinuteOffset: Uint32Array,
+  connections: readonly ScheduledConnection[],
+  stationAreas: readonly ScheduledStationArea[],
+): Omit<ScheduledConnectionTable, "sourceConnectionIndex" | "departureMinuteOffset" | "arrivalMinuteOffset" | "continuationRowPlusOne" | "byteLength"> {
+  const stationIndexById = new Map(stationAreas.map((area, index) => [area.id, index]));
+  const bucketStarts: number[] = [];
+  const bucketEnds: number[] = [];
+  const bucketAreaOffsets: number[] = [0];
+  const bucketAreaStationIndexes: number[] = [];
+  const bucketAreaRowOffsets: number[] = [0];
+  const bucketAreaRows: number[] = [];
+  let bucketStart = 0;
+  while (bucketStart < sourceConnectionIndex.length) {
+    let bucketEnd = bucketStart + 1;
+    while (bucketEnd < sourceConnectionIndex.length && departureMinuteOffset[bucketEnd] === departureMinuteOffset[bucketStart]) bucketEnd += 1;
+    const rowsByStationIndex = new Map<number, number[]>();
+    for (let rowIndex = bucketStart; rowIndex < bucketEnd; rowIndex += 1) {
+      const source = connections[sourceConnectionIndex[rowIndex] ?? -1];
+      const stationIndex = source === undefined ? undefined : stationIndexById.get(source.fromStationAreaId);
+      if (stationIndex === undefined) throw new Error("Compact routing row references a missing departure station area.");
+      const rows = rowsByStationIndex.get(stationIndex) ?? [];
+      rows.push(rowIndex);
+      rowsByStationIndex.set(stationIndex, rows);
+    }
+    bucketStarts.push(bucketStart);
+    bucketEnds.push(bucketEnd);
+    for (const [stationIndex, rows] of rowsByStationIndex) {
+      bucketAreaStationIndexes.push(stationIndex);
+      bucketAreaRows.push(...rows);
+      bucketAreaRowOffsets.push(bucketAreaRows.length);
+    }
+    bucketAreaOffsets.push(bucketAreaStationIndexes.length);
+    bucketStart = bucketEnd;
+  }
+  return {
+    departureBucketStartRowIndex: Uint32Array.from(bucketStarts), departureBucketEndRowIndex: Uint32Array.from(bucketEnds),
+    departureBucketAreaOffset: Uint32Array.from(bucketAreaOffsets), departureBucketAreaStationIndex: Uint32Array.from(bucketAreaStationIndexes),
+    departureBucketAreaRowOffset: Uint32Array.from(bucketAreaRowOffsets), departureBucketAreaRows: Uint32Array.from(bucketAreaRows),
+  };
+}
+
+function compactTableByteLength(table: Omit<ScheduledConnectionTable, "byteLength">): number {
+  return table.sourceConnectionIndex.byteLength + table.departureMinuteOffset.byteLength + table.arrivalMinuteOffset.byteLength + table.continuationRowPlusOne.byteLength + table.departureBucketStartRowIndex.byteLength + table.departureBucketEndRowIndex.byteLength + table.departureBucketAreaOffset.byteLength + table.departureBucketAreaStationIndex.byteLength + table.departureBucketAreaRowOffset.byteLength + table.departureBucketAreaRows.byteLength;
 }
 
 function minuteOffset(epochSeconds: number, searchStartEpochSeconds: number): number {

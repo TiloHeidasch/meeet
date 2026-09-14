@@ -815,8 +815,9 @@ test("compact table byte metrics are exposed and table eviction removes linked w
   createScheduledRoutingWindow(schedule, "2026-08-12T08:05:00+02:00", options);
   createScheduledRoutingWindow(schedule, "2026-08-13T08:05:00+02:00", options);
 
-  assert.equal(first.compactTableByteLength, first.connectionCount * 4 * Uint32Array.BYTES_PER_ELEMENT);
-  assert.ok(first.compactTableByteLength > 0);
+  const connectionRowsByteLength = first.connectionCount * 4 * Uint32Array.BYTES_PER_ELEMENT;
+  assert.ok(first.compactTableByteLength > connectionRowsByteLength);
+  assert.ok(first.compactTableByteLength % Uint32Array.BYTES_PER_ELEMENT === 0);
   // A wrapper hit also refreshes its linked table. The first wrapper/table
   // pair therefore survives insertion of the fifth distinct search epoch,
   // while the untouched second pair is evicted.
