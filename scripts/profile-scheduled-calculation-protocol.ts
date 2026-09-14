@@ -490,7 +490,8 @@ function isRoutingDiagnostics(value: unknown): value is RoutingDiagnostics {
 
 function isRoutingWindowMetadata(value: unknown): value is RoutingDiagnostics["routingWindow"] {
   return isRecord(value) && isSafeCount(value.connectionCount) && isSafeCount(value.compactTableByteLength) &&
-    value.compactTableByteLength === value.connectionCount * 4 * Uint32Array.BYTES_PER_ELEMENT;
+    value.compactTableByteLength >= value.connectionCount * 4 * Uint32Array.BYTES_PER_ELEMENT &&
+    value.compactTableByteLength % Uint32Array.BYTES_PER_ELEMENT === 0;
 }
 
 function isColdRoutingWindowProbe(value: unknown): value is ColdRoutingWindowProbe {
@@ -502,7 +503,8 @@ function isColdRoutingWindowProbe(value: unknown): value is ColdRoutingWindowPro
     !isMemorySnapshot(value.memoryBefore) || !isMemorySnapshot(value.memoryAfter) || !isMemoryDelta(value.memoryDelta) ||
     !isMemorySnapshot(value.peakMemory) || !isGcSnapshot(value.gcBefore) || !isGcSnapshot(value.gcAfter) || !isGcDelta(value.gcDelta) ||
     !isPostGcMemoryReport(value.postGcMemory)) return false;
-  if (value.compactTableByteLength !== value.connectionCount * 4 * Uint32Array.BYTES_PER_ELEMENT ||
+  if (value.compactTableByteLength < value.connectionCount * 4 * Uint32Array.BYTES_PER_ELEMENT ||
+    value.compactTableByteLength % Uint32Array.BYTES_PER_ELEMENT !== 0 ||
     value.materializedConnectionCount !== value.connectionCount ||
     value.sampleIntervalConnections !== ROUTING_WINDOW_SAMPLE_INTERVAL_CONNECTIONS ||
     value.checkpointSampleCount !== expectedRoutingWindowCheckpointSampleCount(value.materializedConnectionCount) ||
